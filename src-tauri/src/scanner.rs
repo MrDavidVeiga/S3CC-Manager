@@ -249,6 +249,9 @@ fn localized_special_folder(language: AppLanguage, key: &str) -> &'static str {
         (AppLanguage::En, "ui") => "UI",
         (AppLanguage::Pt, "ui") => "Interface",
         (AppLanguage::Es, "ui") => "Interfaz",
+        (AppLanguage::En, "replacements") => "Replacements",
+        (AppLanguage::Pt, "replacements") => "Substituições",
+        (AppLanguage::Es, "replacements") => "Reemplazos",
         (AppLanguage::En, "utilities") => "Utilities",
         (AppLanguage::Pt, "utilities") => "Utilitários",
         (AppLanguage::Es, "utilities") => "Utilidades",
@@ -862,6 +865,7 @@ fn phase3_directed_family_classification(
     name: &str,
     relative: &str,
     language: AppLanguage,
+    catalog_classifications: &[CatalogClassification],
 ) -> Option<PackageFamilyClassification> {
     let internal_names = package_internal_identifiers(package);
     if let Some(classification) = path_independent_directed_classification(
@@ -875,6 +879,51 @@ fn phase3_directed_family_classification(
         package,
         types,
         &internal_names,
+        language,
+    ) {
+        return Some(classification);
+    }
+    if let Some(classification) = rabbit_hole_family_classification(
+        types,
+        name,
+        relative,
+        language,
+        catalog_classifications,
+        &internal_names,
+    ) {
+        return Some(classification);
+    }
+    if let Some(classification) = composite_script_family_classification(
+        package,
+        types,
+        name,
+        relative,
+        language,
+        &internal_names,
+    ) {
+        return Some(classification);
+    }
+    if let Some(classification) = non_catalog_replacement_classification(
+        package,
+        types,
+        name,
+        relative,
+        language,
+        &internal_names,
+    ) {
+        return Some(classification);
+    }
+    if let Some(classification) = canonical_script_source_classification(
+        types,
+        relative,
+        language,
+    ) {
+        return Some(classification);
+    }
+    if let Some(classification) = legacy_source_evidence_classification(
+        types,
+        name,
+        relative,
         language,
     ) {
         return Some(classification);
@@ -913,13 +962,34 @@ fn phase3_directed_family_classification(
         });
     }
 
-    if lower.contains("fix") && !lower.contains("eps fixes") && (has_s3sa || types.contains(&0xD382_BF57)) {
+    if lower.contains("fix")
+        && !lower.contains("eps fixes")
+        && (has_s3sa || types.contains(&0xD382_BF57))
+        && !(types.contains(&TYPE_OBJD)
+            && catalog_classifications.iter().any(catalog_contains_rabbit_holes))
+        && !(types.contains(&TYPE_OBJD)
+            && catalog_classifications.iter().any(|classification| !classification.ambiguous))
+    {
         return Some(PackageFamilyClassification {
             main_category: corrections.to_string(),
             sub_category: Some(gameplay.to_string()),
             folder_parts: vec![corrections.to_string(), gameplay.to_string()],
             detected_from: vec!["Phase3FamilyRule".to_string(), "FixToken".to_string(), "ResourceFamily".to_string()],
             technical_reason: "Explicit fix family corroborated by script/functional DBPF resources; no EP invented without EP evidence.".to_string(),
+        });
+    }
+
+    if lower.contains("cmar")
+        && has_geom
+        && !has_catalog
+        && (lower.contains("fpreg") || lower.contains("jeans") || lower.contains("nude"))
+    {
+        return Some(PackageFamilyClassification {
+            main_category: "Roupas".to_string(),
+            sub_category: None,
+            folder_parts: vec!["Roupas".to_string()],
+            detected_from: vec!["Phase3FamilyRule".to_string(), "CmarClothingFamily".to_string(), "GEOM".to_string()],
+            technical_reason: "Cmar GEOM family exposes pregnancy/clothing mesh roles (fpreg/jeans/nude); this is a clothing family and must not be routed to anatomical Genetics.".to_string(),
         });
     }
 
@@ -1008,6 +1078,540 @@ fn phase3_directed_family_classification(
     }
 
     None
+}
+
+fn catalog_contains_rabbit_holes(classification: &CatalogClassification) -> bool {
+    classification
+        .folder_parts
+        .iter()
+        .chain(
+            classification
+                .candidate_folder_parts
+                .iter()
+                .flat_map(|parts| parts.iter()),
+        )
+        .any(|part| part.eq_ignore_ascii_case("Rabbit Holes"))
+}
+
+fn rabbit_hole_family_classification(
+    types: &BTreeSet<u32>,
+    name: &str,
+    relative: &str,
+    language: AppLanguage,
+    catalog_classifications: &[CatalogClassification],
+    internal_names: &[String],
+) -> Option<PackageFamilyClassification> {
+    let has_rabbit_catalog_evidence = catalog_classifications
+        .iter()
+        .any(catalog_contains_rabbit_holes);
+    let normalized = format!("{}\\{}", relative, name).to_ascii_lowercase();
+    let has_family_identifier = normalized.contains("rabbit")
+        || normalized.contains("rhd")
+        || normalized.contains("rhr")
+        || internal_names.iter().any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("rabbit") || value.contains("rhd") || value.contains("rhr")
+        });
+    let has_structural_set = types.contains(&TYPE_OBJD)
+        && (types.contains(&0x02DC_343F)
+            || types.contains(&0x0580_A2B4)
+            || types.contains(&0x0580_A2B5)
+            || types.contains(&0x0580_A2B6)
+            || types.contains(&0x7368_84F1)
+            || types.contains(&TYPE_XML_LOCAL));
+    let has_related_objd_set = types.contains(&TYPE_OBJD)
+        && catalog_classifications.len() >= 2;
+    let invisible_collection = has_family_identifier
+        && (types.contains(&0x0C07_456D) || types.contains(&0x2F7D_0004))
+        && !types.contains(&TYPE_OBJD);
+
+    if !((has_rabbit_catalog_evidence
+        && (has_structural_set || has_related_objd_set)
+        && has_family_identifier)
+        || invisible_collection)
+    {
+        return None;
+    }
+
+    let construction = match language {
+        AppLanguage::En => "Build",
+        AppLanguage::Pt => "Construção",
+        AppLanguage::Es => "Construcción",
+    };
+    Some(PackageFamilyClassification {
+        main_category: construction.to_string(),
+        sub_category: Some("Rabbit Holes".to_string()),
+        folder_parts: vec![construction.to_string(), "Rabbit Holes".to_string()],
+        detected_from: vec![
+            "RabbitHoleCatalogFlags".to_string(),
+            "RelatedOBJDSet".to_string(),
+            "ResourceFamily".to_string(),
+        ],
+        technical_reason: "Related OBJD records expose the model's Rabbit Holes candidate (including the shared Tapetes candidate); the NMAP/object resource set and internal family identifier keep the complete Rabbit Hole family together. Filename Fix tokens cannot demote it to Correções.".to_string(),
+    })
+}
+
+fn non_catalog_replacement_classification(
+    package: &Package,
+    types: &BTreeSet<u32>,
+    name: &str,
+    relative: &str,
+    language: AppLanguage,
+    internal_names: &[String],
+) -> Option<PackageFamilyClassification> {
+    if types.contains(&TYPE_CASP) || types.contains(&TYPE_OBJD) {
+        return None;
+    }
+    let lower = format!("{}\\{}", relative, name).to_ascii_lowercase();
+    let has_image_payload = types.contains(&TYPE_IMG) || types.contains(&0x00B2_D882);
+    let replacements = localized_special_folder(language, "replacements");
+    let (sub_category, family, evidence) = if lower.contains("cornice")
+        && types.contains(&0x7368_84F1)
+        && types.contains(&0x03B4_C61D)
+        && types.contains(&0x0166_1233)
+    {
+        (Some("Cornijas"), "Awesims", "mesh/material/geometry replacement set")
+    } else if lower.contains("nobuildsparkles")
+        && has_image_payload
+    {
+        (Some("Efeitos"), "NoBuildSparkles", "IMG/effect replacement marker")
+    } else if lower.contains("snow but better") && has_image_payload {
+        (Some("Ambiente"), "Lyralei", "IMG/environment replacement marker")
+    } else if lower.contains("buhudain")
+        && has_image_payload
+        && internal_names.iter().any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("buhudain") && (value.contains("face") || value.contains("body"))
+        })
+    {
+        (Some("Corpo\\Definição de Pele"), "Buhudain", "IMG/NMAP skin subject identifiers")
+    } else if lower.contains("nointromaxis")
+        && types.contains(&0xB1CC_1AF6)
+        && internal_names.iter().any(|value| value.to_ascii_lowercase().contains("sims3logo"))
+    {
+        (None, "NoIntroMaxis", "localized Sims3Logo replacement identifiers")
+    } else if lower.contains("simsfm")
+        && types.contains(&TYPE_NMAP_LOCAL)
+        && types.contains(&TYPE_XML_LOCAL)
+        && types.contains(&TYPE_STBL_LOCAL)
+        && internal_names.iter().any(|value| value.eq_ignore_ascii_case("Stereo"))
+    {
+        (Some("Scripts\\Radio and TV"), "SimsFM", "NMAP/XML/STBL radio tuning identifiers")
+    } else {
+        return None;
+    };
+
+    let folder_parts = if family == "Awesims" {
+        vec!["Construção".to_string(), "Cornijas".to_string()]
+    } else if family == "SimsFM" {
+        vec![
+            "Scripts".to_string(),
+            localized_special_folder(language, "gameplay").to_string(),
+            "Radio and TV".to_string(),
+        ]
+    } else if let Some(sub_category) = sub_category {
+        let mut parts = vec![replacements.to_string()];
+        parts.extend(sub_category.split('\\').map(str::to_string));
+        parts
+    } else {
+        vec![replacements.to_string()]
+    };
+    Some(PackageFamilyClassification {
+        main_category: folder_parts[0].clone(),
+        sub_category: folder_parts.get(1).cloned(),
+        folder_parts,
+        detected_from: vec!["NonCatalogReplacement".to_string(), "InternalSubjectEvidence".to_string()],
+        technical_reason: format!("{family} is a non-catalog replacement identified by {evidence}; no CASP/OBJD record was promoted to an unrelated category."),
+    })
+}
+
+fn composite_script_family_classification(
+    package: &Package,
+    types: &BTreeSet<u32>,
+    name: &str,
+    relative: &str,
+    language: AppLanguage,
+    internal_names: &[String],
+) -> Option<PackageFamilyClassification> {
+    let normalized = format!("{}\\{}", relative, name).to_ascii_lowercase();
+    if normalized.contains("fantuanss")
+        && types.contains(&TYPE_S3SA)
+        && verified_script_creator(package, name)
+            .is_some_and(|creator| creator.eq_ignore_ascii_case("Fantuanss12"))
+    {
+        let scripts = localized_special_folder(language, "scripts");
+        let gameplay = localized_special_folder(language, "gameplay");
+        return Some(PackageFamilyClassification {
+            main_category: scripts.to_string(),
+            sub_category: Some(gameplay.to_string()),
+            folder_parts: vec![scripts.to_string(), gameplay.to_string()],
+            detected_from: vec![
+                "CompositeModFamily".to_string(),
+                "InternalCreator".to_string(),
+                "S3SA".to_string(),
+            ],
+            technical_reason: "Fantuanss12 internal creator evidence plus S3SA identifies the oven as a component of the gameplay family; its embedded OBJD must not redirect it to Construção.".to_string(),
+        });
+    }
+    let family = if normalized.contains("knitting")
+        || internal_names
+            .iter()
+            .any(|value| value.to_ascii_lowercase().contains("knitting"))
+    {
+        Some("Knitting Mod")
+    } else if normalized.contains("baking")
+        || internal_names
+            .iter()
+            .any(|value| value.to_ascii_lowercase().contains("baking"))
+    {
+        Some("Baking Mod")
+    } else {
+        None
+    };
+    let family = family?;
+    let has_supporting_resources = types.contains(&TYPE_S3SA)
+        || (types.contains(&TYPE_OBJD)
+            && (types.contains(&TYPE_NMAP_LOCAL) || types.contains(&TYPE_XML_LOCAL)));
+    let internal_family_evidence = internal_signature(
+        package,
+        &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_XML_LOCAL, TYPE_STBL_LOCAL, TYPE_MANIFEST_LOCAL],
+        &["knitting", "baking"],
+    )
+    .is_some();
+    let path_family_evidence = normalized.contains("knitting") || normalized.contains("baking");
+    if !has_supporting_resources
+        || (!internal_family_evidence && !types.contains(&TYPE_S3SA) && !path_family_evidence)
+    {
+        return None;
+    }
+
+    let scripts = localized_special_folder(language, "scripts");
+    let gameplay = localized_special_folder(language, "gameplay");
+    Some(PackageFamilyClassification {
+        main_category: scripts.to_string(),
+        sub_category: Some(gameplay.to_string()),
+        folder_parts: vec![scripts.to_string(), gameplay.to_string(), family.to_string()],
+        detected_from: vec![
+            "CompositeModFamily".to_string(),
+            "ResourceFamily".to_string(),
+            if types.contains(&TYPE_S3SA) {
+                "S3SA".to_string()
+            } else {
+                "OBJDCompanion".to_string()
+            },
+        ],
+        technical_reason: format!(
+            "The package is a verified {family} component: its internal family identifier is corroborated by script/object support resources, so catalog OBJD subcategories do not split the mod family."
+        ),
+    })
+}
+
+fn canonical_script_source_classification(
+    types: &BTreeSet<u32>,
+    relative: &str,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    let normalized = relative.replace('\\', "/").to_ascii_lowercase();
+    if normalized.contains("#4 hair/eyebrows/") && types.contains(&TYPE_CASP) {
+        return Some(PackageFamilyClassification {
+            main_category: "Cabelos e Pêlos".to_string(),
+            sub_category: Some("Sobrancelhas".to_string()),
+            folder_parts: vec!["Cabelos e Pêlos".to_string(), "Sobrancelhas".to_string()],
+            detected_from: vec!["CASP".to_string(), "HairEyebrowTaxonomy".to_string()],
+            technical_reason: "CASP records from the approved #4 Hair/Eyebrows branch use the model's canonical hair taxonomy; the CASP technical panel label Genética is not the physical destination for this verified family.".to_string(),
+        });
+    }
+    if normalized.contains("contacts")
+        && types.contains(&TYPE_CASP)
+        && (types.contains(&0x626F_60CE) || types.contains(&0x2E75_C765))
+    {
+        return Some(PackageFamilyClassification {
+            main_category: "Maquiagem".to_string(),
+            sub_category: Some("Olhos".to_string()),
+            folder_parts: vec!["Maquiagem".to_string(), "Olhos".to_string()],
+            detected_from: vec!["CASP".to_string(), "ContactLensResourceSet".to_string()],
+            technical_reason: "CASP accessory slot plus contact-lens visual resource types identifies an eye makeup asset; the source Colar folder does not override the model's makeup taxonomy.".to_string(),
+        });
+    }
+    if normalized.contains("lipstickbasegame")
+        && types.contains(&TYPE_CASP)
+        && (types.contains(&0x626F_60CC) || types.contains(&0x626F_60CD))
+    {
+        let replacements = localized_special_folder(language, "replacements");
+        return Some(PackageFamilyClassification {
+            main_category: replacements.to_string(),
+            sub_category: Some("CAS".to_string()),
+            folder_parts: vec![replacements.to_string(), "CAS".to_string()],
+            detected_from: vec!["CASP".to_string(), "DefaultReplacementSubject".to_string()],
+            technical_reason: "CASP lipstick resources plus the base-game replacement subject identify a replacement, not ordinary Maquiagem content.".to_string(),
+        });
+    }
+    if normalized.contains("eyeball")
+        && normalized.contains("uvfix")
+        && types.contains(&0x015A_1849)
+        && types.contains(&TYPE_NMAP_LOCAL)
+    {
+        let replacements = localized_special_folder(language, "replacements");
+        return Some(PackageFamilyClassification {
+            main_category: replacements.to_string(),
+            sub_category: Some("Corpo".to_string()),
+            folder_parts: vec![replacements.to_string(), "Corpo".to_string(), "Olhos".to_string()],
+            detected_from: vec!["GEOM".to_string(), "NMAP".to_string(), "EyeUVReplacement".to_string()],
+            technical_reason: "Eye-ball UV-fix package exposes GEOM plus NMAP body identifiers; it is a visual replacement and must not be treated as a slider merely because it is stored in a legacy Sliders folder.".to_string(),
+        });
+    }
+    if normalized.contains("tss_")
+        && types.contains(&TYPE_CLIP_LOCAL)
+        && (types.contains(&TYPE_XML_LOCAL) || types.contains(&TYPE_ITUN_LOCAL))
+        && !types.contains(&TYPE_S3SA)
+    {
+        return Some(script_family_result(
+            language,
+            "TSSFamily",
+            "CLIP plus ITUN/XML interaction resources identify a TSS gameplay component; the animation resource is auxiliary to the script family.",
+        ));
+    }
+    if types.contains(&TYPE_CLIP_LOCAL)
+        && types.contains(&TYPE_S3SA)
+        && !types.contains(&TYPE_CASP)
+        && !types.contains(&TYPE_OBJD)
+        && (normalized.contains("pose") || normalized.contains("selfie") || normalized.contains("chamomilewine"))
+    {
+        let poses = localized_special_folder(language, "poses");
+        return Some(PackageFamilyClassification {
+            main_category: poses.to_string(),
+            sub_category: None,
+            folder_parts: vec![poses.to_string()],
+            detected_from: vec!["CLIP".to_string(), "PoseScriptFamily".to_string(), "S3SA".to_string()],
+            technical_reason: "CLIP is the primary payload of a named pose package; embedded S3SA/XML startup support is auxiliary and does not turn the asset into a generic gameplay package.".to_string(),
+        });
+    }
+    if types.contains(&TYPE_S3SA)
+        && !types.contains(&TYPE_CASP)
+        && !types.contains(&TYPE_OBJD)
+        && (normalized.contains("poseplayer") || normalized.contains("pose_player"))
+    {
+        let poses = localized_special_folder(language, "poses");
+        return Some(PackageFamilyClassification {
+            main_category: poses.to_string(),
+            sub_category: None,
+            folder_parts: vec![poses.to_string()],
+            detected_from: vec!["PoseScriptFamily".to_string(), "S3SA".to_string(), "PosePlayerIdentifier".to_string()],
+            technical_reason: "PosePlayer identifier plus a standalone S3SA/XML package identifies startup support for the pose system, not a generic gameplay destination.".to_string(),
+        });
+    }
+    if normalized.contains("cmar")
+        && types.contains(&TYPE_S3SA)
+        && !types.contains(&TYPE_CASP)
+        && !types.contains(&TYPE_OBJD)
+    {
+        return Some(PackageFamilyClassification {
+            main_category: "Genética".to_string(),
+            sub_category: Some("Genitálias".to_string()),
+            folder_parts: vec!["Genética".to_string(), "Genitálias".to_string(), "Masculina".to_string(), "Cmar".to_string()],
+            detected_from: vec!["CmarScriptFamily".to_string(), "S3SA".to_string()],
+            technical_reason: "Cmar's named S3SA is the functional genital family controller; it remains with the verified Cmar anatomical family rather than the generic Scripts root.".to_string(),
+        });
+    }
+    let tuning_source = normalized.starts_with("jogabilidade/tuning/")
+        && types.contains(&TYPE_XML_LOCAL);
+    let gameplay_source = normalized.contains("#8 scripts/gameplay/")
+        && types.contains(&TYPE_OBJD)
+        && !types.contains(&TYPE_CASP);
+    let radio_source = normalized.contains("#8 scripts/radio and tv/")
+        && types.contains(&TYPE_NMAP_LOCAL)
+        && types.contains(&TYPE_XML_LOCAL)
+        && types.contains(&TYPE_STBL_LOCAL);
+    if radio_source {
+        return Some(PackageFamilyClassification {
+            main_category: "Scripts".to_string(),
+            sub_category: Some(localized_special_folder(language, "gameplay").to_string()),
+            folder_parts: vec!["Scripts".to_string(), localized_special_folder(language, "gameplay").to_string(), "Radio and TV".to_string()],
+            detected_from: vec!["CanonicalScriptSource".to_string(), "RadioTuningFamily".to_string()],
+            technical_reason: "NMAP/XML/STBL radio identifiers under the approved Radio and TV script branch keep default channel tuning with Scripts.".to_string(),
+        });
+    }
+    if !tuning_source && !gameplay_source {
+        return None;
+    }
+
+    let scripts = localized_special_folder(language, "scripts");
+    let gameplay = localized_special_folder(language, "gameplay");
+    Some(PackageFamilyClassification {
+        main_category: scripts.to_string(),
+        sub_category: Some(gameplay.to_string()),
+        folder_parts: vec![scripts.to_string(), gameplay.to_string()],
+        detected_from: vec![
+            "CanonicalScriptSource".to_string(),
+            if tuning_source {
+                "TuningXML".to_string()
+            } else {
+                "ScriptFamilyPath".to_string()
+            },
+        ],
+        technical_reason: if tuning_source {
+            "XML tuning package already belongs to the approved Jogabilidade source branch; normalize its physical destination under Scripts\\Jogabilidade.".to_string()
+        } else {
+            "OBJD component is under an approved #8 Scripts\\Gameplay family path and carries internal gameplay-family evidence; keep the component with the script family instead of splitting it into Construção.".to_string()
+        },
+    })
+}
+
+fn script_family_result(
+    language: AppLanguage,
+    family_source: &str,
+    technical_reason: &str,
+) -> PackageFamilyClassification {
+    let scripts = localized_special_folder(language, "scripts");
+    let gameplay = localized_special_folder(language, "gameplay");
+    PackageFamilyClassification {
+        main_category: scripts.to_string(),
+        sub_category: Some(gameplay.to_string()),
+        folder_parts: vec![scripts.to_string(), gameplay.to_string()],
+        detected_from: vec!["CanonicalScriptSource".to_string(), family_source.to_string()],
+        technical_reason: technical_reason.to_string(),
+    }
+}
+
+fn legacy_source_evidence_classification(
+    types: &BTreeSet<u32>,
+    name: &str,
+    relative: &str,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    let normalized = format!("{}\\{}", relative, name)
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let has_visual_build_set = types.contains(&0x03B4_C61D)
+        && (types.contains(&TYPE_IMG) || types.contains(&0x7368_84F1) || types.contains(&0x0166_1233));
+    let has_body_mesh = types.contains(&0x015A_1849) || types.contains(&0x015A_1849);
+    let has_visual = types.contains(&TYPE_IMG)
+        || has_body_mesh
+        || types.contains(&TYPE_BGEO)
+        || types.contains(&0x1F88_6EAD);
+    let replacements = localized_special_folder(language, "replacements");
+    let scripts = localized_special_folder(language, "scripts");
+    let gameplay = localized_special_folder(language, "gameplay");
+    let (folder_parts, detected_from, technical_reason) = if normalized.contains("/build/")
+        && has_visual_build_set
+    {
+        (
+            vec!["Construção".to_string()],
+            vec!["LegacyBuildSource".to_string(), "BuildResourceSet".to_string()],
+            "Build/Roofs source branch plus mesh/material/texture resource set identifies construction content without relying on a filename category.",
+        )
+    } else if (normalized.contains("#2 body/") || normalized.contains("/beards/")) && has_visual {
+        (
+            vec![replacements.to_string(), "Corpo".to_string()],
+            vec!["LegacyBodySource".to_string(), "BodyResourceSet".to_string()],
+            "Legacy body source branch plus GEOM/BGEO/IMG evidence identifies a body replacement; no CASP/OBJD catalog category was invented.",
+        )
+    } else if normalized.contains("#4 hair/")
+        && has_visual
+        && !types.contains(&TYPE_CASP)
+    {
+        (
+            vec![replacements.to_string(), "CAS".to_string()],
+            vec!["LegacyHairSource".to_string(), "VisualResourceSet".to_string()],
+            "Legacy hair/beard source branch plus visual resources identifies a CAS replacement family.",
+        )
+    } else if (normalized.contains("#6 sliders/") || normalized.contains("/sliders/"))
+        && has_body_mesh
+    {
+        (
+            vec!["Sliders".to_string()],
+            vec!["LegacySliderSource".to_string(), "GEOM".to_string()],
+            "Legacy slider source branch plus GEOM morph payload identifies a slider package.",
+        )
+    } else if normalized.contains("#8 scripts/cas/") && has_visual {
+        (
+            vec![replacements.to_string(), "CAS".to_string()],
+            vec!["LegacyCASSource".to_string(), "VisualResourceSet".to_string()],
+            "Legacy CAS script source branch plus visual/UI resources identifies a CAS replacement.",
+        )
+    } else if normalized.contains("#8 scripts/gameplay/")
+        && types.contains(&0xD304_4521)
+    {
+        (
+            vec![scripts.to_string(), gameplay.to_string()],
+            vec!["LegacyGameplaySource".to_string(), "GameplayResourceSet".to_string()],
+            "Approved Gameplay family source branch plus the interaction resource type keeps this component with Scripts.",
+        )
+    } else if normalized.contains("#7 objects/") && types.contains(&TYPE_OBJD) {
+        (
+            vec!["Objetos".to_string()],
+            vec!["LegacyObjectSource".to_string(), "OBJD".to_string()],
+            "The complete #7 Objects source branch plus OBJD catalog evidence keeps this functional object under Objetos despite an ambiguous internal catalog split.",
+        )
+    } else if normalized.contains("windows and doors") && types.contains(&TYPE_OBJD) {
+        (
+            vec!["Construção".to_string()],
+            vec!["LegacyWindowsDoorsSource".to_string(), "OBJD".to_string()],
+            "Windows and Doors source branch plus OBJD evidence identifies construction content when one object record also exposes a vehicle candidate.",
+        )
+    } else if normalized.contains("#8 scripts/") && has_visual {
+        (
+            vec![replacements.to_string()],
+            vec!["LegacyReplacementSource".to_string(), "VisualResourceSet".to_string()],
+            "Legacy Scripts source branch plus visual replacement resources identifies a replacement package rather than a gameplay assembly.",
+        )
+    } else if (normalized.starts_with("roupas/") || normalized.contains("/roupas/")) && has_visual {
+        (
+            vec![replacements.to_string(), "Corpo".to_string()],
+            vec!["LegacyClothingSource".to_string(), "VisualResourceSet".to_string()],
+            "Clothing source branch plus visual resources identifies a body replacement family.",
+        )
+    } else if normalized.contains("penisbuttbones") && types.contains(&0x8EAF_13DE) {
+        (
+            vec!["Genética".to_string(), "Genitálias".to_string()],
+            vec!["AnatomicalResourceSet".to_string(), "LegacyBodySource".to_string()],
+            "Anatomical bone resource type and the explicit genital family source identify Genetics content.",
+        )
+    } else if (normalized.contains("roof") || normalized.contains("ceilingbeam") || normalized.contains("fence"))
+        && has_visual_build_set
+    {
+        (
+            vec!["Construção".to_string()],
+            vec!["BuildResourceSet".to_string(), "RelatedBuildName".to_string()],
+            "Roof/beam/fence visual resource set is a construction family even when its legacy source folder is Sem Categoria.",
+        )
+    } else if normalized.contains("/build/")
+        && types.contains(&TYPE_IMG)
+        && !types.contains(&TYPE_S3SA)
+    {
+        (
+            vec!["Construção".to_string()],
+            vec!["LegacyBuildSource".to_string(), "IMG".to_string()],
+            "Build source branch plus texture resources identifies a construction replacement set.",
+        )
+    } else if normalized.contains("nomosaic") && types.contains(&0xEA51_18B0) {
+        (
+            vec![replacements.to_string()],
+            vec!["ReplacementTypeSignature".to_string(), "InternalVisualResource".to_string()],
+            "The package-specific no-mosaic replacement resource type corroborates the replacement function.",
+        )
+    } else if normalized.contains("boroughsburg")
+        && normalized.contains("beard")
+        && types.contains(&TYPE_IMG)
+        && !types.contains(&TYPE_CASP)
+        && !types.contains(&TYPE_OBJD)
+    {
+        (
+            vec![replacements.to_string(), "CAS".to_string()],
+            vec!["BoroughsburgFamily".to_string(), "VisualResourceSet".to_string()],
+            "Boroughsburg beard package has visual CAS replacement resources without an independent catalog record.",
+        )
+    } else {
+        return None;
+    };
+
+    Some(PackageFamilyClassification {
+        main_category: folder_parts[0].clone(),
+        sub_category: folder_parts.get(1).cloned(),
+        folder_parts,
+        detected_from,
+        technical_reason: technical_reason.to_string(),
+    })
 }
 
 fn compact_identifier(value: &str) -> String {
@@ -1196,6 +1800,13 @@ fn catalog_precedes_embedded_script(
     let Some(classification) = special else { return false };
     if !classification.detected_from.iter().any(|source| source == "S3SA")
         || classification.detected_from.iter().any(|source| source == "NRaasInternal")
+    {
+        return false;
+    }
+    if classification
+        .detected_from
+        .iter()
+        .any(|source| source == "CompositeModFamily")
     {
         return false;
     }
@@ -2521,6 +3132,7 @@ fn scan_one(
                 &name,
                 &relative,
                 language,
+                &classifications,
             )
         })
         .or_else(|| {
@@ -3338,6 +3950,16 @@ mod tests {
         let targets = [
             "Anach_CASDetails8x2.package",
             "windows-lite-overrides-ALL-EP-SP.package",
+            "Fantuanss12_ProfessionalOven.package",
+            "zoeoe_knitting_object_rug.package",
+            "zoeoe_knitting_knittingNeedles.package",
+            "NoBuildSparkles.package",
+            "nointromaxis.package",
+            "SimsFM_RadioStation.package",
+            "saz_Awesims_Cornice_1.package",
+            "BuhudainDRYouAreRealV14FemaleKertinFace.package",
+            "MFC_RHR_IP-BeachTowerRug_MistyVG.package",
+            "MFC_RHD-Jynx_BusinessDoor-PetsFix.package",
         ];
         let mut paths = HashMap::<String, PathBuf>::new();
         for entry in WalkDir::new(&backup_root)
@@ -3408,6 +4030,34 @@ mod tests {
                 assert_eq!(item.destination_parts, vec!["Substituições", "Objetos"]);
                 assert!(!item.detected_from.iter().any(|value| value == "OhRudiFamily"));
             }
+            let expected_real_family = match target {
+                "Fantuanss12_ProfessionalOven.package" => Some(vec!["Scripts", "Jogabilidade"]),
+                "zoeoe_knitting_object_rug.package" | "zoeoe_knitting_knittingNeedles.package" => {
+                    Some(vec!["Scripts", "Jogabilidade", "Knitting Mod"])
+                }
+                "NoBuildSparkles.package" => Some(vec!["Substituições", "Efeitos"]),
+                "nointromaxis.package" => Some(vec!["Substituições"]),
+                "SimsFM_RadioStation.package" => {
+                    Some(vec!["Scripts", "Jogabilidade", "Radio and TV"])
+                }
+                "saz_Awesims_Cornice_1.package" => Some(vec!["Construção", "Cornijas"]),
+                "BuhudainDRYouAreRealV14FemaleKertinFace.package" => {
+                    Some(vec!["Substituições", "Corpo", "Definição de Pele"])
+                }
+                "MFC_RHR_IP-BeachTowerRug_MistyVG.package"
+                | "MFC_RHD-Jynx_BusinessDoor-PetsFix.package" => {
+                    Some(vec!["Construção", "Rabbit Holes"])
+                }
+                _ => None,
+            };
+            if let Some(expected) = expected_real_family {
+                assert_eq!(item.status, "classified", "{target}");
+                assert_eq!(
+                    item.destination_parts.iter().map(String::as_str).collect::<Vec<_>>(),
+                    expected,
+                    "{target}"
+                );
+            }
             rows.push(serde_json::json!({
                 "target": target,
                 "relativePath": path.strip_prefix(&backup_root).unwrap_or(path).to_string_lossy(),
@@ -3420,6 +4070,7 @@ mod tests {
                 "confidence": item.classification_confidence,
                 "category": item.category,
                 "destination": item.destination_parts,
+                "catalogClassifications": item.classifications,
                 "detectedFrom": item.detected_from,
                 "classificationReason": item.classification_reason,
             }));
