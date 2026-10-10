@@ -597,9 +597,9 @@ fn package_internal_identifiers(package: &Package) -> Vec<String> {
     let mut identifiers = package_nmap_names(package);
     let markers = [
         "casdetails",
+        "ui/caption/cas/physical:",
         "deathbymeteorjig",
         "minerexclusionjig",
-        "windowasian",
         "acbody",
         "adbody",
         "albody",
@@ -667,7 +667,10 @@ fn path_independent_directed_classification(
     };
     let gameplay = localized_special_folder(language, "gameplay");
 
-    let cas_layout_marker = internal_name_contains(internal_names, &["casdetails"]);
+    let cas_layout_marker = internal_name_contains(
+        internal_names,
+        &["casdetails", "ui/caption/cas/physical:"],
+    );
     if types.contains(&TYPE_LAYO_LOCAL)
         && !types.contains(&TYPE_CASP)
         && !types.contains(&TYPE_OBJD)
@@ -760,7 +763,6 @@ fn path_independent_directed_classification(
         &[
             "deathbymeteorjig",
             "minerexclusionjig",
-            "windowasian",
             "sims_need_less_space",
             "pets_need_less_space",
             "king_qings_window",
@@ -776,7 +778,7 @@ fn path_independent_directed_classification(
             .as_deref()
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
-        let ep = if marker_lower.contains("windowasian") {
+        let ep = if marker_lower.contains("king_qings_window") {
             Some("EP01")
         } else if marker_lower.contains("pets_need_less_space")
         {
@@ -806,6 +808,50 @@ fn path_independent_directed_classification(
     None
 }
 
+fn broad_window_replacement_set(
+    package: &Package,
+    types: &BTreeSet<u32>,
+    internal_names: &[String],
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    let window_name_count = internal_names
+        .iter()
+        .filter(|value| value.to_ascii_lowercase().contains("window"))
+        .count();
+    let lighting_resource_count = package
+        .entries
+        .iter()
+        .filter(|entry| entry.type_id == 0x03B4_C61D)
+        .count();
+    if !types.contains(&TYPE_NMAP_LOCAL)
+        || !types.contains(&0x03B4_C61D)
+        || window_name_count < 8
+        || lighting_resource_count < 8
+        || types.contains(&TYPE_CASP)
+        || types.contains(&TYPE_OBJD)
+    {
+        return None;
+    }
+    let replacements = match language {
+        AppLanguage::En => "Replacements",
+        AppLanguage::Pt => "Substituições",
+        AppLanguage::Es => "Reemplazos",
+    };
+    Some(PackageFamilyClassification {
+        main_category: replacements.to_string(),
+        sub_category: Some("Objetos".to_string()),
+        folder_parts: vec![replacements.to_string(), "Objetos".to_string()],
+        detected_from: vec![
+            "InternalWindowReplacementSet".to_string(),
+            "NMAP".to_string(),
+            "LightingDataFamily".to_string(),
+        ],
+        technical_reason: format!(
+            "DBPF contains {window_name_count} internal window identifiers and {lighting_resource_count} lighting-data resources; this is a broad replacement set, not an OhRudi fix."
+        ),
+    })
+}
+
 // Phase 3 rules use resource families plus coherent source trees. A filename
 // or hash alone never qualifies. These families were confirmed by the local
 // directed comparison: EP fixes, named replacement sets, and coherent GEOM
@@ -819,6 +865,14 @@ fn phase3_directed_family_classification(
 ) -> Option<PackageFamilyClassification> {
     let internal_names = package_internal_identifiers(package);
     if let Some(classification) = path_independent_directed_classification(
+        types,
+        &internal_names,
+        language,
+    ) {
+        return Some(classification);
+    }
+    if let Some(classification) = broad_window_replacement_set(
+        package,
         types,
         &internal_names,
         language,
@@ -3018,6 +3072,8 @@ mod tests {
         sha256: String,
         #[serde(rename = "modelTop")]
         model_top: String,
+        #[serde(rename = "modelMatches", default)]
+        model_matches: String,
         outcome: String,
     }
 
@@ -3207,13 +3263,27 @@ mod tests {
                 .any(|expected| category_is_equivalent(expected, &actual));
             if validation_scope.eq_ignore_ascii_case("resolved_unique") {
                 if !matches_expected {
+                    let decision = if item.status == "classified"
+                        && item.classification_confidence == "high"
+                    {
+                        "dbpf_evidence_classified_mismatch"
+                    } else {
+                        "manual_review"
+                    };
                     resolved_mismatches.push(serde_json::json!({
                         "relativePath": row.backup_relative_path,
+                        "modelDestination": row.model_matches,
                         "expected": row.model_top,
                         "actual": actual,
+                        "calculatedDestination": item.destination_parts,
+                        "resourceTypes": item.resource_types,
+                        "instances": item.instances,
+                        "sha256": row.sha256,
                         "status": item.status,
-                        "destination": item.destination_parts,
-                        "reason": item.classification_reason,
+                        "confidence": item.classification_confidence,
+                        "detectedFrom": item.detected_from,
+                        "technicalReason": item.classification_reason,
+                        "decision": decision,
                     }));
                 }
             } else {
@@ -3254,6 +3324,104 @@ mod tests {
     }
 
     #[test]
+    fn inspect_targeted_real_dbpf_packages_when_requested() {
+        let Ok(backup_root) = std::env::var("S3CC_TARGETED_DBPF_ROOT") else {
+            return;
+        };
+        let output_path = std::env::var("S3CC_TARGETED_DBPF_OUTPUT")
+            .expect("S3CC_TARGETED_DBPF_OUTPUT is required for targeted DBPF validation");
+        let targets = [
+            "Anach_CASDetails8x2.package",
+            "windows-lite-overrides-ALL-EP-SP.package",
+        ];
+        let mut paths = HashMap::<String, PathBuf>::new();
+        for entry in WalkDir::new(&backup_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let Some(name) = entry.path().file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if targets.iter().any(|target| name.eq_ignore_ascii_case(target)) {
+                paths.insert(name.to_ascii_lowercase(), entry.into_path());
+            }
+        }
+
+        let fix_index = fix_signatures::load_persistent_index();
+        let mut rows = Vec::new();
+        for target in targets {
+            let path = paths
+                .get(&target.to_ascii_lowercase())
+                .unwrap_or_else(|| panic!("targeted DBPF package is absent: {target}"));
+            let package = Package::load(path).unwrap_or_else(|error| {
+                panic!("could not decode targeted DBPF package {target}: {error}")
+            });
+            let resources = fix_signatures::package_resources(&package).unwrap();
+            let internal_identifiers = package_internal_identifiers(&package);
+            let ascii_preview = package
+                .entries
+                .iter()
+                .flat_map(|entry| {
+                    package.data(entry).ok().into_iter().flat_map(|data| {
+                        let mut values = Vec::new();
+                        let mut current = Vec::new();
+                        for byte in data.iter().copied() {
+                            if byte.is_ascii_graphic() || byte == b' ' {
+                                current.push(byte);
+                            } else if current.len() >= 4 {
+                                values.push(String::from_utf8_lossy(&current).to_string());
+                                current.clear();
+                            } else {
+                                current.clear();
+                            }
+                        }
+                        if current.len() >= 4 {
+                            values.push(String::from_utf8_lossy(&current).to_string());
+                        }
+                        values
+                    })
+                })
+                .take(80)
+                .collect::<Vec<_>>();
+            let mut slider_instances = HashSet::<u64>::new();
+            let item = scan_one(
+                Path::new(&backup_root),
+                path,
+                AppLanguage::Pt,
+                &mut slider_instances,
+                fix_index.as_ref(),
+            );
+            if target.eq_ignore_ascii_case("Anach_CASDetails8x2.package") {
+                assert_eq!(item.status, "classified");
+                assert_eq!(item.destination_parts, vec!["Substituições", "CAS"]);
+                assert!(item.detected_from.iter().any(|value| value == "CASLayoutIdentifier"));
+            }
+            if target.eq_ignore_ascii_case("windows-lite-overrides-ALL-EP-SP.package") {
+                assert_eq!(item.status, "classified");
+                assert_eq!(item.destination_parts, vec!["Substituições", "Objetos"]);
+                assert!(!item.detected_from.iter().any(|value| value == "OhRudiFamily"));
+            }
+            rows.push(serde_json::json!({
+                "target": target,
+                "relativePath": path.strip_prefix(&backup_root).unwrap_or(path).to_string_lossy(),
+                "resourceCount": package.entries.len(),
+                "resourceTypes": package.entries.iter().map(|entry| format!("{:08X}", entry.type_id)).collect::<Vec<_>>(),
+                "resources": resources,
+                "internalIdentifiers": internal_identifiers,
+                "asciiPreview": ascii_preview,
+                "status": item.status,
+                "category": item.category,
+                "destination": item.destination_parts,
+                "detectedFrom": item.detected_from,
+                "classificationReason": item.classification_reason,
+            }));
+        }
+        fs::write(&output_path, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+    }
+
+    #[test]
     fn path_independent_directed_families_survive_relocation() {
         let oh_rudi = BTreeSet::from([TYPE_NMAP_LOCAL, 0xD382_BF57]);
         let gameplay = path_independent_directed_classification(
@@ -3265,7 +3433,7 @@ mod tests {
 
         let ep01 = path_independent_directed_classification(
             &BTreeSet::from([TYPE_NMAP_LOCAL, 0x03B4_C61D]),
-            &["windowAsianRectangular_lightingdata".into()],
+            &["king_qings_window".into()],
             AppLanguage::Pt,
         ).unwrap();
         assert_eq!(ep01.folder_parts, vec!["Correções", "Jogabilidade", "EPs Fixes", "EP01"]);
