@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "test:reconciliation": "node scripts/test-reconciliation-rules.mjs",
     "test:phase2-reconciliation": "node scripts/test-phase2-reconciliation.mjs",
-    "test:phase3-reconciliation": "node scripts/test-phase3-reconciliation.mjs"
+    "test:phase3-reconciliation": "node scripts/test-phase3-reconciliation.mjs",
+    "test:merged-sim-regression": "node scripts/test-merged-sim-regression.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

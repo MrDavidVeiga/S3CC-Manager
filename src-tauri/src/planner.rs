@@ -1038,6 +1038,94 @@ pub fn build_organization_plan_with_cfg(
                 "System/cache/recovery folder is protected: this package will not be moved.".to_string()));
             continue;
         }
+
+        // An exported Sim with embedded CC is one atomic user asset. Keep
+        // every internal CASP/GEOM/texture resource together and place the
+        // package directly at the Packages root; it is never routed through
+        // the ordinary category tree or the generic merged-package review.
+        if item.status == "sim_export_merged" {
+            let file_name = source
+                .file_name()
+                .ok_or_else(|| format!("Source has no filename: {}", source.display()))?;
+            if source_uses_overrides(&root, &source_canonical) {
+                stats.kept_uncategorized += 1;
+                items.push(PlanItem {
+                    id: item.id.clone(),
+                    name: item.name.clone(),
+                    source_path: source_canonical.to_string_lossy().to_string(),
+                    source_relative_path: item.relative_path.clone(),
+                    destination_path: None,
+                    destination_relative_path: None,
+                    classification_status: item.status.clone(),
+                    classification_reason: item.classification_reason.clone(),
+                    plan_status: "keep_sim_export_merged_override".to_string(),
+                    sha256: Some(source_hash),
+                    size: item.file_size,
+                    warnings: vec!["Merged Sim export detected inside Overrides; it was kept there because Overrides never moves into Packages.".to_string()],
+                });
+                continue;
+            }
+
+            let package_root = packages_root.as_deref().unwrap_or(&root);
+            let destination = package_root.join(file_name);
+            if !path_is_within_root(&root, &destination) {
+                stats.blocked += 1;
+                items.push(make_blocked(
+                    item,
+                    "Merged Sim export destination is outside the selected loading root.".to_string(),
+                ));
+                continue;
+            }
+            let already = same_path_case_insensitive(&source_canonical, &destination);
+            let collision = !already && destination.exists();
+            let collision_same = if collision {
+                sha256_file(&destination)
+                    .map(|(hash, _)| hash.eq_ignore_ascii_case(&source_hash))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            let destination_relative = destination
+                .strip_prefix(&root)
+                .map(relative_key)
+                .map_err(|_| "Merged Sim export destination escaped selected root.".to_string())?;
+            let plan_status = if already {
+                stats.already_organized += 1;
+                "already_sim_export_merged_root"
+            } else if collision_same {
+                stats.collision_same_content += 1;
+                "sim_export_merged_collision_same_content"
+            } else if collision {
+                stats.collision_different_content += 1;
+                "sim_export_merged_collision_different_content"
+            } else {
+                stats.ready += 1;
+                "ready_sim_export_merged_root"
+            };
+            items.push(PlanItem {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                source_path: source_canonical.to_string_lossy().to_string(),
+                source_relative_path: item.relative_path.clone(),
+                destination_path: Some(destination.to_string_lossy().to_string()),
+                destination_relative_path: Some(destination_relative),
+                classification_status: item.status.clone(),
+                classification_reason: item.classification_reason.clone(),
+                plan_status: plan_status.to_string(),
+                sha256: Some(source_hash),
+                size: item.file_size,
+                warnings: vec![if already {
+                    "Merged Sim export is already at the Packages root; the package remains intact.".to_string()
+                } else if collision_same {
+                    "An identical root-level package already exists; no overwrite or split was performed.".to_string()
+                } else if collision {
+                    "A different root-level package has the same filename; no overwrite or split was performed.".to_string()
+                } else {
+                    "Move the complete exported Sim package as one file to the Packages root; embedded CC resources are never separated.".to_string()
+                }],
+            });
+            continue;
+        }
         let outside_active_branch = packages_root
             .as_ref()
             .is_some_and(|packages| !path_is_within_root(packages, &source_canonical))

@@ -48,6 +48,11 @@ const I18N = {
     readOnlyStage: "Analyze first, preview every move, then organize.",
     packages: "Packages",
     classified: "Classified",
+    simExportMerged: "Merged Sim export",
+    simExportRoot: "Keep whole package at Packages root",
+    simExportAlreadyRoot: "Already at Packages root",
+    simExportCollision: "Root collision — no overwrite",
+    simExportOverride: "Kept in Overrides",
     mixed: "Mixed",
     needsReview: "Needs Review",
     invalid: "Invalid",
@@ -605,6 +610,11 @@ const I18N = {
     readOnlyStage: "Analise primeiro, visualize cada movimento e só depois organize.",
     packages: "Packages",
     classified: "Classificados",
+    simExportMerged: "Sim exportado (CC mesclado)",
+    simExportRoot: "Manter package inteiro na raiz de Packages",
+    simExportAlreadyRoot: "Já está na raiz de Packages",
+    simExportCollision: "Colisão na raiz — sem sobrescrever",
+    simExportOverride: "Mantido em Overrides",
     mixed: "Mistos",
     needsReview: "Requer Revisão",
     invalid: "Inválidos",
@@ -1161,6 +1171,11 @@ const I18N = {
     readOnlyStage: "Analiza primero, revisa cada movimiento y luego organiza.",
     packages: "Packages",
     classified: "Clasificados",
+    simExportMerged: "Sim exportado (CC combinado)",
+    simExportRoot: "Mantener package completo en la raíz de Packages",
+    simExportAlreadyRoot: "Ya está en la raíz de Packages",
+    simExportCollision: "Colisión en la raíz — sin sobrescribir",
+    simExportOverride: "Conservado en Overrides",
     mixed: "Mixtos",
     needsReview: "Requiere Revisión",
     invalid: "Inválidos",
@@ -2953,6 +2968,7 @@ function eligibleForPlan(item) {
   if (!item?.path) return false;
   const status = String(item.status || "");
   if (status === "unknown") return true;
+  if (status === "sim_export_merged") return true;
   if (status !== "classified" || !item.destinationPath) return false;
   const verifiedCompanion =
     item.classificationConfidence === "medium" &&
@@ -2964,6 +2980,7 @@ function eligibleForPlan(item) {
 function statusLabel(status) {
   return {
     classified: t("classified"),
+    sim_export_merged: t("simExportMerged"),
     mixed: t("mixed"),
     needs_review: t("needsReview"),
     unknown: t("unknown"),
@@ -2994,6 +3011,11 @@ function planStatusLabel(status) {
     ready_duplicate: t("duplicateToReview"),
     ready_collision: t("collisionToReview"),
     already_organized: t("alreadyOrganized"),
+    ready_sim_export_merged_root: t("simExportRoot"),
+    already_sim_export_merged_root: t("simExportAlreadyRoot"),
+    keep_sim_export_merged_override: t("simExportOverride"),
+    sim_export_merged_collision_same_content: t("simExportCollision"),
+    sim_export_merged_collision_different_content: t("simExportCollision"),
     duplicate_skipped: t("duplicateSkipped"),
     collision_same_content: t("collisionSame"),
     collision_different_content: t("collisionDifferent"),
@@ -3075,6 +3097,7 @@ function renderStatusFilter() {
   const options = [
     ["all", t("allStatuses")],
     ["classified", t("classified")],
+    ["sim_export_merged", t("simExportMerged")],
     ["mixed", t("mixed")],
     ["needs_review", t("needsReview")],
     ["unknown", t("unknown")],

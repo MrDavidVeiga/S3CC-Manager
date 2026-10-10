@@ -8,7 +8,7 @@ use crate::{
     workspace::{load_workspace_for_root, split_destination},
     package_family::{
         classify_package_family, PackageFamilyClassification, PackageFamilyResult, TYPE_BBLN,
-        TYPE_BGEO, TYPE_BONE_DELTA, TYPE_FACE, TYPE_FBLN, TYPE_HAIR_TONE, TYPE_S3SA,
+        TYPE_BGEO, TYPE_BONE_DELTA, TYPE_FACE, TYPE_FBLN, TYPE_HAIR_TONE, TYPE_IMG, TYPE_S3SA,
         TYPE_SKIN_TONE,
     },
 };
@@ -209,6 +209,8 @@ fn detect_store_source(package: &Package, name: &str, relative: &str, has_s3sa: 
 
 
 const TYPE_NMAP_LOCAL: u32 = 0x0166_038C;
+const TYPE_SIME_LOCAL: u32 = 0x025E_D6F4;
+const TYPE_SIMO_LOCAL: u32 = 0x0341_ACC9;
 const TYPE_STBL_LOCAL: u32 = 0x2205_57DA;
 const TYPE_MANIFEST_LOCAL: u32 = 0x73E9_3EEB;
 const TYPE_XML_LOCAL: u32 = 0x0333_406C;
@@ -478,6 +480,100 @@ fn script_creator_folder(language: AppLanguage, creator: Option<&str>) -> Vec<St
         localized_special_folder(language, "scripts").to_string(),
         localized_special_folder(language, "gameplay").to_string(),
     ]
+}
+
+// A Sims export with embedded CC is a single user-facing asset, even though
+// the DBPF contains many CASP, GEOM, texture and tuning resources. SIME/SIMO
+// are the identity-bearing resources; the additional CASP plus appearance
+// resources prove that this is the merged-CC form rather than a common merged
+// clothing, hair or object package. The rule is deliberately resource-based:
+// filenames and a Sim's name are never required.
+fn merged_sim_export_evidence(package: &Package) -> Option<String> {
+    let sim_entries = package
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.type_id, TYPE_SIME_LOCAL | TYPE_SIMO_LOCAL))
+        .collect::<Vec<_>>();
+    if sim_entries.is_empty() {
+        return None;
+    }
+    if sim_entries
+        .iter()
+        .any(|entry| entry.instance == 0 || entry.group == 0)
+    {
+        return None;
+    }
+
+    let casp_count = package
+        .entries
+        .iter()
+        .filter(|entry| entry.type_id == TYPE_CASP)
+        .count();
+    let appearance_count = package
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.type_id,
+                TYPE_CASP
+                    | 0x015A_1849 // GEOM
+                    | TYPE_IMG
+                    | TYPE_BGEO
+                    | TYPE_BONE_DELTA
+                    | TYPE_FACE
+                    | TYPE_FBLN
+                    | TYPE_HAIR_TONE
+                    | TYPE_SKIN_TONE
+            )
+        })
+        .count();
+    if casp_count == 0 || appearance_count < 3 {
+        return None;
+    }
+
+    let identifiers = sim_entries
+        .iter()
+        .take(8)
+        .map(|entry| {
+            format!(
+                "{} group 0x{:08X} instance 0x{:016X}",
+                if entry.type_id == TYPE_SIME_LOCAL { "SIME" } else { "SIMO" },
+                entry.group,
+                entry.instance
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(format!(
+        "{}; {} CASP and {} appearance resources remain one exported Sim package",
+        identifiers.join("; "),
+        casp_count,
+        appearance_count
+    ))
+}
+
+fn merged_sim_export_classification(
+    package: &Package,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    let evidence = merged_sim_export_evidence(package)?;
+    let label = match language {
+        AppLanguage::En => "Merged Sim Export",
+        AppLanguage::Pt => "Sim Exportado (CC mesclado)",
+        AppLanguage::Es => "Sim Exportado (CC combinado)",
+    };
+    Some(PackageFamilyClassification {
+        main_category: label.to_string(),
+        sub_category: None,
+        folder_parts: Vec::new(),
+        detected_from: vec![
+            "SIME/SIMO".to_string(),
+            "MergedSimExport".to_string(),
+            "ProtectedPackagesRoot".to_string(),
+        ],
+        technical_reason: format!(
+            "SIME/SIMO internal Sim identifiers plus merged CAS/appearance resources => keep the complete package at the Packages root. Do not split embedded CC. {evidence}"
+        ),
+    })
 }
 
 // Phase 3 rules use resource families plus coherent source trees. A filename
@@ -1719,6 +1815,9 @@ fn apply_manual_classifications(root: &Path, items: &mut [ScanPackageItem]) {
     }
 
     for item in items.iter_mut() {
+        if item.detected_from.iter().any(|source| source == "MergedSimExport") {
+            continue;
+        }
         // Authoritative automatic classifications win. Manual review exists to
         // resolve Unknown/Mixed/Needs Review cases, so only those need hashing.
         if item.status == "invalid"
@@ -1822,6 +1921,8 @@ fn resource_type_label(type_id: u32) -> String {
         0x0333_406C => "XML".to_string(),
         0x03B3_3DDF => "ITUN".to_string(),
         TYPE_S3SA => "S3SA".to_string(),
+        TYPE_SIME_LOCAL => "SIME".to_string(),
+        TYPE_SIMO_LOCAL => "SIMO".to_string(),
         TYPE_SKIN_TONE => "SkinTone".to_string(),
         TYPE_HAIR_TONE => "HairTone".to_string(),
         TYPE_BONE_DELTA => "BoneDelta".to_string(),
@@ -1858,7 +1959,7 @@ fn localized_mixed(language: AppLanguage) -> &'static str {
 
 fn classification_confidence(status: &str) -> &'static str {
     match status {
-        "classified" => "high",
+        "classified" | "sim_export_merged" => "high",
         "needs_review" | "mixed" => "medium",
         "unknown" | "invalid" => "low",
         _ => "low",
@@ -2057,11 +2158,18 @@ fn scan_one(
     let mut classifications = Vec::new();
     let mut warnings = Vec::new();
     let mut catalog_resource_count = 0usize;
+    let is_merged_sim_export = merged_sim_export_evidence(&package).is_some();
 
     for entry in &package.entries {
         type_ids.insert(entry.type_id);
         type_set.insert(resource_type_label(entry.type_id));
         if !matches!(entry.type_id, TYPE_CASP | TYPE_OBJD) {
+            continue;
+        }
+        if is_merged_sim_export {
+            // CASPs/OBJD inside an exported Sim are embedded payload, not
+            // independent CC records. Keep them out of the per-resource
+            // classifier and preserve the package as one atomic asset.
             continue;
         }
 
@@ -2084,23 +2192,26 @@ fn scan_one(
         }
     }
 
-    let special_primary = phase3_directed_family_classification(
-        &package,
-        &type_ids,
-        &name,
-        &relative,
-        language,
-    )
-    .or_else(|| {
-        special_package_classification(
+    let special_primary = merged_sim_export_classification(&package, language)
+        .or_else(|| {
+            phase3_directed_family_classification(
+                &package,
+                &type_ids,
+                &name,
+                &relative,
+                language,
+            )
+        })
+        .or_else(|| {
+            special_package_classification(
             &package,
             &type_ids,
             &name,
             &relative,
             language,
             catalog_resource_count,
-        )
-    });
+            )
+        });
     if let Some(special) = &special_primary {
         for source in &special.detected_from {
             detected_from.insert(source.clone());
@@ -2193,6 +2304,13 @@ fn scan_one(
             None,
         )
     };
+    if active_special.is_some_and(|classification| {
+        classification.detected_from.iter().any(|source| source == "MergedSimExport")
+    }) {
+        status = "sim_export_merged".to_string();
+        destination_parts.clear();
+        destination_path = None;
+    }
 
     let mut classification_reason = active_special
         .map(|classification| classification.technical_reason.clone())
@@ -2566,7 +2684,7 @@ pub fn scan_packages_core(
             .count();
 
         match item.status.as_str() {
-            "classified" => stats.classified += 1,
+            "classified" | "sim_export_merged" => stats.classified += 1,
             "mixed" => stats.mixed += 1,
             "needs_review" => stats.needs_review += 1,
             "invalid" => stats.invalid += 1,

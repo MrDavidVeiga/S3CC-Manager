@@ -450,6 +450,7 @@ button:disabled {
 }
 
 .status-classified { background: var(--accent); }
+.status-sim_export_merged { background: #6d63c7; }
 .status-mixed { background: #b58a43; }
 .status-needs_review { background: #c47745; }
 .status-unknown { background: #75828a; }
