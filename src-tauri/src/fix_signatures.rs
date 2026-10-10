@@ -1,7 +1,7 @@
 //! Persistent, content-based evidence learned from the manual model.
 //!
-//! The index is deliberately kept in the user's application cache, never in
-//! the repository or inside a Mods tree.  It records complete DBPF resource
+//! The index is deliberately kept in the user's persistent application data,
+//! never in the repository or inside a Mods tree.  It records complete DBPF resource
 //! signatures (TGI plus decoded payload hash) and two weaker signatures.  A
 //! weaker signature is only used together with a validated correction token;
 //! a filename token alone can never create a Fix or Override classification.
@@ -57,6 +57,10 @@ pub struct FixSignatureIndex {
 #[serde(rename_all = "camelCase")]
 pub struct FixSignatureIndexStatus {
     pub path: String,
+    pub backup_path: String,
+    pub legacy_path: String,
+    pub legacy_available: bool,
+    pub backup_available: bool,
     pub available: bool,
     pub version: Option<u32>,
     pub records: usize,
@@ -201,7 +205,7 @@ fn record_from_cached(
     })
 }
 
-fn cache_root() -> PathBuf {
+fn legacy_cache_root() -> PathBuf {
     dirs::cache_dir()
         .or_else(dirs::data_local_dir)
         .or_else(dirs::home_dir)
@@ -210,23 +214,48 @@ fn cache_root() -> PathBuf {
         .join("Cache")
 }
 
-pub fn index_path() -> PathBuf {
-    cache_root().join("fix-signatures-v1.json")
+fn persistent_data_root() -> PathBuf {
+    dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Veiga's S3CC Manager")
+        .join("Data")
 }
 
-pub fn save_persistent_index(index: &FixSignatureIndex) -> Result<(), String> {
-    let path = index_path();
+pub fn index_path() -> PathBuf {
+    persistent_data_root().join("fix-signatures-v1.json")
+}
+
+pub fn index_backup_path() -> PathBuf {
+    persistent_data_root().join("fix-signatures-v1.json.bak")
+}
+
+fn legacy_index_path() -> PathBuf {
+    legacy_cache_root().join("fix-signatures-v1.json")
+}
+
+fn read_valid_index(path: &Path) -> Option<FixSignatureIndex> {
+    let text = fs::read_to_string(path).ok()?;
+    let index = serde_json::from_str::<FixSignatureIndex>(&text).ok()?;
+    (index.version == INDEX_VERSION && !index.records.is_empty()).then_some(index)
+}
+
+fn write_index(index: &FixSignatureIndex, path: &Path, backup_path: &Path) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "Fix signature index has no parent directory.".to_string())?;
     fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create fix signature cache: {error}"))?;
+        .map_err(|error| format!("Could not create persistent fix signature data: {error}"))?;
+    if path.exists() {
+        fs::copy(path, backup_path)
+            .map_err(|error| format!("Could not back up fix signature index: {error}"))?;
+    }
     let temp = parent.join(".fix-signatures-v1.json.tmp");
     let data = serde_json::to_vec_pretty(index)
         .map_err(|error| format!("Could not serialize fix signature index: {error}"))?;
     fs::write(&temp, data)
         .map_err(|error| format!("Could not write fix signature index: {error}"))?;
-    #[cfg(windows)]
     if path.exists() {
         fs::remove_file(&path)
             .map_err(|error| format!("Could not replace fix signature index: {error}"))?;
@@ -235,19 +264,42 @@ pub fn save_persistent_index(index: &FixSignatureIndex) -> Result<(), String> {
         .map_err(|error| format!("Could not commit fix signature index: {error}"))
 }
 
+pub fn save_persistent_index(index: &FixSignatureIndex) -> Result<(), String> {
+    write_index(index, &index_path(), &index_backup_path())
+}
+
 pub fn load_persistent_index() -> Option<FixSignatureIndex> {
-    let text = fs::read_to_string(index_path()).ok()?;
-    let index = serde_json::from_str::<FixSignatureIndex>(&text).ok()?;
-    (index.version == INDEX_VERSION && !index.records.is_empty()).then_some(index)
+    if let Some(index) = read_valid_index(&index_path()) {
+        return Some(index);
+    }
+    if let Some(index) = read_valid_index(&index_backup_path()) {
+        // Restore a valid backup without deleting it, so a second failure can
+        // still be recovered by the user or by the Maintenance panel.
+        let _ = write_index(&index, &index_path(), &index_backup_path());
+        return Some(index);
+    }
+    if let Some(index) = read_valid_index(&legacy_index_path()) {
+        // The former cache location is left intact as a recoverable source;
+        // the canonical copy is now in persistent application data.
+        let _ = write_index(&index, &index_path(), &index_backup_path());
+        return Some(index);
+    }
+    None
 }
 
 /// Return an explicit, read-only status so the UI can verify whether scans
 /// are using the persistent model evidence instead of a test-only cache.
 pub fn persistent_index_status() -> FixSignatureIndexStatus {
     let path = index_path();
+    let backup_path = index_backup_path();
+    let legacy_path = legacy_index_path();
     let index = load_persistent_index();
     FixSignatureIndexStatus {
         path: path.to_string_lossy().to_string(),
+        backup_path: backup_path.to_string_lossy().to_string(),
+        legacy_path: legacy_path.to_string_lossy().to_string(),
+        legacy_available: legacy_path.exists(),
+        backup_available: backup_path.exists(),
         available: index.is_some(),
         version: index.as_ref().map(|value| value.version),
         records: index.as_ref().map(|value| value.records.len()).unwrap_or(0),
@@ -633,6 +685,35 @@ mod tests {
         .unwrap();
         assert_eq!(record.loading_branch, "Overrides");
         assert_eq!(record.canonical_destination, "Fixes");
+    }
+
+    #[test]
+    fn persistent_index_writes_recoverable_backup_and_preserves_legacy_source() {
+        let root = std::env::temp_dir().join(format!(
+            "veiga-fix-index-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let primary = root.join(r"Data\fix-signatures-v1.json");
+        let backup = root.join(r"Data\fix-signatures-v1.json.bak");
+        let first = FixSignatureIndex {
+            version: INDEX_VERSION,
+            generated_at: "first".to_string(),
+            reference_root: "model".to_string(),
+            records: vec![record(vec![resource(1, 2, 3, "A")], "Correções")],
+        };
+        let second = FixSignatureIndex {
+            generated_at: "second".to_string(),
+            ..first.clone()
+        };
+        write_index(&first, &primary, &backup).unwrap();
+        write_index(&second, &primary, &backup).unwrap();
+        assert_eq!(read_valid_index(&primary).unwrap().generated_at, "second");
+        assert_eq!(read_valid_index(&backup).unwrap().generated_at, "first");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

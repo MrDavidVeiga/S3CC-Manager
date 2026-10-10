@@ -608,6 +608,10 @@ fn package_internal_identifiers(package: &Package) -> Vec<String> {
         "defaultface",
         "defaultwhisker",
         "defaultbrow",
+        "defaulttextures",
+        "sims_need_less_space",
+        "pets_need_less_space",
+        "king_qings_window",
     ];
     for entry in &package.entries {
         if !matches!(
@@ -686,6 +690,10 @@ fn path_independent_directed_classification(
         internal_names,
         &["acbody", "adbody", "albody", "ccbody", "cdbody"],
     );
+    let lazy_asset_marker = internal_name_contains(
+        internal_names,
+        &["defaultface", "defaultwhisker", "defaultbrow", "defaulttextures"],
+    );
     let body_marker_count = ["acbody", "adbody", "albody", "ccbody", "cdbody"]
         .iter()
         .filter(|marker| {
@@ -721,11 +729,45 @@ fn path_independent_directed_classification(
         });
     }
 
+    if let Some(marker) = lazy_asset_marker {
+        if (types.contains(&0x015A_1849) || types.contains(&TYPE_IMG))
+            && !types.contains(&TYPE_CASP)
+            && !types.contains(&TYPE_OBJD)
+        {
+            return Some(PackageFamilyClassification {
+                main_category: replacements.to_string(),
+                sub_category: Some("Corpo".to_string()),
+                folder_parts: vec![
+                    replacements.to_string(),
+                    "Corpo".to_string(),
+                    "Cães e Gatos".to_string(),
+                    "Lazy Duchess".to_string(),
+                ],
+                detected_from: vec![
+                    "InternalLazyDuchessAsset".to_string(),
+                    "LazyDuchessFamily".to_string(),
+                ],
+                technical_reason: format!(
+                    "Lazy Duchess default asset is identified by internal marker '{}' plus GEOM/IMG resources; source names and folders are not required.",
+                    marker
+                ),
+            });
+        }
+    }
+
     let ohrudi_marker = internal_name_contains(
         internal_names,
-        &["deathbymeteorjig", "minerexclusionjig", "windowasian", "cat_", "dog", "horse"],
+        &[
+            "deathbymeteorjig",
+            "minerexclusionjig",
+            "windowasian",
+            "sims_need_less_space",
+            "pets_need_less_space",
+            "king_qings_window",
+        ],
     );
     if types.contains(&TYPE_NMAP_LOCAL)
+        && (types.contains(&0xD382_BF57) || types.contains(&0x03B4_C61D))
         && ohrudi_marker.is_some()
         && !types.contains(&TYPE_CASP)
         && !types.contains(&TYPE_OBJD)
@@ -736,9 +778,7 @@ fn path_independent_directed_classification(
             .unwrap_or_default();
         let ep = if marker_lower.contains("windowasian") {
             Some("EP01")
-        } else if marker_lower.contains("cat")
-            || marker_lower.contains("dog")
-            || marker_lower.contains("horse")
+        } else if marker_lower.contains("pets_need_less_space")
         {
             Some("EP05")
         } else {
@@ -2969,6 +3009,249 @@ pub async fn scan_packages(folder: String, language: AppLanguage) -> Result<Scan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct MatrixRow {
+        #[serde(rename = "backupRelativePath")]
+        backup_relative_path: String,
+        sha256: String,
+        #[serde(rename = "modelTop")]
+        model_top: String,
+        outcome: String,
+    }
+
+    fn matrix_path_key(value: &str) -> String {
+        value.replace('/', "\\").to_ascii_lowercase()
+    }
+
+    fn destination_top(item: &ScanPackageItem) -> Option<String> {
+        item.destination_parts
+            .iter()
+            .find(|part| {
+                !part.eq_ignore_ascii_case("Packages")
+                    && !part.eq_ignore_ascii_case("Overrides")
+            })
+            .cloned()
+    }
+
+    fn category_is_equivalent(expected: &str, actual: &str) -> bool {
+        if expected.eq_ignore_ascii_case(actual) {
+            return true;
+        }
+        let equivalent = |value: &str| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "cabelos" | "cabelos e pêlos" | "cabelos e pelos"
+            )
+        };
+        equivalent(expected) && equivalent(actual)
+    }
+
+    #[test]
+    fn validate_real_backup_destinations_and_conflicts_when_requested() {
+        let Ok(backup_root) = std::env::var("S3CC_VALIDATION_BACKUP_ROOT") else {
+            return;
+        };
+        let Ok(matrix_path) = std::env::var("S3CC_VALIDATION_MATRIX") else {
+            return;
+        };
+        let reference_root = std::env::var("S3CC_FIX_REFERENCE_ROOT").ok();
+        if fix_signatures::load_persistent_index().is_none() {
+            if let Some(root) = reference_root.as_deref() {
+                let index = fix_signatures::build_fix_signature_index(Path::new(root)).unwrap();
+                fix_signatures::save_persistent_index(&index).unwrap();
+            }
+        }
+
+        let mut reader = csv::Reader::from_path(&matrix_path).unwrap();
+        let rows = reader
+            .deserialize::<MatrixRow>()
+            .map(|row| row.unwrap())
+            .collect::<Vec<_>>();
+        let validation_scope = std::env::var("S3CC_VALIDATION_SCOPE")
+            .unwrap_or_else(|_| "conflicts".to_string());
+        let validation_rows = rows
+            .iter()
+            .filter(|row| {
+                if validation_scope.eq_ignore_ascii_case("resolved_unique") {
+                    row.outcome == "resolvido_destino_unico"
+                } else {
+                    row.outcome == "pendente_decisao"
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected_validation_count = if validation_scope.eq_ignore_ascii_case("resolved_unique") {
+            457
+        } else {
+            49
+        };
+        assert_eq!(validation_rows.len(), expected_validation_count, "diagnostic matrix validation scope changed");
+        let mut actual_paths = HashMap::<String, PathBuf>::new();
+        for entry in WalkDir::new(&backup_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && package_extension(entry.path()))
+        {
+            let relative = entry
+                .path()
+                .strip_prefix(&backup_root)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            actual_paths.insert(matrix_path_key(&relative), entry.into_path());
+        }
+        let scan_selected = || {
+            let mut slider_instances = HashSet::<u64>::new();
+            let fix_index = fix_signatures::load_persistent_index();
+            let mut items = Vec::with_capacity(validation_rows.len());
+            for row in &validation_rows {
+                let path = actual_paths
+                    .get(&matrix_path_key(&row.backup_relative_path))
+                    .unwrap_or_else(|| panic!("diagnostic package is absent: {}", row.backup_relative_path));
+                let mut item = scan_one(
+                    Path::new(&backup_root),
+                    path,
+                    AppLanguage::Pt,
+                    &mut slider_instances,
+                    fix_index.as_ref(),
+                );
+                item.destination_parts = physical_destination_parts(
+                    Path::new(&backup_root),
+                    &item.relative_path,
+                    &remove_generic_unknown_levels(item.destination_parts.clone()),
+                );
+                item.destination_path = (!item.destination_parts.is_empty())
+                    .then(|| item.destination_parts.join("\\"));
+                items.push(item);
+            }
+            items
+        };
+        let scan = ScanResult {
+            root: backup_root.clone(),
+            items: scan_selected(),
+            stats: ScanStats::default(),
+        };
+        let rescanned = ScanResult {
+            root: backup_root.clone(),
+            items: scan_selected(),
+            stats: ScanStats::default(),
+        };
+        assert_eq!(scan.items.len(), rescanned.items.len());
+
+        let first_stability = scan
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    matrix_path_key(&item.relative_path),
+                    format!("{}|{:?}", item.status, item.destination_parts),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let second_stability = rescanned
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    matrix_path_key(&item.relative_path),
+                    format!("{}|{:?}", item.status, item.destination_parts),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(first_stability, second_stability, "classification changed on re-analysis");
+
+        let by_relative = scan
+            .items
+            .iter()
+            .map(|item| (matrix_path_key(&item.relative_path), item))
+            .collect::<HashMap<_, _>>();
+        let mut by_hash = HashMap::<String, &ScanPackageItem>::new();
+        for item in &scan.items {
+            if let Ok((hash, _)) = sha256_file(Path::new(&item.path)) {
+                by_hash.entry(hash.to_ascii_lowercase()).or_insert(item);
+            }
+        }
+
+        let resolved_rows = rows
+            .iter()
+            .filter(|row| row.outcome == "resolvido_destino_unico")
+            .collect::<Vec<_>>();
+        assert_eq!(resolved_rows.len(), 457, "diagnostic matrix no longer contains 457 resolved destinations");
+        let mut resolved_mismatches = Vec::new();
+        let mut conflict_rows = Vec::new();
+        for row in &validation_rows {
+            let item = by_relative
+                .get(&matrix_path_key(&row.backup_relative_path))
+                .copied()
+                .or_else(|| by_hash.get(&row.sha256.to_ascii_lowercase()).copied());
+            let Some(item) = item else {
+                resolved_mismatches.push(serde_json::json!({
+                    "relativePath": row.backup_relative_path,
+                    "expected": row.model_top,
+                    "actual": "missing-from-real-scan",
+                    "outcome": row.outcome,
+                }));
+                continue;
+            };
+            let actual = destination_top(item).unwrap_or_else(|| "Sem Categoria".to_string());
+            let expected_categories = row
+                .model_top
+                .split('|')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            let matches_expected = expected_categories
+                .iter()
+                .any(|expected| category_is_equivalent(expected, &actual));
+            if validation_scope.eq_ignore_ascii_case("resolved_unique") {
+                if !matches_expected {
+                    resolved_mismatches.push(serde_json::json!({
+                        "relativePath": row.backup_relative_path,
+                        "expected": row.model_top,
+                        "actual": actual,
+                        "status": item.status,
+                        "destination": item.destination_parts,
+                        "reason": item.classification_reason,
+                    }));
+                }
+            } else {
+                conflict_rows.push(serde_json::json!({
+                    "relativePath": row.backup_relative_path,
+                    "sha256": row.sha256,
+                    "modelCategories": expected_categories,
+                    "actualCategory": actual,
+                    "status": item.status,
+                    "destination": item.destination_parts,
+                    "detectedFrom": item.detected_from,
+                    "reason": item.classification_reason,
+                    "decision": if matches_expected { "resolved_by_dbpf_evidence" } else { "manual_review" },
+                }));
+            }
+        }
+
+        if let Ok(output_path) = std::env::var("S3CC_REAL_VALIDATION_OUTPUT") {
+            let report = serde_json::json!({
+                "packagesScanned": scan.items.len(),
+                "validationScope": validation_scope,
+                "resolvedMatrixRows": resolved_rows.len(),
+                "categoryOnlyMatrixRows": rows.iter().filter(|row| row.outcome == "resolvido_categoria_pendente_subcaminho").count(),
+                "resolvedMismatches": resolved_mismatches,
+                "classificationStableOnRescan": first_stability == second_stability,
+            });
+            fs::write(output_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        if let Ok(output_path) = std::env::var("S3CC_CONFLICT_OUTPUT") {
+            fs::write(output_path, serde_json::to_vec_pretty(&conflict_rows).unwrap()).unwrap();
+        }
+        assert!(
+            resolved_mismatches
+                .iter()
+                .all(|row| row.get("actual").and_then(|value| value.as_str()) != Some("missing-from-real-scan")),
+            "a diagnostic package was absent from the real backup scan"
+        );
+    }
 
     #[test]
     fn path_independent_directed_families_survive_relocation() {
@@ -2994,6 +3277,13 @@ mod tests {
         ).unwrap();
         assert_eq!(lazy.folder_parts, vec!["Substituições", "Corpo", "Cães e Gatos", "Lazy Duchess"]);
 
+        let lazy_default = path_independent_directed_classification(
+            &BTreeSet::from([0x015A_1849, TYPE_IMG]),
+            &["ld_CatDogAddons_DefaultFaces".into()],
+            AppLanguage::Pt,
+        ).unwrap();
+        assert_eq!(lazy_default.folder_parts, vec!["Substituições", "Corpo", "Cães e Gatos", "Lazy Duchess"]);
+
         let layout = path_independent_directed_classification(
             &BTreeSet::from([TYPE_LAYO_LOCAL]),
             &["CASDetails8x2".into()],
@@ -3004,6 +3294,11 @@ mod tests {
         assert!(path_independent_directed_classification(
             &oh_rudi,
             &["genericObjectName".into()],
+            AppLanguage::Pt,
+        ).is_none());
+        assert!(path_independent_directed_classification(
+            &BTreeSet::from([TYPE_NMAP_LOCAL, 0xD382_BF57]),
+            &["genericDogEarMesh".into()],
             AppLanguage::Pt,
         ).is_none());
 

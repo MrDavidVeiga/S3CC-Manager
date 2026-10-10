@@ -176,6 +176,8 @@ const I18N = {
     rebuildFixIndex: "Rebuild from model",
     fixIndexChooseModel: "Choose the manual model root",
     fixIndexRebuilt: "Fix signature index rebuilt.",
+    fixIndexBackupOk: "backup OK",
+    fixIndexBackupPending: "backup will be created on rebuild",
     confirmClearCacheTitle: "Clear analysis cache?",
     confirmClearCacheMessage: "Only cached fingerprints will be deleted. Your packages and restore manifests will not be changed.",
     performanceDiagnostics: "Performance",
@@ -743,6 +745,8 @@ const I18N = {
     rebuildFixIndex: "Reconstruir a partir do modelo",
     fixIndexChooseModel: "Escolha a raiz do modelo manual",
     fixIndexRebuilt: "Índice de assinaturas reconstruído.",
+    fixIndexBackupOk: "backup OK",
+    fixIndexBackupPending: "backup será criado na próxima reconstrução",
     confirmClearCacheTitle: "Limpar o cache de análise?",
     confirmClearCacheMessage: "Somente os fingerprints em cache serão apagados. Seus packages e manifestos de restauração não serão alterados.",
     performanceDiagnostics: "Desempenho",
@@ -1309,6 +1313,8 @@ const I18N = {
     rebuildFixIndex: "Reconstruir desde el modelo",
     fixIndexChooseModel: "Elige la raíz del modelo manual",
     fixIndexRebuilt: "Índice de firmas reconstruido.",
+    fixIndexBackupOk: "backup OK",
+    fixIndexBackupPending: "el backup se creará al reconstruir",
     confirmClearCacheTitle: "¿Limpiar la caché de análisis?",
     confirmClearCacheMessage: "Solo se eliminarán los fingerprints en caché. Tus packages y manifiestos de restauración no se modificarán.",
     performanceDiagnostics: "Rendimiento",
@@ -2353,7 +2359,8 @@ function renderFixIndexPanel() {
   } else if (state.fixIndexError) {
     el.fixIndexSummary.textContent = state.fixIndexError;
   } else if (status?.available) {
-    el.fixIndexSummary.textContent = `${status.records} · v${status.version} · ${status.path}`;
+    const backup = status.backupAvailable ? ` · ${t("fixIndexBackupOk")}` : ` · ${t("fixIndexBackupPending")}`;
+    el.fixIndexSummary.textContent = `${status.records} · v${status.version} · ${status.path}${backup}`;
   } else {
     el.fixIndexSummary.textContent = t("fixIndexNoData");
   }
