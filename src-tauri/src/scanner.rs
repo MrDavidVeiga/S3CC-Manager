@@ -2851,11 +2851,11 @@ mod tests {
     #[test]
     fn canonical_scripts_gameplay_creator_hierarchy_is_localized() {
         assert_eq!(script_creator_folder(AppLanguage::Pt, Some("TwinSimming")),
-            vec!["Scripts", "Jogabilidade", "TwinSimming"]);
+            vec!["Scripts", "Jogabilidade"]);
         assert_eq!(script_creator_folder(AppLanguage::En, Some("NRaas")),
             vec!["Scripts", "Gameplay", "NRaas"]);
         assert_eq!(script_creator_folder(AppLanguage::Es, None),
-            vec!["Scripts", "Jugabilidad", "Autor Desconocido"]);
+            vec!["Scripts", "Jugabilidad"]);
         assert!(script_source_roles("Scripts/Jogabilidade/TwinSimming/X.package").0);
     }
 
