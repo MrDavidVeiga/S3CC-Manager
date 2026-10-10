@@ -9,7 +9,8 @@
     "preview": "vite preview --host 127.0.0.1 --port 1421",
     "tauri": "tauri",
     "test:reconciliation": "node scripts/test-reconciliation-rules.mjs",
-    "test:phase2-reconciliation": "node scripts/test-phase2-reconciliation.mjs"
+    "test:phase2-reconciliation": "node scripts/test-phase2-reconciliation.mjs",
+    "test:phase3-reconciliation": "node scripts/test-phase3-reconciliation.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

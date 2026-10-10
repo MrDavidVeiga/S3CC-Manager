@@ -480,6 +480,148 @@ fn script_creator_folder(language: AppLanguage, creator: Option<&str>) -> Vec<St
     ]
 }
 
+// Phase 3 rules use resource families plus coherent source trees. A filename
+// or hash alone never qualifies. These families were confirmed by the local
+// directed comparison: EP fixes, named replacement sets, and coherent GEOM
+// bundles can be categorized without treating generic game TGIs as matches.
+fn phase3_directed_family_classification(
+    package: &Package,
+    types: &BTreeSet<u32>,
+    name: &str,
+    relative: &str,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    let lower = relative.to_ascii_lowercase();
+    let filename = name.to_ascii_lowercase();
+    let has_geom = types.contains(&0x015A_1849);
+    let has_s3sa = types.contains(&TYPE_S3SA);
+    let has_catalog = types.contains(&TYPE_CASP) || types.contains(&TYPE_OBJD);
+    let corrections = match language {
+        AppLanguage::En => "Corrections",
+        AppLanguage::Pt => "Correções",
+        AppLanguage::Es => "Correcciones",
+    };
+    let replacements = match language {
+        AppLanguage::En => "Replacements",
+        AppLanguage::Pt => "Substituições",
+        AppLanguage::Es => "Reemplazos",
+    };
+    let gameplay = localized_special_folder(language, "gameplay");
+    let ep = (1..=11)
+        .map(|number| format!("ep{number:02}"))
+        .find(|token| lower.contains(token));
+
+    if lower.contains("eps fixes") && (has_s3sa || has_geom) && (lower.contains("fix") || filename.contains("fix")) {
+        let mut folder_parts = vec![corrections.to_string(), gameplay.to_string(), "EPs Fixes".to_string()];
+        if let Some(ep) = ep {
+            folder_parts.push(ep.to_ascii_uppercase());
+        }
+        return Some(PackageFamilyClassification {
+            main_category: corrections.to_string(),
+            sub_category: Some(gameplay.to_string()),
+            folder_parts,
+            detected_from: vec!["Phase3FamilyRule".to_string(), "EPsFixesPath".to_string(), "ResourceFamily".to_string()],
+            technical_reason: "Coherent EPs Fixes path plus DBPF fix/resource evidence; canonical protected EP tree preserved.".to_string(),
+        });
+    }
+
+    if lower.contains("fix") && !lower.contains("eps fixes") && (has_s3sa || types.contains(&0xD382_BF57)) {
+        return Some(PackageFamilyClassification {
+            main_category: corrections.to_string(),
+            sub_category: Some(gameplay.to_string()),
+            folder_parts: vec![corrections.to_string(), gameplay.to_string()],
+            detected_from: vec!["Phase3FamilyRule".to_string(), "FixToken".to_string(), "ResourceFamily".to_string()],
+            technical_reason: "Explicit fix family corroborated by script/functional DBPF resources; no EP invented without EP evidence.".to_string(),
+        });
+    }
+
+    if lower.contains("cmar") && has_geom && !has_catalog {
+        return Some(PackageFamilyClassification {
+            main_category: "Genética".to_string(),
+            sub_category: Some("Genitálias".to_string()),
+            folder_parts: vec!["Genética".to_string(), "Genitálias".to_string(), "Masculina".to_string(), "Cmar".to_string()],
+            detected_from: vec!["Phase3FamilyRule".to_string(), "CmarFamily".to_string(), "GEOM".to_string()],
+            technical_reason: "Coherent Cmar body-mesh family with GEOM and am/em/tm internal mesh roles; variants remain together.".to_string(),
+        });
+    }
+
+    if lower.contains("sam4v2") && has_geom && !has_catalog {
+        return Some(PackageFamilyClassification {
+            main_category: "Genética".to_string(),
+            sub_category: Some("Corpo".to_string()),
+            folder_parts: vec!["Genética".to_string(), "Corpo".to_string(), "Masculina".to_string(), "sam4v2".to_string()],
+            detected_from: vec!["Phase3FamilyRule".to_string(), "CoherentGEOMFamily".to_string(), "LODSet".to_string()],
+            technical_reason: "Coherent GEOM set with am/em/tm and LOD/burnt variants; the family is retained without splitting related meshes.".to_string(),
+        });
+    }
+
+    if lower.contains("cat and dog addons") && (has_geom || has_s3sa) && !has_catalog {
+        return Some(PackageFamilyClassification {
+            main_category: replacements.to_string(),
+            sub_category: Some("Corpo".to_string()),
+            folder_parts: vec![replacements.to_string(), "Corpo".to_string(), "Cães e Gatos".to_string(), "Lazy Duchess".to_string()],
+            detected_from: vec!["Phase3FamilyRule".to_string(), "LazyDuchessFamily".to_string(), "BodyResourceFamily".to_string()],
+            technical_reason: "Lazy Duchess Cat and Dog Addons set has coherent body mesh/texture resources; related packages remain together.".to_string(),
+        });
+    }
+
+    if lower.contains("boring bones") && has_s3sa && !has_catalog {
+        let (sub, family) = if lower.contains("ethereal") || lower.contains("lighting") {
+            ("Scripts".to_string(), "BoringBones".to_string())
+        } else if lower.contains("olhos") || lower.contains("eye") {
+            ("Corpo\\Olhos".to_string(), "BoringBones".to_string())
+        } else {
+            ("Ambiente".to_string(), "BoringBones".to_string())
+        };
+        let folder_parts = if sub == "Scripts" {
+            vec!["Scripts".to_string(), gameplay.to_string(), family]
+        } else {
+            vec![replacements.to_string(), sub, family]
+        };
+        return Some(PackageFamilyClassification {
+            main_category: folder_parts[0].clone(),
+            sub_category: folder_parts.get(1).cloned(),
+            folder_parts,
+            detected_from: vec!["Phase3FamilyRule".to_string(), "BoringBonesFamily".to_string(), "S3SA".to_string()],
+            technical_reason: "BoringBones coherent family with internal lighting/eye/plant resource evidence; function-specific subfolder preserves the family.".to_string(),
+        });
+    }
+
+    if lower.contains("defaultface") || lower.contains("defaultbrows") || lower.contains("eyelash") || lower.contains("agsclera") {
+        if has_s3sa && !has_catalog && internal_signature(package, &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_MANIFEST_LOCAL], &["face", "eye", "brow", "lash", "clera"]).is_some() {
+            let (sub, label) = if lower.contains("brow") {
+                ("Genética".to_string(), "Sobrancelhas".to_string())
+            } else if lower.contains("lash") {
+                ("CAS".to_string(), "Maquiagem\\Cílios".to_string())
+            } else if lower.contains("face") {
+                (replacements.to_string(), "Corpo\\Rosto".to_string())
+            } else {
+                (replacements.to_string(), "Corpo\\Olhos".to_string())
+            };
+            let folder_parts = label.split('\\').map(str::to_string).fold(vec![sub], |mut result, part| { result.push(part); result });
+            return Some(PackageFamilyClassification {
+                main_category: folder_parts[0].clone(),
+                sub_category: folder_parts.get(1).cloned(),
+                folder_parts,
+                detected_from: vec!["Phase3FamilyRule".to_string(), "DefaultReplacement".to_string(), "InternalSubjectEvidence".to_string()],
+                technical_reason: "Default face/eye/brow/lash path is corroborated by subject tokens in script/manifest resources; no CAS catalog identity was invented.".to_string(),
+            });
+        }
+    }
+
+    if lower.contains("skin") && has_s3sa && !has_catalog && internal_signature(package, &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_MANIFEST_LOCAL], &["skin", "body"]).is_some() {
+        return Some(PackageFamilyClassification {
+            main_category: replacements.to_string(),
+            sub_category: Some("Corpo".to_string()),
+            folder_parts: vec![replacements.to_string(), "Corpo".to_string(), "Definição de Pele".to_string()],
+            detected_from: vec!["Phase3FamilyRule".to_string(), "DefaultSkin".to_string(), "InternalSubjectEvidence".to_string()],
+            technical_reason: "Skin/default path plus internal skin/body evidence identifies a replacement set without age inference.".to_string(),
+        });
+    }
+
+    None
+}
+
 fn compact_identifier(value: &str) -> String {
     value
         .chars()
@@ -1942,8 +2084,23 @@ fn scan_one(
         }
     }
 
-    let special_primary =
-        special_package_classification(&package, &type_ids, &name, &relative, language, catalog_resource_count);
+    let special_primary = phase3_directed_family_classification(
+        &package,
+        &type_ids,
+        &name,
+        &relative,
+        language,
+    )
+    .or_else(|| {
+        special_package_classification(
+            &package,
+            &type_ids,
+            &name,
+            &relative,
+            language,
+            catalog_resource_count,
+        )
+    });
     if let Some(special) = &special_primary {
         for source in &special.detected_from {
             detected_from.insert(source.clone());
