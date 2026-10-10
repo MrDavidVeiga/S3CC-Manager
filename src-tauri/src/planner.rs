@@ -630,6 +630,90 @@ fn is_selected_content_keeper(
     keeper.is_none_or(|path| path == source)
 }
 
+// Prefer the copy whose complete path from the selected root already is the
+// canonical destination. The old lexical-only choice could make a legacy
+// nested source the keeper over an already organized package.
+fn canonical_destination_for_keeper(
+    root: &Path,
+    source: &Path,
+    item: &ScanPackageItem,
+    resource_cfg: Option<&ResourceCfgContext>,
+) -> Option<PathBuf> {
+    let file_name = Path::new(&item.name).file_name()?;
+    let (parts, _) = fit_destination_to_resource_cfg(
+        root,
+        source,
+        file_name,
+        &item.destination_parts,
+        resource_cfg,
+    )
+    .ok()?;
+    Some(destination_path(root, &parts, file_name))
+}
+
+fn is_selected_content_keeper_for_scan(
+    root: &Path,
+    source: &Path,
+    sha256: &str,
+    selected_hashes: &HashMap<PathBuf, String>,
+    scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
+    resource_cfg: Option<&ResourceCfgContext>,
+) -> bool {
+    let inactive = is_disabled_package_path(source);
+    let mut candidates = selected_hashes
+        .iter()
+        .filter(|(path, hash)| {
+            hash.eq_ignore_ascii_case(sha256)
+                && is_disabled_package_path(path) == inactive
+        })
+        .map(|(path, _)| {
+            let canonical = scan_by_canonical
+                .get(path)
+                .and_then(|item| canonical_destination_for_keeper(root, path, item, resource_cfg))
+                .is_some_and(|destination| same_path_case_insensitive(path, &destination));
+            let relative = path
+                .strip_prefix(root)
+                .map(relative_key)
+                .unwrap_or_else(|_| relative_key(path));
+            (path, canonical, relative.to_ascii_lowercase())
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by_key(|(_, canonical, relative)| (!*canonical, relative.clone()));
+    candidates.first().is_none_or(|(path, _, _)| *path == source)
+}
+
+fn selected_content_keeper_relative_path(
+    root: &Path,
+    source: &Path,
+    sha256: &str,
+    selected_hashes: &HashMap<PathBuf, String>,
+    scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
+    resource_cfg: Option<&ResourceCfgContext>,
+) -> Option<String> {
+    let inactive = is_disabled_package_path(source);
+    let mut candidates = selected_hashes
+        .iter()
+        .filter(|(path, hash)| {
+            hash.eq_ignore_ascii_case(sha256)
+                && is_disabled_package_path(path) == inactive
+        })
+        .map(|(path, _)| {
+            let canonical = scan_by_canonical
+                .get(path)
+                .and_then(|item| canonical_destination_for_keeper(root, path, item, resource_cfg))
+                .is_some_and(|destination| same_path_case_insensitive(path, &destination));
+            let relative = path
+                .strip_prefix(root)
+                .map(relative_key)
+                .unwrap_or_else(|_| relative_key(path));
+            (canonical, relative.to_ascii_lowercase(), relative)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(canonical, key, _)| (!*canonical, key.clone()));
+    candidates.into_iter().next().map(|(_, _, relative)| relative)
+}
+
 fn index_exact_duplicates(
     root: &Path,
     scan_items: &[ScanPackageItem],
@@ -1112,7 +1196,7 @@ pub fn build_organization_plan_with_cfg(
                 classification_status: item.status.clone(),
                 classification_reason: item.classification_reason.clone(),
                 plan_status: plan_status.to_string(),
-                sha256: Some(source_hash),
+                sha256: Some(source_hash.clone()),
                 size: item.file_size,
                 warnings: vec![if already {
                     "Merged Sim export is already at the Packages root; the package remains intact.".to_string()
@@ -1133,7 +1217,14 @@ pub fn build_organization_plan_with_cfg(
 
         let duplicates = duplicate_peers.get(&source_hash.to_ascii_uppercase());
         if let Some(peers) = duplicates.filter(|peers| peers.len() > 1)
-            .filter(|_| !is_selected_content_keeper(&source_canonical, &source_hash, &selected_hashes))
+            .filter(|_| !is_selected_content_keeper_for_scan(
+                &root,
+                &source_canonical,
+                &source_hash,
+                &selected_hashes,
+                &scan_by_canonical,
+                resource_cfg.as_ref(),
+            ))
         {
             // Only an additional selected same-state copy is excluded. The
             // chosen keeper continues through classification, destination
@@ -1149,10 +1240,18 @@ pub fn build_organization_plan_with_cfg(
                 classification_status: item.status.clone(),
                 classification_reason: item.classification_reason.clone(),
                 plan_status: "duplicate_skipped".to_string(),
-                sha256: Some(source_hash),
+                sha256: Some(source_hash.clone()),
                 size: item.file_size,
                 warnings: vec![format!(
-                    "Another selected copy is the keeper for this exact SHA-256 group ({} matching files: {}). This extra copy was not moved or deleted. Review it in Duplicates/Quarantine to empty the legacy folder safely.",
+                    "This package is a byte-identical duplicate and remains in its full selected-root path. The canonical keeper is '{}'; {} matching scan paths: {}. It was not moved, overwritten or deleted. Review it in Duplicates/Quarantine to empty the legacy folder safely.",
+                    selected_content_keeper_relative_path(
+                        &root,
+                        &source_canonical,
+                        &source_hash,
+                        &selected_hashes,
+                        &scan_by_canonical,
+                        resource_cfg.as_ref(),
+                    ).unwrap_or_else(|| "unresolved selected path".to_string()),
                     peers.len(),
                     peers.iter().take(4).cloned().collect::<Vec<_>>().join(" | ")
                 )],
@@ -1783,6 +1882,103 @@ mod tests {
 
 
     use super::*;
+
+    fn synthetic_scan_item(
+        root: &Path,
+        relative_path: &str,
+        destination_parts: &[&str],
+    ) -> (PathBuf, ScanPackageItem) {
+        let path = root.join(relative_path.replace('\\', std::path::MAIN_SEPARATOR_STR));
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let destination_parts = destination_parts.iter().map(|part| (*part).to_string()).collect::<Vec<_>>();
+        (
+            path.clone(),
+            ScanPackageItem {
+                id: relative_path.to_string(),
+                name,
+                path: path.to_string_lossy().into_owned(),
+                relative_path: relative_path.to_string(),
+                file_size: 12,
+                resource_count: 1,
+                catalog_resource_count: 1,
+                resource_types: Vec::new(),
+                instances: Vec::new(),
+                scripted: false,
+                content_source: "test".into(),
+                source_confidence: None,
+                status: "classified".into(),
+                classification_confidence: "high".into(),
+                creator: None,
+                mod_name: None,
+                gameplay_category: None,
+                detected_from: Vec::new(),
+                category: Some("CAS".into()),
+                sub_category: Some("Hair".into()),
+                gender: None,
+                age: None,
+                species: None,
+                usage_categories: Vec::new(),
+                destination_parts,
+                destination_path: None,
+                candidate_destinations: Vec::new(),
+                classifications: Vec::new(),
+                classification_reason: Some("synthetic regression".into()),
+                warnings: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn nested_exact_duplicates_prefer_full_canonical_relative_path() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-nested-keeper-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let packages_root = root.join("Packages");
+        std::fs::create_dir_all(&packages_root).unwrap();
+        std::fs::create_dir_all(root.join("Overrides")).unwrap();
+        let canonical_relative = "Sliders/shared.package";
+        let legacy_relative = "Danny/Sliders/shared.package";
+        let second_legacy_relative = "Brian Vicente/Brian Vicente/Sliders/shared.package";
+        let (canonical_path, canonical_item) = synthetic_scan_item(&packages_root, canonical_relative, &["Sliders"]);
+        let (legacy_path, legacy_item) = synthetic_scan_item(&packages_root, legacy_relative, &["Sliders"]);
+        let (second_legacy_path, second_legacy_item) = synthetic_scan_item(
+            &packages_root,
+            second_legacy_relative,
+            &["Sliders"],
+        );
+        let mut selected_hashes = HashMap::new();
+        selected_hashes.insert(canonical_path.clone(), "SAME".into());
+        selected_hashes.insert(legacy_path.clone(), "SAME".into());
+        selected_hashes.insert(second_legacy_path.clone(), "SAME".into());
+        let mut scan = HashMap::new();
+        scan.insert(canonical_path.clone(), &canonical_item);
+        scan.insert(legacy_path.clone(), &legacy_item);
+        scan.insert(second_legacy_path.clone(), &second_legacy_item);
+
+        assert!(is_selected_content_keeper_for_scan(
+            &packages_root, &canonical_path, "SAME", &selected_hashes, &scan, None
+        ));
+        assert!(!is_selected_content_keeper_for_scan(
+            &packages_root, &legacy_path, "SAME", &selected_hashes, &scan, None
+        ));
+        assert!(!is_selected_content_keeper_for_scan(
+            &packages_root, &second_legacy_path, "SAME", &selected_hashes, &scan, None
+        ));
+        assert_eq!(
+            selected_content_keeper_relative_path(
+                &packages_root,
+                &legacy_path,
+                "SAME",
+                &selected_hashes,
+                &scan,
+                None,
+            ),
+            Some(relative_key(Path::new(canonical_relative)))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn planned_sources_use_the_same_canonical_root_as_cleanup() {

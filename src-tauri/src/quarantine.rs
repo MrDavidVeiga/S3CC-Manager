@@ -52,6 +52,8 @@ pub struct QuarantineResult {
     pub quarantine_root: String,
     pub manifest_path: String,
     pub status: String,
+    pub cleanup_removed: usize,
+    pub cleanup_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -782,11 +784,19 @@ fn execute_quarantine_core(
     if let Err(error) = write_manifest_atomic(&manifest_path, &journal) {
         return Err(abort_quarantine(&manifest_path, &mut journal, &moved, error));
     }
+    // The files are quarantined, never deleted. Reconcile the selected tree
+    // after the verified move so nested legacy folders and their empty
+    // ancestors do not remain as shells. Protected Packages/Overrides roots
+    // are preserved by the shared cleanup routine.
+    let (cleanup_removed, _, cleanup_warnings) =
+        crate::executor::cleanup_empty_directories_after_organization(&root, &[]);
     Ok(QuarantineResult {
         moved: moved.len(),
         quarantine_root: plan.quarantine_root,
         manifest_path: manifest_path.to_string_lossy().into_owned(),
         status: "COMPLETE".into(),
+        cleanup_removed,
+        cleanup_warnings,
     })
 }
 
@@ -867,6 +877,8 @@ pub fn restore_quarantine(
         quarantine_root: qroot.to_string_lossy().into_owned(),
         manifest_path: path.to_string_lossy().into_owned(),
         status: "RESTORED".into(),
+        cleanup_removed: 0,
+        cleanup_warnings: Vec::new(),
     })
 }
 
@@ -925,6 +937,8 @@ pub fn recover_quarantine(folder: String, manifest_path: String) -> Result<Quara
         quarantine_root: qroot.to_string_lossy().into_owned(),
         manifest_path: path.to_string_lossy().into_owned(),
         status: journal.status,
+        cleanup_removed: 0,
+        cleanup_warnings: Vec::new(),
     })
 }
 
@@ -1212,6 +1226,7 @@ mod tests {
         let root_text = mods.to_string_lossy().to_string();
         let result = execute_quarantine(root_text.clone(),
             vec![source.to_string_lossy().into_owned()], None).unwrap();
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, b"later-user-file").unwrap();
         assert!(restore_quarantine(root_text, result.manifest_path, true).is_err());
         assert_eq!(fs::read(&source).unwrap(), b"later-user-file");

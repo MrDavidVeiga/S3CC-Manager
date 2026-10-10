@@ -35,6 +35,7 @@ pub struct ExecutionResult {
     pub old_folders_retained: usize,
     pub remaining_legacy_files: usize,
     pub remaining_legacy_examples: Vec<String>,
+    pub remaining_legacy_details: Vec<LegacyRemainder>,
     pub errors: Vec<String>,
 }
 
@@ -44,6 +45,15 @@ pub struct OrganizationMove {
     pub source_path: String,
     pub destination_path: String,
     pub destination_relative_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyRemainder {
+    pub relative_path: String,
+    pub reason: String,
+    pub plan_status: Option<String>,
+    pub warning: Option<String>,
 }
 
 fn organized_parent(root: &Path, pairs: &[(PathBuf, PathBuf, String, u64)]) -> PathBuf {
@@ -235,7 +245,7 @@ fn remove_empty_created_directories(root: &Path, directories: &[String]) {
 // The retained counter only describes directories on this transaction's old
 // source paths that still contain data (duplicates, companions, etc.). Other
 // nonempty folders are simply left untouched.
-fn cleanup_empty_directories_after_organization(
+pub(crate) fn cleanup_empty_directories_after_organization(
     root: &Path,
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
 ) -> (usize, usize, Vec<String>) {
@@ -320,12 +330,50 @@ fn cleanup_empty_directories_after_organization(
 
 // An empty-folder cleanup cannot remove folders that still contain
 // duplicates, disabled packages, images, downloads or other user data.
-// Report direct leftovers in directories from which this run moved files,
-// without following links or silently deleting unrelated content.
+// Report every leftover below the complete old source subtree, without
+// following links or silently deleting unrelated content. This is important
+// for nested legacy trees: checking only the immediate directory misses a
+// package one level deeper and makes the cleanup report falsely optimistic.
 fn remaining_legacy_sources(
     root: &Path,
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
 ) -> (usize, Vec<String>) {
+    let details = remaining_legacy_details(root, moved_pairs, &[]);
+    let count = details.len();
+    let examples = details
+        .into_iter()
+        .take(12)
+        .map(|detail| detail.relative_path)
+        .collect();
+    (count, examples)
+}
+
+fn same_relative_path(left: &str, right: &str) -> bool {
+    left.replace('/', "\\")
+        .trim_matches('\\')
+        .eq_ignore_ascii_case(right.replace('/', "\\").trim_matches('\\'))
+}
+
+fn remaining_reason(item: &PlanItem) -> String {
+    match item.plan_status.as_str() {
+        "duplicate_skipped" => "duplicate_exact_or_destination_same_content".to_string(),
+        "collision_different_content" => "collision_different_content".to_string(),
+        "blocked" => "blocked_or_protected".to_string(),
+        status if status.starts_with("already_") => "already_organized".to_string(),
+        status if status.starts_with("keep_") => "kept_by_protection_rule".to_string(),
+        _ => format!("plan_status:{}", item.plan_status),
+    }
+}
+
+// Perform a second recursive reconciliation after planning/moving. Every
+// remaining file below an old source subtree receives a reason. Plan items
+// have an authoritative status; packages outside the explicit selection are
+// reported as not selected, and non-package files are preserved as companions.
+fn remaining_legacy_details(
+    root: &Path,
+    moved_pairs: &[(PathBuf, PathBuf, String, u64)],
+    plan_items: &[PlanItem],
+) -> Vec<LegacyRemainder> {
     let mut folders = BTreeSet::new();
     for (source, _, _, _) in moved_pairs {
         if let Some(parent) = source.parent() {
@@ -334,19 +382,60 @@ fn remaining_legacy_sources(
             }
         }
     }
+
+    for item in plan_items {
+        let source = PathBuf::from(&item.source_path);
+        let Some(parent) = source.parent() else { continue; };
+        if !source.is_file() || !parent.starts_with(root) || parent == root {
+            continue;
+        }
+        let source_relative = item.source_relative_path.replace('/', "\\");
+        let destination_same = item.destination_relative_path.as_ref()
+            .is_some_and(|destination| same_relative_path(&source_relative, destination));
+        if !destination_same {
+            folders.insert(parent.to_path_buf());
+        }
+    }
+
     let mut remaining = BTreeSet::new();
+    let mut details = Vec::new();
     for folder in folders {
-        let Ok(entries) = fs::read_dir(&folder) else { continue; };
-        for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|type_| type_.is_file()) {
+        for entry in WalkDir::new(folder).follow_links(false).into_iter().flatten() {
+            if entry.file_type().is_file() {
                 if let Ok(relative) = entry.path().strip_prefix(root) {
-                    remaining.insert(relative.to_string_lossy().to_string());
+                    let relative = relative.to_string_lossy().replace('/', "\\");
+                    if !remaining.insert(relative.clone()) {
+                        continue;
+                    }
+                    let plan = plan_items.iter().find(|item| {
+                        same_relative_path(&item.source_relative_path, &relative)
+                    });
+                    let (reason, plan_status, warning) = if let Some(item) = plan {
+                        (
+                            remaining_reason(item),
+                            Some(item.plan_status.clone()),
+                            item.warnings.first().cloned(),
+                        )
+                    } else if entry.path().extension().is_some_and(|extension| {
+                        extension.to_string_lossy().eq_ignore_ascii_case("package")
+                            || extension.to_string_lossy().eq_ignore_ascii_case("disabled")
+                    }) {
+                        ("not_selected".to_string(), None, None)
+                    } else {
+                        ("companion_or_non_package_preserved".to_string(), None, None)
+                    };
+                    details.push(LegacyRemainder {
+                        relative_path: relative,
+                        reason,
+                        plan_status,
+                        warning,
+                    });
                 }
             }
         }
     }
-    let count = remaining.len();
-    (count, remaining.into_iter().take(12).collect())
+    details.sort_by_key(|detail| detail.relative_path.to_ascii_lowercase());
+    details
 }
 
 #[tauri::command]
@@ -415,6 +504,13 @@ fn execute_organization_core(
         // was necessary. Never remove files or the Packages/Overrides roots.
         let (removed, retained, cleanup_warnings) =
             cleanup_empty_directories_after_organization(&root, &[]);
+        let remaining_legacy_details = remaining_legacy_details(&root, &[], &plan.items);
+        let remaining_legacy_files = remaining_legacy_details.len();
+        let remaining_legacy_examples = remaining_legacy_details
+            .iter()
+            .take(12)
+            .map(|detail| detail.relative_path.clone())
+            .collect();
         return Ok(ExecutionResult {
             status: "NO_CHANGES".to_string(),
             moved_files: Vec::new(),
@@ -425,8 +521,9 @@ fn execute_organization_core(
             rolled_back: 0,
             old_folders_removed: removed,
             old_folders_retained: retained,
-            remaining_legacy_files: 0,
-            remaining_legacy_examples: Vec::new(),
+            remaining_legacy_files,
+            remaining_legacy_examples,
+            remaining_legacy_details,
             errors: cleanup_warnings,
         });
     }
@@ -657,6 +754,7 @@ fn execute_organization_core(
             old_folders_retained: 0,
             remaining_legacy_files: 0,
             remaining_legacy_examples: Vec::new(),
+            remaining_legacy_details: Vec::new(),
             errors,
         });
     }
@@ -666,8 +764,14 @@ fn execute_organization_core(
     let (old_folders_removed, old_folders_retained, cleanup_warnings) =
         cleanup_empty_directories_after_organization(&root, &moved_pairs);
 
-    let (remaining_legacy_files, remaining_legacy_examples) =
-        remaining_legacy_sources(&root, &moved_pairs);
+    let remaining_legacy_details =
+        remaining_legacy_details(&root, &moved_pairs, &plan.items);
+    let remaining_legacy_files = remaining_legacy_details.len();
+    let remaining_legacy_examples = remaining_legacy_details
+        .iter()
+        .take(12)
+        .map(|detail| detail.relative_path.clone())
+        .collect();
 
     manifest.status = "COMPLETE".to_string();
     replace_manifest_atomic(&manifest_path, &manifest)?;
@@ -700,6 +804,7 @@ fn execute_organization_core(
         old_folders_retained,
         remaining_legacy_files,
         remaining_legacy_examples,
+        remaining_legacy_details,
         errors: cleanup_warnings,
     })
 }
@@ -748,13 +853,20 @@ mod tests {
         fs::create_dir_all(&old).unwrap();
         fs::write(old.join("picture.png"), b"preserve").unwrap();
         fs::write(old.join("extra.package.disabled"), b"preserve").unwrap();
+        fs::create_dir_all(old.join("Nested Legacy").join("Sliders")).unwrap();
+        fs::write(
+            old.join("Nested Legacy").join("Sliders").join("nested.package"),
+            b"preserve nested content",
+        )
+        .unwrap();
         let source = old.join("original.package");
         let moved = vec![(source, root.join("Packages/Sliders/original.package"), String::new(), 0)];
         let (count, examples) = remaining_legacy_sources(&root, &moved);
-        assert_eq!(count, 2);
-        assert_eq!(examples.len(), 2);
+        assert_eq!(count, 3);
+        assert_eq!(examples.len(), 3);
         assert!(old.join("picture.png").exists());
         assert!(old.join("extra.package.disabled").exists());
+        assert!(examples.iter().any(|path| path.ends_with("Nested Legacy\\Sliders\\nested.package")));
         fs::remove_dir_all(&root).unwrap();
     }
 
