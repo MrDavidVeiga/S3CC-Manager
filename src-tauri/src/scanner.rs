@@ -3263,6 +3263,10 @@ mod tests {
                 .any(|expected| category_is_equivalent(expected, &actual));
             if validation_scope.eq_ignore_ascii_case("resolved_unique") {
                 if !matches_expected {
+                    let resource_signatures = Package::load(Path::new(&item.path))
+                        .ok()
+                        .and_then(|package| fix_signatures::package_resources(&package).ok())
+                        .unwrap_or_default();
                     let decision = if item.status == "classified"
                         && item.classification_confidence == "high"
                     {
@@ -3278,6 +3282,7 @@ mod tests {
                         "calculatedDestination": item.destination_parts,
                         "resourceTypes": item.resource_types,
                         "instances": item.instances,
+                        "resourceSignatures": resource_signatures,
                         "sha256": row.sha256,
                         "status": item.status,
                         "confidence": item.classification_confidence,
