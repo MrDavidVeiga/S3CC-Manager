@@ -651,5 +651,8 @@ mod tests {
             index.records.len(),
             index_path().display()
         );
+        let status = persistent_index_status();
+        assert!(status.available);
+        assert_eq!(status.records, index.records.len());
     }
 }
