@@ -11,6 +11,11 @@ assert.match(scanner, /EPsFixesPath/);
 assert.match(scanner, /CmarFamily/);
 assert.match(scanner, /LazyDuchessFamily/);
 assert.match(scanner, /BoringBonesFamily/);
+assert.match(scanner, /path_independent_directed_classification/);
+assert.match(scanner, /InternalNMAPFixFamily/);
+assert.match(scanner, /InternalNMAPBodyFamily/);
+assert.match(scanner, /TYPE_LAYO_LOCAL/);
+assert.match(scanner, /CASLayoutIdentifier/);
 assert.match(scanner, /Scripts.*Jogabilidade.*NRaas/);
 assert.match(scanner, /nraas_family_destination/);
 

@@ -211,6 +211,7 @@ fn detect_store_source(package: &Package, name: &str, relative: &str, has_s3sa: 
 const TYPE_NMAP_LOCAL: u32 = 0x0166_038C;
 const TYPE_SIME_LOCAL: u32 = 0x025E_D6F4;
 const TYPE_SIMO_LOCAL: u32 = 0x0341_ACC9;
+const TYPE_LAYO_LOCAL: u32 = 0x025C_95B6;
 const TYPE_STBL_LOCAL: u32 = 0x2205_57DA;
 const TYPE_MANIFEST_LOCAL: u32 = 0x73E9_3EEB;
 const TYPE_XML_LOCAL: u32 = 0x0333_406C;
@@ -576,6 +577,141 @@ fn merged_sim_export_classification(
     })
 }
 
+fn package_nmap_names(package: &Package) -> Vec<String> {
+    package
+        .entries
+        .iter()
+        .filter(|entry| entry.type_id == TYPE_NMAP_LOCAL)
+        .filter_map(|entry| package.data(entry).ok())
+        .flat_map(|data| nmap_names(&data))
+        .collect()
+}
+
+fn internal_name_contains(names: &[String], markers: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        let lower = name.to_ascii_lowercase();
+        markers
+            .iter()
+            .find(|marker| lower.contains(**marker))
+            .map(|_| name.clone())
+    })
+}
+
+// These rules intentionally take both the package's resource family and an
+// internal identifier. A source folder such as `Fixes` or `Cat and Dog
+// Addons` is useful evidence during an audit, but it must not be required for
+// a second scan after the package has reached its canonical destination.
+fn path_independent_directed_classification(
+    types: &BTreeSet<u32>,
+    internal_names: &[String],
+    name: &str,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    let lower = name.to_ascii_lowercase();
+    let corrections = match language {
+        AppLanguage::En => "Corrections",
+        AppLanguage::Pt => "Correções",
+        AppLanguage::Es => "Correcciones",
+    };
+    let replacements = match language {
+        AppLanguage::En => "Replacements",
+        AppLanguage::Pt => "Substituições",
+        AppLanguage::Es => "Reemplazos",
+    };
+    let gameplay = localized_special_folder(language, "gameplay");
+
+    if types.contains(&TYPE_LAYO_LOCAL)
+        && !types.contains(&TYPE_CASP)
+        && !types.contains(&TYPE_OBJD)
+        && !types.contains(&TYPE_S3SA)
+        && lower.contains("casdetails")
+    {
+        return Some(PackageFamilyClassification {
+            main_category: replacements.to_string(),
+            sub_category: Some("CAS".to_string()),
+            folder_parts: vec![replacements.to_string(), "CAS".to_string()],
+            detected_from: vec!["LAYO".to_string(), "CASLayoutIdentifier".to_string()],
+            technical_reason: "LAYO-only CAS detail layout with a stable CASDetails identifier => preserve under Substituições\\CAS after relocation.".to_string(),
+        });
+    }
+
+    let lazy_body_marker = internal_name_contains(
+        internal_names,
+        &["acbody", "adbody", "albody", "ccbody", "cdbody"],
+    );
+    if lower.contains("ld_catdogaddons")
+        && types.contains(&TYPE_NMAP_LOCAL)
+        && (types.contains(&0x015A_1849) || types.contains(&TYPE_IMG))
+        && !types.contains(&TYPE_CASP)
+        && !types.contains(&TYPE_OBJD)
+        && lazy_body_marker.is_some()
+    {
+        return Some(PackageFamilyClassification {
+            main_category: replacements.to_string(),
+            sub_category: Some("Corpo".to_string()),
+            folder_parts: vec![
+                replacements.to_string(),
+                "Corpo".to_string(),
+                "Cães e Gatos".to_string(),
+                "Lazy Duchess".to_string(),
+            ],
+            detected_from: vec![
+                "InternalNMAPBodyFamily".to_string(),
+                "LazyDuchessFamily".to_string(),
+            ],
+            technical_reason: format!(
+                "Lazy Duchess Cat/Dog body family is identified by NMAP body role '{}' plus GEOM/IMG resources; destination is independent of the source folder.",
+                lazy_body_marker.unwrap_or_default()
+            ),
+        });
+    }
+
+    let ohrudi_marker = internal_name_contains(
+        internal_names,
+        &["deathbymeteorjig", "minerexclusionjig", "windowasian", "cat_", "dog", "horse"],
+    );
+    if lower.contains("ohrudi")
+        && types.contains(&TYPE_NMAP_LOCAL)
+        && ohrudi_marker.is_some()
+        && !types.contains(&TYPE_CASP)
+        && !types.contains(&TYPE_OBJD)
+    {
+        let ep = if lower.contains("worldadventures")
+            || ohrudi_marker.as_deref().is_some_and(|value| value.to_ascii_lowercase().contains("windowasian"))
+        {
+            Some("EP01")
+        } else if lower.contains("pets")
+            || ohrudi_marker.as_deref().is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.contains("cat") || value.contains("dog") || value.contains("horse")
+            })
+        {
+            Some("EP05")
+        } else {
+            None
+        };
+        let mut folder_parts = vec![corrections.to_string(), gameplay.to_string()];
+        if let Some(ep) = ep {
+            folder_parts.extend(["EPs Fixes".to_string(), ep.to_string()]);
+        }
+        return Some(PackageFamilyClassification {
+            main_category: corrections.to_string(),
+            sub_category: Some(gameplay.to_string()),
+            folder_parts,
+            detected_from: vec![
+                "InternalNMAPFixFamily".to_string(),
+                "OhRudiFamily".to_string(),
+            ],
+            technical_reason: format!(
+                "OhRudi fix family is identified by NMAP functional identifier '{}' and package resource structure; canonical destination no longer depends on a legacy Fixes folder.",
+                ohrudi_marker.unwrap_or_default()
+            ),
+        });
+    }
+
+    None
+}
+
 // Phase 3 rules use resource families plus coherent source trees. A filename
 // or hash alone never qualifies. These families were confirmed by the local
 // directed comparison: EP fixes, named replacement sets, and coherent GEOM
@@ -587,6 +723,15 @@ fn phase3_directed_family_classification(
     relative: &str,
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
+    let internal_names = package_nmap_names(package);
+    if let Some(classification) = path_independent_directed_classification(
+        types,
+        &internal_names,
+        name,
+        language,
+    ) {
+        return Some(classification);
+    }
     let lower = relative.to_ascii_lowercase();
     let filename = name.to_ascii_lowercase();
     let has_geom = types.contains(&0x015A_1849);
@@ -1935,6 +2080,7 @@ fn resource_type_label(type_id: u32) -> String {
         0x00B2_D882 => "IMG".to_string(),
         0x015A_1849 => "GEOM".to_string(),
         0x7368_84F1 => "VPXY".to_string(),
+        TYPE_LAYO_LOCAL => "LAYO".to_string(),
         TYPE_CLIP_LOCAL => "CLIP".to_string(),
         0xD4D9_FBE5 => "Pattern".to_string(),
         other => format!("0x{other:08X}"),
@@ -2735,6 +2881,49 @@ pub async fn scan_packages(folder: String, language: AppLanguage) -> Result<Scan
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_independent_directed_families_survive_relocation() {
+        let oh_rudi = BTreeSet::from([TYPE_NMAP_LOCAL, 0xD382_BF57]);
+        let gameplay = path_independent_directed_classification(
+            &oh_rudi,
+            &["deathByMeteorJig".into(), "minerExclusionJig".into()],
+            "OhRudi__Ambitions__Sims_need_less_Space.package",
+            AppLanguage::Pt,
+        ).unwrap();
+        assert_eq!(gameplay.folder_parts, vec!["Correções", "Jogabilidade"]);
+
+        let ep01 = path_independent_directed_classification(
+            &BTreeSet::from([TYPE_NMAP_LOCAL, 0x03B4_C61D]),
+            &["windowAsianRectangular_lightingdata".into()],
+            "OhRudi__WorldAdventures__asian_window_fix.package",
+            AppLanguage::Pt,
+        ).unwrap();
+        assert_eq!(ep01.folder_parts, vec!["Correções", "Jogabilidade", "EPs Fixes", "EP01"]);
+
+        let lazy = path_independent_directed_classification(
+            &BTreeSet::from([TYPE_NMAP_LOCAL, 0x015A_1849, TYPE_IMG]),
+            &["acBody_lod1_2".into(), "adBody_lod1".into()],
+            "ld_CatDogAddons_DefaultFaces.package",
+            AppLanguage::Pt,
+        ).unwrap();
+        assert_eq!(lazy.folder_parts, vec!["Substituições", "Corpo", "Cães e Gatos", "Lazy Duchess"]);
+
+        let layout = path_independent_directed_classification(
+            &BTreeSet::from([TYPE_LAYO_LOCAL]),
+            &[],
+            "Anach_CASDetails8x2.package",
+            AppLanguage::Pt,
+        ).unwrap();
+        assert_eq!(layout.folder_parts, vec!["Substituições", "CAS"]);
+
+        assert!(path_independent_directed_classification(
+            &oh_rudi,
+            &["genericObjectName".into()],
+            "unrelated.package",
+            AppLanguage::Pt,
+        ).is_none());
+    }
 
     #[test]
     fn named_headwear_refines_only_the_armband_slot_in_all_languages() {
