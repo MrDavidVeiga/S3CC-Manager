@@ -4,6 +4,8 @@ import fs from 'node:fs';
 const signatures = fs.readFileSync('src-tauri/src/fix_signatures.rs', 'utf8');
 const scanner = fs.readFileSync('src-tauri/src/scanner.rs', 'utf8');
 const planner = fs.readFileSync('src-tauri/src/planner.rs', 'utf8');
+const app = fs.readFileSync('src/app.js', 'utf8');
+const indexHtml = fs.readFileSync('index.html', 'utf8');
 
 assert.match(signatures, /DbpfResourceSignature/);
 assert.match(signatures, /type_id/);
@@ -16,6 +18,11 @@ assert.match(signatures, /validated_fix_name/);
 assert.match(signatures, /OverrideVerified/);
 assert.match(signatures, /loading_branch/);
 assert.match(signatures, /source_is_override/);
+assert.match(signatures, /get_persistent_fix_signature_index_status/);
+assert.match(signatures, /rebuild_persistent_fix_signature_index/);
+assert.match(app, /get_persistent_fix_signature_index_status/);
+assert.match(app, /rebuild_persistent_fix_signature_index/);
+assert.match(indexHtml, /fix-index-panel/);
 
 // A package whose filename merely says Override must not change its loading
 // branch. The source branch, not a filename token, controls physical moves.

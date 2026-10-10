@@ -115,6 +115,8 @@ pub fn run() {
             health::remove_empty_folder,
             dependencies::analyze_dependencies,
             fix_signatures::build_persistent_fix_signature_index,
+            fix_signatures::get_persistent_fix_signature_index_status,
+            fix_signatures::rebuild_persistent_fix_signature_index,
             technical_search::technical_search,
             package_compare::compare_packages,
             inbox::scan_inbox,

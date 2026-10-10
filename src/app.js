@@ -171,6 +171,11 @@ const I18N = {
     cacheNoData: "No cache information.",
     openCacheFolder: "Open Cache",
     clearCache: "Clear Cache",
+    fixIndexTitle: "Fix signature index",
+    fixIndexNoData: "No model index loaded.",
+    rebuildFixIndex: "Rebuild from model",
+    fixIndexChooseModel: "Choose the manual model root",
+    fixIndexRebuilt: "Fix signature index rebuilt.",
     confirmClearCacheTitle: "Clear analysis cache?",
     confirmClearCacheMessage: "Only cached fingerprints will be deleted. Your packages and restore manifests will not be changed.",
     performanceDiagnostics: "Performance",
@@ -733,6 +738,11 @@ const I18N = {
     cacheNoData: "Sem informações de cache.",
     openCacheFolder: "Abrir Cache",
     clearCache: "Limpar Cache",
+    fixIndexTitle: "Índice de assinaturas de Fixes",
+    fixIndexNoData: "Nenhum índice do modelo carregado.",
+    rebuildFixIndex: "Reconstruir a partir do modelo",
+    fixIndexChooseModel: "Escolha a raiz do modelo manual",
+    fixIndexRebuilt: "Índice de assinaturas reconstruído.",
     confirmClearCacheTitle: "Limpar o cache de análise?",
     confirmClearCacheMessage: "Somente os fingerprints em cache serão apagados. Seus packages e manifestos de restauração não serão alterados.",
     performanceDiagnostics: "Desempenho",
@@ -1294,6 +1304,11 @@ const I18N = {
     cacheNoData: "Sin información de caché.",
     openCacheFolder: "Abrir Caché",
     clearCache: "Limpiar Caché",
+    fixIndexTitle: "Índice de firmas de Fixes",
+    fixIndexNoData: "No hay índice del modelo cargado.",
+    rebuildFixIndex: "Reconstruir desde el modelo",
+    fixIndexChooseModel: "Elige la raíz del modelo manual",
+    fixIndexRebuilt: "Índice de firmas reconstruido.",
     confirmClearCacheTitle: "¿Limpiar la caché de análisis?",
     confirmClearCacheMessage: "Solo se eliminarán los fingerprints en caché. Tus packages y manifiestos de restauración no se modificarán.",
     performanceDiagnostics: "Rendimiento",
@@ -1808,6 +1823,9 @@ const state = {
   toolsBusy: false,
   toolsError: "",
   toolsNotice: "",
+  fixIndexStatus: null,
+  fixIndexBusy: false,
+  fixIndexError: "",
   healthReport: null,
   healthSelected: new Set(),
   healthFilter: "all",
@@ -2089,6 +2107,9 @@ const el = {
   cacheSummary: document.querySelector("#cache-summary"),
   openCacheBtn: document.querySelector("#open-cache-btn"),
   clearCacheBtn: document.querySelector("#clear-cache-btn"),
+  fixIndexStatusDot: document.querySelector("#fix-index-status-dot"),
+  fixIndexSummary: document.querySelector("#fix-index-summary"),
+  rebuildFixIndexBtn: document.querySelector("#rebuild-fix-index-btn"),
   diagnosticsPanel: document.querySelector("#diagnostics-panel"),
   diagnosticsContent: document.querySelector("#diagnostics-content"),
   openManifestFolderBtn: document.querySelector("#open-manifest-folder-btn"),
@@ -2285,6 +2306,58 @@ async function refreshCacheInfo() {
     renderCachePanel();
     renderDiagnostics();
   }
+}
+
+async function refreshFixIndexStatus() {
+  if (!el.fixIndexSummary) return;
+  state.fixIndexError = "";
+  try {
+    state.fixIndexStatus = await invoke("get_persistent_fix_signature_index_status");
+  } catch (error) {
+    state.fixIndexStatus = null;
+    state.fixIndexError = String(error);
+  }
+  renderFixIndexPanel();
+}
+
+async function rebuildFixIndex() {
+  if (state.fixIndexBusy || toolsOperationLocked()) return;
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: t("fixIndexChooseModel"),
+  });
+  if (!selected || Array.isArray(selected)) return;
+  state.fixIndexBusy = true;
+  state.fixIndexError = "";
+  renderFixIndexPanel();
+  try {
+    await invoke("rebuild_persistent_fix_signature_index", { referenceRoot: selected });
+    state.toolsNotice = t("fixIndexRebuilt");
+    await refreshFixIndexStatus();
+  } catch (error) {
+    state.fixIndexError = String(error);
+  } finally {
+    state.fixIndexBusy = false;
+    renderFixIndexPanel();
+  }
+}
+
+function renderFixIndexPanel() {
+  if (!el.fixIndexSummary) return;
+  const status = state.fixIndexStatus;
+  el.fixIndexStatusDot.className =
+    "utility-dot " + (state.fixIndexBusy ? "busy" : state.fixIndexError ? "error" : status?.available ? "ready" : "");
+  if (state.fixIndexBusy) {
+    el.fixIndexSummary.textContent = t("scanning");
+  } else if (state.fixIndexError) {
+    el.fixIndexSummary.textContent = state.fixIndexError;
+  } else if (status?.available) {
+    el.fixIndexSummary.textContent = `${status.records} · v${status.version} · ${status.path}`;
+  } else {
+    el.fixIndexSummary.textContent = t("fixIndexNoData");
+  }
+  el.rebuildFixIndexBtn.disabled = state.fixIndexBusy || toolsOperationLocked();
 }
 
 async function clearAnalysisCache() {
@@ -6981,6 +7054,7 @@ function renderTools() {
   renderMetadataTools();
   renderTechnicalTools();
   renderHistoryTools();
+  renderFixIndexPanel();
 }
 
 function renderTabs() {
@@ -8764,6 +8838,7 @@ el.removeRestoreHistoryBtn.addEventListener("click", () => openConfirm("remove_r
 el.openManifestFolderBtn.addEventListener("click", () => openDirectorySafe(state.restoreManifest));
 el.openCacheBtn.addEventListener("click", () => openDirectorySafe(state.cacheInfo?.path));
 el.clearCacheBtn.addEventListener("click", () => openConfirm("clear_cache"));
+el.rebuildFixIndexBtn.addEventListener("click", rebuildFixIndex);
 for (const button of el.exportAuditButtons) {
   button.addEventListener("click", () => exportAuditReport(button.dataset.exportAudit));
 }
@@ -9061,6 +9136,7 @@ el.conflictsSearch.value = state.conflictsSearch;
 // Render the Manager immediately. Hidden Structure data must not hold the
 // shared folder picker and Scan CCs buttons disabled during startup.
 render();
+void refreshFixIndexStatus();
 
 if (state.folder) {
   void loadRestoreHistory();

@@ -286,6 +286,9 @@ pub fn clear_cache(folder: String) -> Result<bool, String> {
         .canonicalize()
         .map_err(|error| format!("Could not resolve cache root: {error}"))?;
 
+    // The learned Fix/Override model is a separate persistent evidence store.
+    // Clearing transient DBPF fingerprints must never remove or invalidate it;
+    // it is independently rebuilt through fix_signatures commands.
     let mut removed = false;
     for path in [cache_path(&root), legacy_cache_path(&root)] {
         if path.exists() {

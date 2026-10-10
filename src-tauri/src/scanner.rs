@@ -588,6 +588,50 @@ fn package_nmap_names(package: &Package) -> Vec<String> {
         .collect()
 }
 
+// NMAP is the preferred source for readable identifiers, but several of the
+// directed families expose their identity in another DBPF resource. Keep a
+// small allow-list of functional markers and inspect the decoded payloads so
+// relocation never turns a proven package back into unknown merely because
+// its filename or source folder changed.
+fn package_internal_identifiers(package: &Package) -> Vec<String> {
+    let mut identifiers = package_nmap_names(package);
+    let markers = [
+        "casdetails",
+        "deathbymeteorjig",
+        "minerexclusionjig",
+        "windowasian",
+        "acbody",
+        "adbody",
+        "albody",
+        "ccbody",
+        "cdbody",
+        "defaultface",
+        "defaultwhisker",
+        "defaultbrow",
+    ];
+    for entry in &package.entries {
+        if !matches!(
+            entry.type_id,
+            TYPE_LAYO_LOCAL
+                | TYPE_NMAP_LOCAL
+                | TYPE_STBL_LOCAL
+                | TYPE_MANIFEST_LOCAL
+                | TYPE_S3SA
+        ) {
+            continue;
+        }
+        let Ok(data) = package.data(entry) else { continue };
+        for marker in markers {
+            if contains_ascii_case_insensitive(&data, marker)
+                && !identifiers.iter().any(|value| value.eq_ignore_ascii_case(marker))
+            {
+                identifiers.push(marker.to_string());
+            }
+        }
+    }
+    identifiers
+}
+
 fn internal_name_contains(names: &[String], markers: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         let lower = name.to_ascii_lowercase();
@@ -605,10 +649,8 @@ fn internal_name_contains(names: &[String], markers: &[&str]) -> Option<String> 
 fn path_independent_directed_classification(
     types: &BTreeSet<u32>,
     internal_names: &[String],
-    name: &str,
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
-    let lower = name.to_ascii_lowercase();
     let corrections = match language {
         AppLanguage::En => "Corrections",
         AppLanguage::Pt => "Correções",
@@ -621,18 +663,22 @@ fn path_independent_directed_classification(
     };
     let gameplay = localized_special_folder(language, "gameplay");
 
+    let cas_layout_marker = internal_name_contains(internal_names, &["casdetails"]);
     if types.contains(&TYPE_LAYO_LOCAL)
         && !types.contains(&TYPE_CASP)
         && !types.contains(&TYPE_OBJD)
         && !types.contains(&TYPE_S3SA)
-        && lower.contains("casdetails")
+        && cas_layout_marker.is_some()
     {
         return Some(PackageFamilyClassification {
             main_category: replacements.to_string(),
             sub_category: Some("CAS".to_string()),
             folder_parts: vec![replacements.to_string(), "CAS".to_string()],
             detected_from: vec!["LAYO".to_string(), "CASLayoutIdentifier".to_string()],
-            technical_reason: "LAYO-only CAS detail layout with a stable CASDetails identifier => preserve under Substituições\\CAS after relocation.".to_string(),
+            technical_reason: format!(
+                "LAYO-only CAS detail layout with internal identifier '{}' => preserve under Substituições\\CAS after relocation.",
+                cas_layout_marker.unwrap_or_default()
+            ),
         });
     }
 
@@ -640,7 +686,15 @@ fn path_independent_directed_classification(
         internal_names,
         &["acbody", "adbody", "albody", "ccbody", "cdbody"],
     );
-    if lower.contains("ld_catdogaddons")
+    let body_marker_count = ["acbody", "adbody", "albody", "ccbody", "cdbody"]
+        .iter()
+        .filter(|marker| {
+            internal_names
+                .iter()
+                .any(|value| value.to_ascii_lowercase().contains(**marker))
+        })
+        .count();
+    if body_marker_count >= 2
         && types.contains(&TYPE_NMAP_LOCAL)
         && (types.contains(&0x015A_1849) || types.contains(&TYPE_IMG))
         && !types.contains(&TYPE_CASP)
@@ -671,21 +725,20 @@ fn path_independent_directed_classification(
         internal_names,
         &["deathbymeteorjig", "minerexclusionjig", "windowasian", "cat_", "dog", "horse"],
     );
-    if lower.contains("ohrudi")
-        && types.contains(&TYPE_NMAP_LOCAL)
+    if types.contains(&TYPE_NMAP_LOCAL)
         && ohrudi_marker.is_some()
         && !types.contains(&TYPE_CASP)
         && !types.contains(&TYPE_OBJD)
     {
-        let ep = if lower.contains("worldadventures")
-            || ohrudi_marker.as_deref().is_some_and(|value| value.to_ascii_lowercase().contains("windowasian"))
-        {
+        let marker_lower = ohrudi_marker
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let ep = if marker_lower.contains("windowasian") {
             Some("EP01")
-        } else if lower.contains("pets")
-            || ohrudi_marker.as_deref().is_some_and(|value| {
-                let value = value.to_ascii_lowercase();
-                value.contains("cat") || value.contains("dog") || value.contains("horse")
-            })
+        } else if marker_lower.contains("cat")
+            || marker_lower.contains("dog")
+            || marker_lower.contains("horse")
         {
             Some("EP05")
         } else {
@@ -724,11 +777,10 @@ fn phase3_directed_family_classification(
     relative: &str,
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
-    let internal_names = package_nmap_names(package);
+    let internal_names = package_internal_identifiers(package);
     if let Some(classification) = path_independent_directed_classification(
         types,
         &internal_names,
-        name,
         language,
     ) {
         return Some(classification);
@@ -2924,7 +2976,6 @@ mod tests {
         let gameplay = path_independent_directed_classification(
             &oh_rudi,
             &["deathByMeteorJig".into(), "minerExclusionJig".into()],
-            "OhRudi__Ambitions__Sims_need_less_Space.package",
             AppLanguage::Pt,
         ).unwrap();
         assert_eq!(gameplay.folder_parts, vec!["Correções", "Jogabilidade"]);
@@ -2932,7 +2983,6 @@ mod tests {
         let ep01 = path_independent_directed_classification(
             &BTreeSet::from([TYPE_NMAP_LOCAL, 0x03B4_C61D]),
             &["windowAsianRectangular_lightingdata".into()],
-            "OhRudi__WorldAdventures__asian_window_fix.package",
             AppLanguage::Pt,
         ).unwrap();
         assert_eq!(ep01.folder_parts, vec!["Correções", "Jogabilidade", "EPs Fixes", "EP01"]);
@@ -2940,15 +2990,13 @@ mod tests {
         let lazy = path_independent_directed_classification(
             &BTreeSet::from([TYPE_NMAP_LOCAL, 0x015A_1849, TYPE_IMG]),
             &["acBody_lod1_2".into(), "adBody_lod1".into()],
-            "ld_CatDogAddons_DefaultFaces.package",
             AppLanguage::Pt,
         ).unwrap();
         assert_eq!(lazy.folder_parts, vec!["Substituições", "Corpo", "Cães e Gatos", "Lazy Duchess"]);
 
         let layout = path_independent_directed_classification(
             &BTreeSet::from([TYPE_LAYO_LOCAL]),
-            &[],
-            "Anach_CASDetails8x2.package",
+            &["CASDetails8x2".into()],
             AppLanguage::Pt,
         ).unwrap();
         assert_eq!(layout.folder_parts, vec!["Substituições", "CAS"]);
@@ -2956,9 +3004,19 @@ mod tests {
         assert!(path_independent_directed_classification(
             &oh_rudi,
             &["genericObjectName".into()],
-            "unrelated.package",
             AppLanguage::Pt,
         ).is_none());
+
+        assert_eq!(
+            path_independent_directed_classification(
+                &oh_rudi,
+                &["deathByMeteorJig".into(), "minerExclusionJig".into()],
+                AppLanguage::Pt,
+            )
+            .unwrap()
+            .folder_parts,
+            vec!["Correções", "Jogabilidade"]
+        );
     }
 
     #[test]

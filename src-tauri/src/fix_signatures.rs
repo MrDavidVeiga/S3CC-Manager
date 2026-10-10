@@ -53,6 +53,18 @@ pub struct FixSignatureIndex {
     pub records: Vec<FixSignatureRecord>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixSignatureIndexStatus {
+    pub path: String,
+    pub available: bool,
+    pub version: Option<u32>,
+    pub records: usize,
+    pub generated_at: Option<String>,
+    pub reference_root: Option<String>,
+    pub can_rebuild: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct LearnedFixClassification {
     pub folder_parts: Vec<String>,
@@ -227,6 +239,22 @@ pub fn load_persistent_index() -> Option<FixSignatureIndex> {
     let text = fs::read_to_string(index_path()).ok()?;
     let index = serde_json::from_str::<FixSignatureIndex>(&text).ok()?;
     (index.version == INDEX_VERSION && !index.records.is_empty()).then_some(index)
+}
+
+/// Return an explicit, read-only status so the UI can verify whether scans
+/// are using the persistent model evidence instead of a test-only cache.
+pub fn persistent_index_status() -> FixSignatureIndexStatus {
+    let path = index_path();
+    let index = load_persistent_index();
+    FixSignatureIndexStatus {
+        path: path.to_string_lossy().to_string(),
+        available: index.is_some(),
+        version: index.as_ref().map(|value| value.version),
+        records: index.as_ref().map(|value| value.records.len()).unwrap_or(0),
+        generated_at: index.as_ref().map(|value| value.generated_at.clone()),
+        reference_root: index.as_ref().map(|value| value.reference_root.clone()),
+        can_rebuild: true,
+    }
 }
 
 fn discover_branches(root: &Path) -> Vec<(String, PathBuf)> {
@@ -476,6 +504,18 @@ pub fn build_persistent_fix_signature_index(
     Ok(index)
 }
 
+#[tauri::command]
+pub fn get_persistent_fix_signature_index_status() -> FixSignatureIndexStatus {
+    persistent_index_status()
+}
+
+#[tauri::command]
+pub fn rebuild_persistent_fix_signature_index(
+    reference_root: String,
+) -> Result<FixSignatureIndex, String> {
+    build_persistent_fix_signature_index(reference_root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +601,38 @@ mod tests {
         };
         assert!(best_match(&index, &resources, "Packages", "fix.package").is_none());
         assert!(best_match(&index, &resources, "Overrides", "anything.package").is_some());
+    }
+
+    #[test]
+    fn legitimate_override_fix_reference_keeps_branch_and_relative_destination() {
+        let cached = CachedPackage {
+            path: "model\\Overrides\\Fixes\\reference.package".to_string(),
+            size: 12,
+            modified_ns: 0,
+            file_sha256: "FILE".to_string(),
+            dbpf_major: Some(2),
+            dbpf_minor: Some(0),
+            resources: vec![CachedResource {
+                type_id: 0x073F_AA07,
+                group: 0,
+                instance: 1,
+                payload_sha256: "PAYLOAD".to_string(),
+                payload_size: 7,
+                file_size: 7,
+                mem_size: 7,
+                compressed: 0,
+            }],
+            parse_error: None,
+        };
+        let record = record_from_cached(
+            &cached,
+            "Overrides",
+            "Fixes",
+            "Overrides\\Fixes\\reference.package",
+        )
+        .unwrap();
+        assert_eq!(record.loading_branch, "Overrides");
+        assert_eq!(record.canonical_destination, "Fixes");
     }
 
     #[test]
