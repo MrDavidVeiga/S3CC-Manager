@@ -4,8 +4,8 @@ use crate::{
     manifest::{
         replace_manifest_atomic, sha256_file, write_manifest_atomic, RestoreEntry, RestoreManifest,
     },
-    planner::{build_organization_plan_with_cfg, PlanItem},
-    scanner::invalidate_latest_scan_for,
+    planner::{build_organization_plan_with_cfg, OrganizationAnalysisSnapshot, PlanItem},
+    scanner::{invalidate_latest_scan_for, scan_packages_core},
     operation,
     resource_cfg::{parse_resource_cfg, package_priority},
     resource_cfg_update::{apply_resource_cfg_update, rollback_resource_cfg_update},
@@ -37,6 +37,9 @@ pub struct ExecutionResult {
     pub remaining_legacy_examples: Vec<String>,
     pub remaining_legacy_details: Vec<LegacyRemainder>,
     pub errors: Vec<String>,
+    pub analysis_before: OrganizationAnalysisSnapshot,
+    pub execution: OrganizationAnalysisSnapshot,
+    pub analysis_current: Option<OrganizationAnalysisSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -374,6 +377,10 @@ fn remaining_legacy_details(
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
     plan_items: &[PlanItem],
 ) -> Vec<LegacyRemainder> {
+    let moved_destinations = moved_pairs.iter()
+        .filter_map(|(_, destination, _, _)| destination.strip_prefix(root).ok())
+        .map(|path| path.to_string_lossy().replace('/', "\\").to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
     let mut folders = BTreeSet::new();
     for (source, _, _, _) in moved_pairs {
         if let Some(parent) = source.parent() {
@@ -404,6 +411,13 @@ fn remaining_legacy_details(
             if entry.file_type().is_file() {
                 if let Ok(relative) = entry.path().strip_prefix(root) {
                     let relative = relative.to_string_lossy().replace('/', "\\");
+                    // A destination can legitimately remain below the same
+                    // ancestor as its old source (for example
+                    // Packages\\Substituições -> Packages\\Substituições\\CAS).
+                    // It is current content, not a legacy remainder.
+                    if moved_destinations.contains(&relative.to_ascii_lowercase()) {
+                        continue;
+                    }
                     if !remaining.insert(relative.clone()) {
                         continue;
                     }
@@ -511,6 +525,9 @@ fn execute_organization_core(
             .take(12)
             .map(|detail| detail.relative_path.clone())
             .collect();
+        let analysis_current = scan_packages_core(root.to_string_lossy().to_string(), language, None)
+            .ok()
+            .map(|scan| OrganizationAnalysisSnapshot::from_scan("analysis_current", &scan.stats));
         return Ok(ExecutionResult {
             status: "NO_CHANGES".to_string(),
             moved_files: Vec::new(),
@@ -525,6 +542,9 @@ fn execute_organization_core(
             remaining_legacy_examples,
             remaining_legacy_details,
             errors: cleanup_warnings,
+            analysis_before: plan.analysis_before.clone(),
+            execution: plan.analysis_before.clone().with_plan(&plan.stats, remaining_legacy_files),
+            analysis_current,
         });
     }
 
@@ -756,6 +776,9 @@ fn execute_organization_core(
             remaining_legacy_examples: Vec::new(),
             remaining_legacy_details: Vec::new(),
             errors,
+            analysis_before: plan.analysis_before.clone(),
+            execution: plan.analysis_before.clone().with_plan(&plan.stats, 0),
+            analysis_current: None,
         });
     }
 
@@ -780,6 +803,9 @@ fn execute_organization_core(
     // Invalidate the Rust scan cache before any later plan preview: the
     // cache contains pre-move absolute paths and must never be reused.
     invalidate_latest_scan_for(&root);
+    let analysis_current = scan_packages_core(root.to_string_lossy().to_string(), language, None)
+        .ok()
+        .map(|scan| OrganizationAnalysisSnapshot::from_scan("analysis_current", &scan.stats));
     let moved_files = moved_pairs.iter().map(|(source, destination, _, _)| {
         OrganizationMove {
             source_path: source.to_string_lossy().to_string(),
@@ -806,6 +832,9 @@ fn execute_organization_core(
         remaining_legacy_examples,
         remaining_legacy_details,
         errors: cleanup_warnings,
+        analysis_before: plan.analysis_before.clone(),
+        execution: plan.analysis_before.clone().with_plan(&plan.stats, remaining_legacy_files),
+        analysis_current,
     })
 }
 
@@ -867,6 +896,24 @@ mod tests {
         assert!(old.join("picture.png").exists());
         assert!(old.join("extra.package.disabled").exists());
         assert!(examples.iter().any(|path| path.ends_with("Nested Legacy\\Sliders\\nested.package")));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn does_not_count_a_verified_destination_as_a_legacy_remainder() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-legacy-destination-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let old = root.join("Packages").join("Substituições");
+        let destination = old.join("CAS").join("replacement.package");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"moved").unwrap();
+        let source = old.join("replacement.package");
+        let moved = vec![(source, destination, String::new(), 5u64)];
+        let details = remaining_legacy_details(&root, &moved, &[]);
+        assert!(details.is_empty(), "destination must not be counted as legacy content: {details:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -302,6 +302,19 @@ pub fn matching_rule<'a>(
                 return false;
             }
         }
+        // A path-only rule is not stable after organization: moving a package
+        // from a legacy folder into its canonical destination would make the
+        // same DBPF change category on the next analysis. Path matching remains
+        // available as a scoped refinement, but a folder name alone cannot
+        // override evidence-based classification.
+        if rule.path_contains.is_some()
+            && rule.category.is_none()
+            && rule.sub_category.is_none()
+            && rule.detected_from.is_none()
+            && rule.name_contains.is_none()
+        {
+            return false;
+        }
         if let Some(expected) = &rule.path_contains {
             if !path_lower.contains(&expected.to_ascii_lowercase()) {
                 return false;
@@ -535,5 +548,22 @@ mod tests {
             ..OrganizationProfile::default()
         };
         assert!(matching_rule(&profile, "a.package", "x", Some("CAS"), Some("Hair"), &[]).is_some());
+    }
+
+    #[test]
+    fn path_only_custom_rule_cannot_change_after_relocation() {
+        let profile = OrganizationProfile {
+            rules: vec![CustomRule {
+                id: "legacy-folder".into(),
+                name: "Legacy folder only".into(),
+                enabled: true,
+                path_contains: Some("Substituições".into()),
+                destination: "Roupas".into(),
+                ..CustomRule::default()
+            }],
+            ..OrganizationProfile::default()
+        };
+        assert!(matching_rule(&profile, "replacement.package", "Packages/Substituições/replacement.package", None, None, &[]).is_none());
+        assert!(matching_rule(&profile, "replacement.package", "Packages/CAS/replacement.package", None, None, &[]).is_none());
     }
 }

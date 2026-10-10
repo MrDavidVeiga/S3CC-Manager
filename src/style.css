@@ -4079,14 +4079,19 @@ button:disabled {
 
 .manager-list-footer-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+  align-items: stretch;
 }
 
-.manager-list-footer-actions .primary-btn,
-.manager-list-footer-actions .danger-btn {
+.manager-list-footer-actions > :is(.primary-btn, .secondary-btn, .danger-btn) {
   width: 100%;
   min-width: 0;
+  min-height: 42px;
+  padding-inline: 10px;
+  line-height: 1.2;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .maintenance-grid {
@@ -4455,7 +4460,6 @@ button:disabled {
 }
 
 @media (max-width: 760px) {
-  .manager-list-footer-actions,
   .duplicate-pair {
     grid-template-columns: 1fr;
   }

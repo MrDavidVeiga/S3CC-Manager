@@ -4,7 +4,7 @@ use crate::{
     manifest::sha256_file,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     resource_cfg_update::{preview_resource_cfg_update, ResourceCfgUpdate},
-    scanner::{cached_scan_for, scan_packages_core, ScanPackageItem},
+    scanner::{cached_scan_for, scan_packages_core, ScanPackageItem, ScanStats},
     workspace::{
         active_profile, is_protected, load_workspace_for_root, matching_rule,
         split_destination,
@@ -48,6 +48,57 @@ pub struct PlanStats {
     pub blocked: usize,
     pub directories_to_create: usize,
     pub empty_folders_to_clean: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationAnalysisSnapshot {
+    pub phase: String,
+    pub packages: usize,
+    pub classified: usize,
+    pub mixed: usize,
+    pub unknown: usize,
+    pub needs_review: usize,
+    pub invalid: usize,
+    pub ready: usize,
+    pub already_organized: usize,
+    pub duplicate_skipped: usize,
+    pub collision_same_content: usize,
+    pub collision_different_content: usize,
+    pub blocked: usize,
+    pub remaining_legacy_files: usize,
+}
+
+impl OrganizationAnalysisSnapshot {
+    pub fn from_scan(phase: &str, stats: &ScanStats) -> Self {
+        Self {
+            phase: phase.to_string(),
+            packages: stats.packages,
+            classified: stats.classified,
+            mixed: stats.mixed,
+            unknown: stats.unknown,
+            needs_review: stats.needs_review,
+            invalid: stats.invalid,
+            ready: 0,
+            already_organized: 0,
+            duplicate_skipped: 0,
+            collision_same_content: 0,
+            collision_different_content: 0,
+            blocked: 0,
+            remaining_legacy_files: 0,
+        }
+    }
+
+    pub fn with_plan(mut self, stats: &PlanStats, remaining_legacy_files: usize) -> Self {
+        self.ready = stats.ready;
+        self.already_organized = stats.already_organized;
+        self.duplicate_skipped = stats.duplicate_skipped;
+        self.collision_same_content = stats.collision_same_content;
+        self.collision_different_content = stats.collision_different_content;
+        self.blocked = stats.blocked;
+        self.remaining_legacy_files = remaining_legacy_files;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -384,6 +435,7 @@ pub struct OrganizationPlan {
     pub manifest_preview: String,
     pub resource_cfg_update: Option<ResourceCfgUpdate>,
     pub can_execute: bool,
+    pub analysis_before: OrganizationAnalysisSnapshot,
 }
 
 fn language_code(language: AppLanguage) -> &'static str {
@@ -1793,9 +1845,11 @@ pub fn build_organization_plan_with_cfg(
         manifest_preview: manifest_preview(&root, language, &ready_items),
         directories_to_create: directories.into_iter().collect(),
         resource_cfg_update,
-        stats,
+        stats: stats.clone(),
         items,
         can_execute,
+        analysis_before: OrganizationAnalysisSnapshot::from_scan("analysis_before", &scan.stats)
+            .with_plan(&stats, 0),
     })
 }
 

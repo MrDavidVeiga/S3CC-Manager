@@ -2888,6 +2888,16 @@ function buildScopedAuditMarkdown(snapshot) {
       " · Ready: " + (organizer?.planStats?.ready ?? "not_calculated") +
       " · Blocked: " + (organizer?.planStats?.blocked ?? "not_calculated") +
       " · Empty directories: " + (organizer?.planStats?.emptyFoldersToClean ?? "not_calculated"), "");
+    const execution = organizer?.lastExecution;
+    if (execution?.analysisBefore || execution?.execution || execution?.analysisCurrent) {
+      const phase = snapshot => snapshot
+        ? `${snapshot.phase}: ${snapshot.packages ?? 0} packages, ${snapshot.unknown ?? 0} unknown, ${snapshot.remainingLegacyFiles ?? 0} legacy leftovers`
+        : "not available";
+      lines.push(
+        `Analysis phases: ${phase(execution.analysisBefore)} · ${phase(execution.execution)} · ${phase(execution.analysisCurrent)}`,
+        ""
+      );
+    }
     lines.push(
       `Packages: ${stats.packages ?? organizer?.packages?.length ?? 0} · ${t("classified")}: ${stats.classified ?? 0} · ${t("mixed")}: ${stats.mixed ?? 0} · ${t("needsReview")}: ${stats.needsReview ?? 0} · ${t("invalid")}: ${stats.invalid ?? 0}`,
       "",
@@ -8485,6 +8495,10 @@ async function executeOrganization() {
         oldFoldersRetained: result.oldFoldersRetained ?? 0,
         remainingLegacyFiles: result.remainingLegacyFiles ?? 0,
         remainingLegacyExamples: result.remainingLegacyExamples ?? [],
+        remainingLegacyDetails: result.remainingLegacyDetails ?? [],
+        analysisBefore: result.analysisBefore ?? completedPlan.analysisBefore ?? null,
+        execution: result.execution ?? null,
+        analysisCurrent: result.analysisCurrent ?? null,
       };
       state.organizationCollisionItems = collisionItems;
 

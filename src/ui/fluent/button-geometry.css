@@ -75,6 +75,18 @@ body.release-v1 :is(
   align-self: stretch;
 }
 
+body.release-v1 #page-organizer .manager-list-footer-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+}
+body.release-v1 #page-organizer .manager-list-footer-actions > :is(.primary-btn,.secondary-btn,.danger-btn) {
+  min-width: 0;
+  width: 100%;
+  min-height: var(--fluent-control-height);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /*
  * Sims3Pack toolbar: the original 190px flex basis was too narrow for
  * "Converter para .package" at the standard 14px Semibold and 125% DPI.
