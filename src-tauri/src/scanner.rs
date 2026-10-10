@@ -1,6 +1,7 @@
 use crate::{
     catalog::{classify_resource, CatalogClassification, TYPE_CASP, TYPE_OBJD},
     dbpf::Package,
+    fix_signatures::{self, FixSignatureIndex},
     i18n::AppLanguage,
     manifest::sha256_file,
     operation::{self, CANCELLED_ERROR},
@@ -2246,6 +2247,7 @@ fn scan_one(
     path: &Path,
     language: AppLanguage,
     slider_instances: &mut HashSet<u64>,
+    fix_index: Option<&FixSignatureIndex>,
 ) -> ScanPackageItem {
     let relative = path
         .strip_prefix(root)
@@ -2259,6 +2261,14 @@ fn scan_one(
         .to_string();
     let id = path.to_string_lossy().to_string();
     let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let source_is_override = root
+        .file_name()
+        .is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("Overrides"))
+        || relative
+            .replace('\\', "/")
+            .split('/')
+            .next()
+            .is_some_and(|value| value.eq_ignore_ascii_case("Overrides"));
 
     let package = match Package::load(path) {
         Ok(package) => package,
@@ -2339,6 +2349,25 @@ fn scan_one(
     }
 
     let special_primary = merged_sim_export_classification(&package, language)
+        .or_else(|| {
+            fix_signatures::learned_fix_classification(
+                &package,
+                fix_index,
+                &name,
+                source_is_override,
+            )
+            .map(|classification| PackageFamilyClassification {
+                main_category: classification
+                    .folder_parts
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Correções".to_string()),
+                sub_category: classification.folder_parts.get(1).cloned(),
+                folder_parts: classification.folder_parts,
+                detected_from: classification.detected_from,
+                technical_reason: classification.technical_reason,
+            })
+        })
         .or_else(|| {
             phase3_directed_family_classification(
                 &package,
@@ -2762,6 +2791,7 @@ pub fn scan_packages_core(
 
     let mut items = Vec::with_capacity(package_paths.len());
     let mut slider_instances = HashSet::<u64>::new();
+    let fix_index = fix_signatures::load_persistent_index();
 
     for (index, path) in package_paths.iter().enumerate() {
         if let Some(kind) = operation_kind {
@@ -2770,7 +2800,13 @@ pub fn scan_packages_core(
             }
         }
 
-        items.push(scan_one(&root, path, language, &mut slider_instances));
+        items.push(scan_one(
+            &root,
+            path,
+            language,
+            &mut slider_instances,
+            fix_index.as_ref(),
+        ));
 
         if let Some(kind) = operation_kind {
             let processed = index + 1;

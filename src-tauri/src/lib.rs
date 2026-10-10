@@ -29,6 +29,7 @@ pub mod workspace;
 pub mod snapshots;
 pub mod health;
 pub mod dependencies;
+pub mod fix_signatures;
 pub mod technical_search;
 pub mod package_compare;
 pub mod inbox;
@@ -113,6 +114,7 @@ pub fn run() {
             health::analyze_mods_health,
             health::remove_empty_folder,
             dependencies::analyze_dependencies,
+            fix_signatures::build_persistent_fix_signature_index,
             technical_search::technical_search,
             package_compare::compare_packages,
             inbox::scan_inbox,
