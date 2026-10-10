@@ -3412,6 +3412,7 @@ mod tests {
                 "internalIdentifiers": internal_identifiers,
                 "asciiPreview": ascii_preview,
                 "status": item.status,
+                "confidence": item.classification_confidence,
                 "category": item.category,
                 "destination": item.destination_parts,
                 "detectedFrom": item.detected_from,
