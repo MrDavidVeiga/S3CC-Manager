@@ -13,7 +13,7 @@ use crate::{
 use chrono::{Local, SecondsFormat};
 use serde::Serialize;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -105,6 +105,135 @@ impl OrganizationAnalysisSnapshot {
 struct ResourceCfgContext {
     info: ResourceCfgInfo,
     directory: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct ManualModelFile {
+    relative_path: String,
+    directory_parts: Vec<String>,
+    file_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct ManualModelIndex {
+    directories: BTreeMap<String, Vec<String>>,
+    files_by_sha256: HashMap<String, Vec<ManualModelFile>>,
+}
+
+#[derive(Debug, Clone)]
+struct ModelDestination {
+    parts: Vec<String>,
+    evidence: String,
+}
+
+fn model_key(parts: &[String]) -> String {
+    parts.iter().map(|part| part.to_lowercase()).collect::<Vec<_>>().join("\u{1f}")
+}
+
+fn model_relative_components(path: &Path) -> Result<Vec<String>, String> {
+    path.components().map(|component| match component {
+        Component::Normal(value) => Ok(value.to_string_lossy().to_string()),
+        _ => Err(format!("Unsafe model path: {}", path.display())),
+    }).collect()
+}
+
+fn is_package_file(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()).map(|name| {
+        let name = name.to_lowercase();
+        name.ends_with(".package") || name.ends_with(".package.disabled")
+    }).unwrap_or(false)
+}
+
+fn build_manual_model_index(root: &Path) -> Result<ManualModelIndex, String> {
+    if !root.is_dir() {
+        return Err(format!("The official manual model Packages directory is unavailable: {}", root.display()));
+    }
+    let mut directories = BTreeMap::new();
+    let mut files_by_sha256 = HashMap::<String, Vec<ManualModelFile>>::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
+        let relative = entry.path().strip_prefix(root)
+            .map_err(|error| format!("Could not index model path: {error}"))?;
+        let components = model_relative_components(relative)?;
+        if entry.file_type().is_dir() {
+            directories.insert(model_key(&components), components);
+            continue;
+        }
+        if !entry.file_type().is_file() || !is_package_file(entry.path()) { continue; }
+        let file_name = components.last().cloned()
+            .ok_or_else(|| format!("Model package has no filename: {}", entry.path().display()))?;
+        let directory_parts = components[..components.len().saturating_sub(1)].to_vec();
+        let (sha256, _) = sha256_file(entry.path()).map_err(|error| {
+            format!("Could not hash model package {}: {error}", entry.path().display())
+        })?;
+        files_by_sha256.entry(sha256.to_ascii_uppercase()).or_default().push(ManualModelFile {
+            relative_path: relative_key(relative), directory_parts, file_name,
+        });
+    }
+    Ok(ManualModelIndex { directories, files_by_sha256 })
+}
+
+fn manual_model_packages_root() -> Result<PathBuf, String> {
+    if let Ok(value) = std::env::var("S3CC_MANUAL_MODEL_PACKAGES") {
+        let path = PathBuf::from(value.trim());
+        if !path.as_os_str().is_empty() { return Ok(path); }
+    }
+    let downloads = dirs::download_dir()
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).map(|path| path.join("Downloads")))
+        .ok_or_else(|| "Could not locate the current user's Downloads directory for the official manual model.".to_string())?;
+    Ok(downloads.join("Mods - ESTRUTURA MODELO").join("Packages"))
+}
+
+fn model_parts_for_selected_root(root: &Path, source: &Path, model_parts: &[String]) -> Result<Vec<String>, String> {
+    if is_mods_root(root) {
+        let mut parts = vec!["Packages".to_string()]; parts.extend(model_parts.iter().cloned()); return Ok(parts);
+    }
+    if let Some(branch) = loading_branch_ancestor(root, is_packages_root) {
+        let target = branch.join(model_parts.iter().collect::<PathBuf>());
+        if !path_is_within_root(root, &target) {
+            return Err(format!("The exact model destination for '{}' is outside the selected Packages subtree.", source.display()));
+        }
+        return target.strip_prefix(root).map(|relative| {
+            relative_key(relative).split('\\').map(str::to_string).collect()
+        }).map_err(|error| format!("Could not derive model destination: {error}"));
+    }
+    if is_packages_root(root) { return Ok(model_parts.to_vec()); }
+    Ok(model_parts.to_vec())
+}
+
+fn strip_packages_prefix(parts: &[String]) -> Vec<String> {
+    if parts.first().is_some_and(|part| part.eq_ignore_ascii_case("Packages")) { parts[1..].to_vec() } else { parts.to_vec() }
+}
+
+fn resolve_model_destination(index: &ManualModelIndex, root: &Path, source: &Path, source_hash: &str, candidate_parts: &[String]) -> Result<ModelDestination, String> {
+    let name = source.file_name().and_then(|value| value.to_str())
+        .ok_or_else(|| format!("Package has no valid filename: {}", source.display()))?;
+    if let Some(matches) = index.files_by_sha256.get(&source_hash.to_ascii_uppercase()) {
+        let named = matches.iter().filter(|entry| entry.file_name.eq_ignore_ascii_case(name)).collect::<Vec<_>>();
+        let considered = if named.is_empty() { matches.iter().collect::<Vec<_>>() } else { named };
+        let directories = considered.iter().map(|entry| model_key(&entry.directory_parts)).collect::<BTreeSet<_>>();
+        if directories.len() > 1 {
+            let candidate_key = model_key(&strip_packages_prefix(candidate_parts));
+            if let Some(entry) = considered.iter().find(|entry| model_key(&entry.directory_parts) == candidate_key) {
+                let parts = model_parts_for_selected_root(root, source, &entry.directory_parts)?;
+                return Ok(ModelDestination {
+                    parts,
+                    evidence: format!("Exact SHA-256 match disambiguated by the internal classification and model directory: {}", entry.relative_path),
+                });
+            }
+            return Err(format!("The SHA-256 matches multiple different canonical model destinations: {}",
+                considered.iter().map(|entry| entry.relative_path.clone()).collect::<Vec<_>>().join(" | ")));
+        }
+        let directory_key = directories.into_iter().next().ok_or_else(|| "The model hash match has no canonical directory.".to_string())?;
+        let model_parts = index.directories.get(&directory_key).cloned().unwrap_or_else(|| considered[0].directory_parts.clone());
+        let parts = model_parts_for_selected_root(root, source, &model_parts)?;
+        return Ok(ModelDestination { parts, evidence: format!("Exact SHA-256 match in the manual model: {}", considered.iter().map(|entry| entry.relative_path.as_str()).collect::<Vec<_>>().join(" | ")) });
+    }
+    let candidate = strip_packages_prefix(candidate_parts);
+    let Some(canonical_parts) = index.directories.get(&model_key(&candidate)).cloned() else {
+        return Err(format!("No exact directory in the manual model matches the classified destination '{}'. The package remains protected for review.", candidate_parts.join("\\")));
+    };
+    let parts = model_parts_for_selected_root(root, source, &canonical_parts)?;
+    Ok(ModelDestination { parts, evidence: format!("The classified destination matched the model directory exactly: {}", canonical_parts.join("\\")) })
 }
 
 fn resource_cfg_context(root: &Path) -> Option<ResourceCfgContext> {
@@ -1041,6 +1170,10 @@ pub fn build_organization_plan_with_cfg(
     if !root.is_dir() {
         return Err(format!("Root is not a directory: {}", root.display()));
     }
+    // Read the official model for every plan. Folder names that merely look
+    // like categories are never enough to mark a package organized.
+    let manual_model_root = manual_model_packages_root()?;
+    let manual_model = build_manual_model_index(&manual_model_root)?;
     // The selected root can be Mods, any Packages/Overrides subfolder, or a
     // self-contained CC staging library elsewhere. All moves remain inside
     // this canonical root. Never invent an out-of-root destination.
@@ -1262,6 +1395,10 @@ pub fn build_organization_plan_with_cfg(
             });
             continue;
         }
+        let is_override_source = source_uses_overrides(&root, &source_canonical);
+        let hash_model_destination = if is_override_source { None } else {
+            Some(resolve_model_destination(&manual_model, &root, &source_canonical, &source_hash, &item.destination_parts))
+        };
         let outside_active_branch = packages_root
             .as_ref()
             .is_some_and(|packages| !path_is_within_root(packages, &source_canonical))
@@ -1346,7 +1483,17 @@ pub fn build_organization_plan_with_cfg(
         // original folder forever. Move safely selected unknowns to a review
         // area (with their source hierarchy intact). Do not redirect Overrides
         // or invalid/mixed packages without a manual decision.
-        if item.status == "unknown" && !source_uses_overrides(&root, &source_canonical) {
+        if item.status == "unknown" && !is_override_source {
+            if let Some(Err(reason)) = hash_model_destination.as_ref() {
+                stats.blocked += 1;
+                items.push(make_blocked(item, reason.clone()));
+                continue;
+            }
+            if hash_model_destination.is_some() {
+                // A model hash match continues through the exact destination
+                // path below. Unknown packages without a safe model match are
+                // protected for review instead of falling back by approximation.
+            } else {
             let (fallback_relative, fallback_parts) =
                 fallback_relative_path(&root, language, &item.relative_path, &source_hash)?;
             // The fallback may choose a unique SHA-named file if its normal
@@ -1477,15 +1624,16 @@ pub fn build_organization_plan_with_cfg(
                 }],
             });
             continue;
+            }
         }
 
         let verified_companion = item.status == "classified"
             && item.classification_confidence == "medium"
             && item.detected_from.iter().any(|source| source == "ModFolderCompanion");
-        if item.status != "classified"
+        if is_override_source && (item.status != "classified"
             || item.destination_parts.is_empty()
             || (!matches!(item.classification_confidence.as_str(), "high" | "manual")
-                && !verified_companion)
+                && !verified_companion))
         {
             let source_size = fs::metadata(&source)
                 .map_err(|error| format!("Could not stat {}: {error}", source.display()))?
@@ -1554,6 +1702,27 @@ pub fn build_organization_plan_with_cfg(
             destination_parts = prefixed;
         }
 
+        let model_destination = if is_override_source { None } else if let Some(result) = hash_model_destination.as_ref() {
+            match result {
+                Ok(destination) => Some(destination.clone()),
+                Err(reason) => {
+                    stats.blocked += 1;
+                    items.push(make_blocked(item, format!("No safe exact destination for '{}': {reason}", item.name)));
+                    continue;
+                }
+            }
+        } else {
+            match resolve_model_destination(&manual_model, &root, &source_canonical, &source_hash, &destination_parts) {
+                Ok(destination) => Some(destination),
+                Err(reason) => { stats.blocked += 1; items.push(make_blocked(item, reason)); continue; }
+            }
+        };
+        let model_locked = model_destination.is_some();
+        if let Some(model_destination) = &model_destination {
+            destination_parts = model_destination.parts.clone();
+            classification_reason = Some(format!("{} | Official model destination: {}", classification_reason.unwrap_or_default(), model_destination.evidence));
+        }
+
         let file_name = source
             .file_name()
             .ok_or_else(|| format!("Source has no filename: {}", source.display()))?;
@@ -1579,6 +1748,11 @@ pub fn build_organization_plan_with_cfg(
         };
         match cfg_fit {
             Ok((fitted, note)) => {
+                if model_locked && fitted != destination_parts {
+                    stats.blocked += 1;
+                    items.push(make_blocked(item, format!("The exact manual-model destination '{}' is not loadable under the current Resource.cfg; no alternate folder will be invented.", destination_parts.join("\\"))));
+                    continue;
+                }
                 destination_parts = fitted;
                 if let Some(note) = note {
                     classification_reason = Some(format!(
@@ -1664,7 +1838,7 @@ pub fn build_organization_plan_with_cfg(
         }
         let destination_relative_text = relative_key(&destination_relative);
 
-        if relative_key(Path::new(&item.relative_path)).eq_ignore_ascii_case(&destination_relative_text) {
+        if relative_key(Path::new(&item.relative_path)) == destination_relative_text {
             stats.already_organized += 1;
             items.push(PlanItem {
                 id: item.id.clone(),
@@ -2548,5 +2722,53 @@ mod tests {
         assert!(text.contains("organization_language=pt"));
         assert!(text.contains("original=Old\\x.package"));
         assert!(text.contains("organized=CAS\\Hair\\x.package"));
+    }
+
+    #[test]
+    fn manual_model_rejects_partial_category_names_and_resolves_exact_hash_paths() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let base = std::env::temp_dir().join(format!("s3cc-exact-model-destination-{}-{nonce}", std::process::id()));
+        let model = base.join("Packages");
+        let selected = base.join("Copy").join("Packages");
+        std::fs::create_dir_all(model.join("Sliders")).unwrap();
+        std::fs::create_dir_all(model.join("Roupas").join("Feminino")).unwrap();
+        std::fs::create_dir_all(selected.join("#9 Sliders")).unwrap();
+        std::fs::create_dir_all(selected.join("Criador").join("Sliders")).unwrap();
+        let canonical = model.join("Sliders").join("slider.package");
+        let misplaced = selected.join("#9 Sliders").join("slider.package");
+        std::fs::write(&canonical, b"real slider bytes").unwrap();
+        std::fs::write(&misplaced, b"real slider bytes").unwrap();
+        let index = build_manual_model_index(&model).unwrap();
+        let (hash, _) = sha256_file(&misplaced).unwrap();
+        let resolved = resolve_model_destination(&index, &selected, &misplaced, &hash, &["#9 Sliders".to_string()]).unwrap();
+        assert_eq!(resolved.parts, vec!["Sliders"]);
+        assert_ne!(relative_key(Path::new("#9 Sliders\\slider.package")), format!("{}\\slider.package", resolved.parts.join("\\")));
+        let wrong = resolve_model_destination(&index, &selected, &selected.join("Criador").join("Sliders").join("new.package"), "NOT-IN-MODEL", &["Criador".to_string(), "Sliders".to_string()]);
+        assert!(wrong.is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn manual_model_keeps_same_hash_in_distinct_canonical_folders_ambiguous() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let base = std::env::temp_dir().join(format!("s3cc-ambiguous-model-destination-{}-{nonce}", std::process::id()));
+        let model = base.join("Packages");
+        std::fs::create_dir_all(model.join("A")).unwrap();
+        std::fs::create_dir_all(model.join("B")).unwrap();
+        let bytes = b"same bytes in two model destinations";
+        std::fs::write(model.join("A").join("same.package"), bytes).unwrap();
+        std::fs::write(model.join("B").join("same.package"), bytes).unwrap();
+        let source = base.join("source").join("same.package");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, bytes).unwrap();
+        let index = build_manual_model_index(&model).unwrap();
+        let (hash, _) = sha256_file(&source).unwrap();
+        let result = resolve_model_destination(&index, &base.join("source"), &source, &hash, &[]);
+        assert!(result.unwrap_err().contains("multiple different canonical model destinations"));
+        let resolved = resolve_model_destination(&index, &base.join("source"), &source, &hash, &["A".to_string()]).unwrap();
+        assert_eq!(resolved.parts, vec!["A"]);
+        std::fs::remove_dir_all(base).unwrap();
     }
 }
