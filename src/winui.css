@@ -737,3 +737,31 @@ html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list 
     background:Highlight;color:HighlightText;border-color:Highlight;
   }
 }
+
+/* Keep Manager social links identical to Packer's Fluent hover and pressed effect. */
+:root {--theme-icon-hover:var(--accent-light-1,var(--accent));}
+html[data-resolved-mode="light"] {--theme-icon-hover:var(--accent-dark-2,var(--accent));}
+html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list li a {
+  box-sizing:border-box;width:30px;height:30px;border:1px solid transparent;
+  border-radius:var(--winui-control-radius,4px);background:transparent;
+  color:var(--winui-text-secondary);transform:translateY(0);
+  transition:background-color .18s ease,border-color .18s ease,color .18s ease,transform .18s ease;
+}
+html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list li a:hover,
+html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list li a:focus-visible {
+  color:var(--theme-icon-hover);background:var(--accent-low);border-color:var(--accent-outline);
+  transform:translateY(-2px);
+}
+html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list li a:active {
+  background:var(--winui-control-fill-pressed);transform:translateY(0);
+}
+@media(prefers-reduced-motion:reduce) {
+  html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list li a {
+    transition:none;
+  }
+  html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list li a:hover,
+  html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list li a:focus-visible,
+  html[data-theme-choice] body.release-v1 .winui-social-footer .social-icons-list li a:active {
+    transform:none;
+  }
+}
