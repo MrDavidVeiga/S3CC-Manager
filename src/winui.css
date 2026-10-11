@@ -611,3 +611,98 @@ body.release-v1 .icon-btn:focus-visible:not(:disabled) {
   background: var(--accent-low);
   border-color: var(--accent-outline);
 }
+
+/* WinUI 3 ItemContainer / GridView-like thumbnail cards (WebView presentation).
+   Duplicates: only the checked quarantine member receives a selection mark.
+   Conflict and relationship thumbnails are informational, never checked. */
+body.release-v1 .duplicate-member,
+body.release-v1 .duplicate-pair article,
+body.release-v1 .conflict-pair article {
+  position: relative;
+  border: 1px solid var(--winui-control-stroke, var(--panel-border));
+  border-radius: var(--winui-control-radius, 4px);
+  background: var(--winui-card-fill, var(--surface));
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+body.release-v1 .duplicate-member:hover,
+body.release-v1 .duplicate-pair article:hover,
+body.release-v1 .conflict-pair article:hover {
+  border-color: var(--winui-control-stroke-strong, var(--panel-border));
+  background: var(--winui-card-fill-alt, var(--surface));
+}
+
+body.release-v1 .duplicate-member:focus-within,
+body.release-v1 .duplicate-pair article:focus-within,
+body.release-v1 .conflict-pair article:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+body.release-v1 .duplicate-member-visual {
+  position: relative;
+  border-radius: var(--winui-control-radius, 4px);
+}
+
+body.release-v1 .duplicate-member-thumb,
+body.release-v1 .conflict-member-thumb {
+  box-sizing: border-box;
+  object-fit: contain;
+  object-position: center center;
+  border-radius: var(--winui-control-radius, 4px);
+  border-color: var(--winui-control-stroke, var(--panel-border));
+  background: var(--winui-card-fill-alt, var(--surface));
+}
+
+body.release-v1 .conflict-member-visual {
+  border-radius: var(--winui-control-radius, 4px);
+  background: var(--winui-card-fill-alt, var(--surface));
+}
+
+body.release-v1 .duplicate-member-thumb-fallback,
+body.release-v1 .conflict-member-fallback {
+  color: var(--winui-text-tertiary, var(--muted));
+}
+
+body.release-v1 .duplicate-member code,
+body.release-v1 .duplicate-pair code,
+body.release-v1 .conflict-pair code {
+  color: var(--winui-text-secondary, var(--muted));
+}
+
+/* An unchecked checkbox, a mere preview, or a clicked finding row never
+   produces this mark. :has() follows the existing checkbox's real state. */
+body.release-v1 .duplicate-member:has(> .quarantine-member-select input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-low, var(--winui-card-fill, var(--surface)));
+}
+
+body.release-v1 .duplicate-member:has(> .quarantine-member-select input:checked) .duplicate-member-visual::after {
+  content: "\2713";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  box-sizing: border-box;
+  border-radius: var(--winui-control-radius, 4px);
+  border: 1px solid var(--accent);
+  background: var(--winui-layer-fill, var(--surface));
+  color: var(--accent);
+  font-family: "Segoe UI Symbol", "Segoe UI", sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.release-v1 .duplicate-member,
+  body.release-v1 .duplicate-pair article,
+  body.release-v1 .conflict-pair article {
+    transition: none;
+  }
+}
