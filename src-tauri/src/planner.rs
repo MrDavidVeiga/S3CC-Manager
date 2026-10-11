@@ -4,7 +4,7 @@ use crate::{
     manifest::sha256_file,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     resource_cfg_update::{preview_resource_cfg_update, ResourceCfgUpdate},
-    scanner::{cached_scan_for, scan_packages_core, ScanPackageItem, ScanStats},
+    scanner::{cached_scan_for, scan_packages_core, ScanPackageItem, ScanResult, ScanStats},
     workspace::{
         active_profile, is_protected, load_workspace_for_root, matching_rule,
         split_destination,
@@ -17,6 +17,7 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
 };
+use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -736,11 +737,14 @@ fn is_not_categorized_root(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
         "not categorized"
+            | "#not categorized"
             | "uncategorized"
             | "sem categoria"
+            | "#sem categoria"
             | "não categorizado"
             | "nao categorizado"
             | "sin categorizar"
+            | "#sin categorizar"
     )
 }
 
@@ -787,7 +791,7 @@ fn fallback_relative_path(
     {
         parent_parts.remove(0);
     }
-    let mut destination_parts = vec![language.not_categorized_folder().to_string()];
+    let mut destination_parts = vec![language.uncategorized_fallback_folder().to_string()];
     destination_parts.extend(parent_parts);
     destination_parts = ensure_packages_destination(root, &destination_parts);
 
@@ -836,6 +840,193 @@ fn fallback_relative_path(
 
     let _ = destination_absolute;
     Ok((destination_relative, destination_parts))
+}
+
+/// Allocate a reversible quarantine destination for a confirmed byte-identical
+/// duplicate. The hash directory prevents same-name copies from colliding and
+/// the original filename is retained for human review. No file is deleted or
+/// overwritten by this helper.
+fn duplicate_quarantine_destination(
+    root: &Path,
+    language: AppLanguage,
+    source: &Path,
+    source_hash: &str,
+) -> Result<(PathBuf, Vec<String>), String> {
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| format!("Duplicate source has no filename: {}", source.display()))?;
+    let hash_key = source_hash.chars().take(16).collect::<String>();
+    if hash_key.is_empty() {
+        return Err(format!("Duplicate source has no SHA-256: {}", source.display()));
+    }
+    let source_relative = source.strip_prefix(root).unwrap_or(source);
+    let mut provenance = source_relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if is_mods_root(root) && provenance.first().is_some_and(|part| part.eq_ignore_ascii_case("Packages")) {
+        provenance.remove(0);
+    }
+
+    let mut parts = if is_mods_root(root) {
+        vec!["Packages".to_string(), language.duplicates_folder().to_string()]
+    } else {
+        vec![language.duplicates_folder().to_string()]
+    };
+    parts.push(hash_key.clone());
+
+    // A source already inside quarantine is idempotent. For a legacy source,
+    // retain the full relative origin below the hash so same-name copies from
+    // different legacy folders never converge on one destination.
+    let duplicate_index = parts.iter().position(|part| part.eq_ignore_ascii_case(language.duplicates_folder()));
+    if let Some(index) = provenance.iter().position(|part| part.eq_ignore_ascii_case(language.duplicates_folder())) {
+        if duplicate_index.is_some() && index == provenance.len().saturating_sub(3) {
+            let mut existing_parts = provenance.clone();
+            existing_parts.pop();
+            return Ok((source_relative.to_path_buf(), existing_parts));
+        }
+    }
+    if !provenance.is_empty() { parts.extend(provenance[..provenance.len().saturating_sub(1)].iter().cloned()); }
+
+    let mut candidate = PathBuf::new();
+    for part in &parts { candidate.push(part); }
+    candidate.push(file_name);
+    if same_path_case_insensitive(source_relative, &candidate) {
+        return Ok((candidate, parts));
+    }
+
+    if root.join(&candidate).exists() {
+        let path = Path::new(file_name);
+        let stem = path.file_stem().and_then(|v| v.to_str()).unwrap_or("package");
+        let extension = path.extension().and_then(|v| v.to_str()).unwrap_or("package");
+        for attempt in 1usize..10_000 {
+            let name = format!("{stem} [{hash_key}-{attempt}].{extension}");
+            let mut alternative = PathBuf::new();
+            for part in &parts { alternative.push(part); }
+            alternative.push(name);
+            if !root.join(&alternative).exists() {
+                return Ok((alternative, parts));
+            }
+        }
+        return Err(format!("Could not allocate duplicate quarantine path for {}", source.display()));
+    }
+    Ok((candidate, parts))
+}
+
+fn preview_extension(path: &Path) -> bool {
+    path.extension().and_then(|value| value.to_str()).is_some_and(|value| {
+        matches!(value.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff")
+    })
+}
+
+/// Legacy creator folders often contain screenshots next to packages. Keep
+/// those references, but move them only when the same selected legacy root
+/// contains package/Sims3Pack content. Their complete origin path is retained
+/// below the localized preview bucket, so equal filenames cannot overwrite.
+fn append_preview_image_items(
+    root: &Path,
+    language: AppLanguage,
+    selected: &HashSet<PathBuf>,
+    scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
+    items: &mut Vec<PlanItem>,
+    directories: &mut BTreeSet<String>,
+    stats: &mut PlanStats,
+) -> Result<(), String> {
+    let mut legacy_roots = BTreeSet::<String>::new();
+    for selected_path in selected {
+        let Some(item) = scan_by_canonical.get(selected_path) else { continue; };
+        let relative = Path::new(&item.relative_path);
+        let Some(first) = relative.components().find_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        }) else { continue; };
+        if !first.eq_ignore_ascii_case(language.previews_folder())
+            && !first.eq_ignore_ascii_case(language.duplicates_folder())
+        {
+            legacy_roots.insert(first);
+        }
+    }
+
+    for legacy_root in legacy_roots {
+        let directory = root.join(&legacy_root);
+        if !directory.is_dir() { continue; }
+        let has_package_context = WalkDir::new(&directory)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+            .any(|entry| entry.file_type().is_file() && {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                name.ends_with(".package") || name.ends_with(".package.disabled") || name.ends_with(".sims3pack")
+            });
+        if !has_package_context { continue; }
+
+        for entry in WalkDir::new(&directory).follow_links(false).into_iter().flatten() {
+            if !entry.file_type().is_file() || !preview_extension(entry.path()) { continue; }
+            let source = entry.path().canonicalize()
+                .map_err(|error| format!("Could not resolve preview {}: {error}", entry.path().display()))?;
+            let relative = source.strip_prefix(root)
+                .map_err(|_| format!("Preview escaped selected root: {}", source.display()))?;
+            let mut relative_parts = relative.components().filter_map(|component| match component {
+                Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+                _ => None,
+            }).collect::<Vec<_>>();
+            if relative_parts.is_empty() { continue; }
+            let origin = relative_parts.remove(0);
+            // The filename is appended by destination_path; keep only its
+            // parent directories in destination_parts.
+            relative_parts.pop();
+            let mut destination_parts = vec![language.previews_folder().to_string(), origin];
+            destination_parts.extend(relative_parts.iter().cloned());
+            destination_parts = ensure_packages_destination(root, &destination_parts);
+            let file_name = source.file_name().ok_or_else(|| "Preview has no filename".to_string())?;
+            let destination = destination_path(root, &destination_parts, file_name);
+            let destination_relative = destination.strip_prefix(root).map(relative_key)
+                .map_err(|_| "Preview destination escaped selected root.".to_string())?;
+            let (sha256, size) = sha256_file(&source)
+                .map_err(|error| format!("Could not hash preview {}: {error}", source.display()))?;
+            if same_path_case_insensitive(&source, &destination) {
+                stats.already_organized += 1;
+                items.push(PlanItem {
+                    id: format!("preview:{}", sha256), name: file_name.to_string_lossy().to_string(),
+                    source_path: source.to_string_lossy().to_string(), source_relative_path: relative_key(relative),
+                    destination_path: Some(destination.to_string_lossy().to_string()), destination_relative_path: Some(destination_relative),
+                    classification_status: "preview".to_string(), classification_reason: Some("Image preview preserved with its legacy origin context.".to_string()),
+                    plan_status: "already_organized_preview".to_string(), sha256: Some(sha256), size,
+                    warnings: Vec::new(),
+                });
+                continue;
+            }
+            if destination.exists() {
+                let (target_hash, _) = sha256_file(&destination)
+                    .map_err(|error| format!("Could not hash preview collision {}: {error}", destination.display()))?;
+                let same = target_hash.eq_ignore_ascii_case(&sha256);
+                if same { stats.duplicate_skipped += 1; } else { stats.collision_different_content += 1; }
+                items.push(PlanItem {
+                    id: format!("preview:{}", sha256), name: file_name.to_string_lossy().to_string(),
+                    source_path: source.to_string_lossy().to_string(), source_relative_path: relative_key(relative),
+                    destination_path: Some(destination.to_string_lossy().to_string()), destination_relative_path: Some(destination_relative),
+                    classification_status: "preview".to_string(), classification_reason: Some("Image preview preserved with its legacy origin context.".to_string()),
+                    plan_status: if same { "duplicate_skipped" } else { "collision_different_content" }.to_string(), sha256: Some(sha256), size,
+                    warnings: vec![if same { "Preview destination already contains identical bytes; no overwrite.".to_string() } else { "Preview destination contains different bytes; no overwrite.".to_string() }],
+                });
+                continue;
+            }
+            add_missing_directories(root, &destination_parts, directories);
+            stats.ready += 1;
+            items.push(PlanItem {
+                id: format!("preview:{}", sha256), name: file_name.to_string_lossy().to_string(),
+                source_path: source.to_string_lossy().to_string(), source_relative_path: relative_key(relative),
+                destination_path: Some(destination.to_string_lossy().to_string()), destination_relative_path: Some(destination_relative),
+                classification_status: "preview".to_string(), classification_reason: Some("Image preview moved with its complete legacy origin context; it is not a DBPF package.".to_string()),
+                plan_status: "ready_preview_image".to_string(), sha256: Some(sha256), size,
+                warnings: Vec::new(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn same_path_case_insensitive(left: &Path, right: &Path) -> bool {
@@ -1015,6 +1206,7 @@ fn index_exact_duplicates(
     }
     let cache = load_cache(root);
     let mut by_hash = HashMap::<String, Vec<String>>::new();
+    let mut indexed_paths = HashSet::<PathBuf>::new();
     for item in scan_items {
         if !selected_sizes.contains(&item.file_size) {
             continue;
@@ -1022,6 +1214,7 @@ fn index_exact_duplicates(
         let Ok(path) = PathBuf::from(&item.path).canonicalize() else {
             continue;
         };
+        indexed_paths.insert(path.clone());
         let hash = if let Some(hash) = selected_hashes.get(&path) {
             hash.clone()
         } else {
@@ -1046,6 +1239,29 @@ fn index_exact_duplicates(
         by_hash.entry(hash.to_ascii_uppercase())
             .or_default()
             .push(item.relative_path.clone());
+    }
+    // The targeted scan may omit canonical peers in other roots. The
+    // persistent fingerprint cache remains valid evidence when the current
+    // size and modification timestamp match the file on disk.
+    for (raw_path, cached) in &cache.entries {
+        let Ok(path) = PathBuf::from(raw_path).canonicalize() else { continue; };
+        if indexed_paths.contains(&path)
+            || !path_is_within_root(root, &path)
+            || !selected_sizes.contains(&cached.size)
+        {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&path) else { continue; };
+        let Ok(modified) = metadata.modified()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| std::io::Error::other(error.to_string())))
+        else { continue; };
+        if metadata.len() != cached.size || modified.as_nanos() != cached.modified_ns { continue; }
+        let relative = path.strip_prefix(root).map(relative_key)
+            .unwrap_or_else(|_| relative_key(&path));
+        by_hash.entry(cached.file_sha256.to_ascii_uppercase())
+            .or_default()
+            .push(relative);
     }
     by_hash
 }
@@ -1248,6 +1464,57 @@ fn make_blocked(item: &ScanPackageItem, reason: String) -> PlanItem {
     }
 }
 
+/// Planner selections are commonly a small set of legacy roots. Scanning the
+/// entire Packages tree in that case turns a targeted operation into a second
+/// general audit. Scan only the selected top-level roots, while the duplicate
+/// index below still consults the persistent fingerprint cache for peers that
+/// live elsewhere in the tree.
+fn scan_selected_roots(
+    root: &Path,
+    language: AppLanguage,
+    selected: &HashSet<PathBuf>,
+) -> Result<ScanResult, String> {
+    if selected.len() >= 512 {
+        return scan_packages_core(root.to_string_lossy().to_string(), language, None);
+    }
+    let mut top_level = BTreeSet::<String>::new();
+    for path in selected {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| format!("Selected path escaped root: {}", path.display()))?;
+        if let Some(Component::Normal(value)) = relative.components().next() {
+            top_level.insert(value.to_string_lossy().to_string());
+        }
+    }
+    if top_level.is_empty() {
+        return scan_packages_core(root.to_string_lossy().to_string(), language, None);
+    }
+
+    let mut items = Vec::new();
+    let mut stats = ScanStats::default();
+    for top in top_level {
+        let branch = root.join(&top);
+        if !branch.is_dir() { continue; }
+        let mut branch_scan = scan_packages_core(branch.to_string_lossy().to_string(), language, None)?;
+        stats.packages += branch_scan.stats.packages;
+        stats.classified += branch_scan.stats.classified;
+        stats.mixed += branch_scan.stats.mixed;
+        stats.unknown += branch_scan.stats.unknown;
+        stats.disabled += branch_scan.stats.disabled;
+        stats.needs_review += branch_scan.stats.needs_review;
+        stats.invalid += branch_scan.stats.invalid;
+        stats.casp_resources += branch_scan.stats.casp_resources;
+        stats.objd_resources += branch_scan.stats.objd_resources;
+        stats.total_ms += branch_scan.stats.total_ms;
+        for item in &mut branch_scan.items {
+            item.relative_path = relative_key(&Path::new(&top).join(&item.relative_path));
+        }
+        items.append(&mut branch_scan.items);
+    }
+    items.sort_by_key(|item| item.relative_path.to_ascii_lowercase());
+    Ok(ScanResult { root: root.to_string_lossy().to_string(), items, stats })
+}
+
 #[tauri::command]
 pub fn build_organization_plan(
     folder: String,
@@ -1298,12 +1565,23 @@ pub fn build_organization_plan_with_cfg(
         None
     };
 
+    let mut selected = HashSet::<PathBuf>::new();
+    for raw in &selected_paths {
+        let canonical = PathBuf::from(raw)
+            .canonicalize()
+            .map_err(|error| format!("Could not resolve selected file {raw}: {error}"))?;
+        if !path_is_within_root(&root, &canonical) {
+            return Err(format!("Selected file escaped the selected root: {raw}"));
+        }
+        selected.insert(canonical);
+    }
+
     let workspace = load_workspace_for_root(&root);
     let profile = active_profile(&workspace);
     let resource_cfg = resource_cfg_context(&root);
     let scan = match cached_scan_for(&root, language) {
         Some(scan) => scan,
-        None => scan_packages_core(root.to_string_lossy().to_string(), language, None)?,
+        None => scan_selected_roots(&root, language, &selected)?,
     };
 
     let mut scan_by_canonical = HashMap::<PathBuf, &ScanPackageItem>::new();
@@ -1311,19 +1589,6 @@ pub fn build_organization_plan_with_cfg(
         if let Ok(path) = PathBuf::from(&item.path).canonicalize() {
             scan_by_canonical.insert(path, item);
         }
-    }
-
-    let mut selected = HashSet::<PathBuf>::new();
-    for raw in selected_paths {
-        let canonical = PathBuf::from(&raw)
-            .canonicalize()
-            .map_err(|error| format!("Could not resolve selected file {raw}: {error}"))?;
-
-        if !path_is_within_root(&root, &canonical) {
-            return Err(format!("Selected file escaped the selected root: {raw}"));
-        }
-
-        selected.insert(canonical);
     }
 
     let unknown_selection = selected
@@ -1522,24 +1787,50 @@ pub fn build_organization_plan_with_cfg(
                 resource_cfg.as_ref(),
             ))
         {
-            // Only an additional selected same-state copy is excluded. The
-            // chosen keeper continues through classification, destination
-            // collision checks and normal transactional/Restore protection.
-            stats.duplicate_skipped += 1;
+            // A confirmed byte-identical extra copy is not silently stranded
+            // in a legacy folder. Move it to a reversible quarantine bucket;
+            // the keeper continues through normal canonical-model handling.
+            // Suspected merged packages are handled separately below and are
+            // intentionally never auto-quarantined.
+            let (quarantine_relative, quarantine_parts) =
+                duplicate_quarantine_destination(&root, language, &source_canonical, &source_hash)?;
+            let quarantine = root.join(&quarantine_relative);
+            let already_quarantined = same_path_case_insensitive(&source_canonical, &quarantine);
+            if already_quarantined {
+                stats.already_organized += 1;
+                items.push(PlanItem {
+                    id: item.id.clone(),
+                    name: item.name.clone(),
+                    source_path: source_canonical.to_string_lossy().to_string(),
+                    source_relative_path: item.relative_path.clone(),
+                    destination_path: Some(quarantine.to_string_lossy().to_string()),
+                    destination_relative_path: Some(relative_key(&quarantine_relative)),
+                    classification_status: item.status.clone(),
+                    classification_reason: item.classification_reason.clone(),
+                    plan_status: "already_duplicate_quarantine".to_string(),
+                    sha256: Some(source_hash.clone()),
+                    size: item.file_size,
+                    warnings: vec!["Confirmed byte-identical duplicate is already in the reversible #Duplicados quarantine.".to_string()],
+                });
+                continue;
+            }
+            add_missing_directories(&root, &quarantine_parts, &mut directories);
+            stats.ready += 1;
             items.push(PlanItem {
                 id: item.id.clone(),
                 name: item.name.clone(),
                 source_path: source_canonical.to_string_lossy().to_string(),
                 source_relative_path: item.relative_path.clone(),
-                destination_path: None,
-                destination_relative_path: None,
+                destination_path: Some(quarantine.to_string_lossy().to_string()),
+                destination_relative_path: Some(relative_key(&quarantine_relative)),
                 classification_status: item.status.clone(),
                 classification_reason: item.classification_reason.clone(),
-                plan_status: "duplicate_skipped".to_string(),
+                plan_status: "ready_duplicate_quarantine".to_string(),
                 sha256: Some(source_hash.clone()),
                 size: item.file_size,
                 warnings: vec![format!(
-                    "This package is a byte-identical duplicate and remains in its full selected-root path. The canonical keeper is '{}'; {} matching scan paths: {}. It was not moved, overwritten or deleted. Review it in Duplicates/Quarantine to empty the legacy folder safely.",
+                    "Confirmed byte-identical duplicate moved reversibly to '{}'. The canonical keeper is '{}'; {} matching scan paths: {}. No file was overwritten or deleted.",
+                    relative_key(&quarantine_relative),
                     selected_content_keeper_relative_path(
                         &root,
                         &source_canonical,
@@ -2027,6 +2318,19 @@ pub fn build_organization_plan_with_cfg(
         });
     }
 
+    // Image previews are companions to selected legacy packages. They are
+    // planned as ordinary reversible moves, while DBPF classification remains
+    // package-only and never invents categories for screenshots.
+    append_preview_image_items(
+        &root,
+        language,
+        &selected,
+        &scan_by_canonical,
+        &mut items,
+        &mut directories,
+        &mut stats,
+    )?;
+
     // Detect collisions created by the plan itself before any filesystem write occurs.
     // This catches multiple selected packages that resolve to the same final path.
     mark_intra_plan_destination_collisions(&mut items, &mut stats);
@@ -2178,13 +2482,37 @@ mod tests {
         assert!(path.starts_with("Packages"));
         assert!(path.to_string_lossy().contains("Pns (TS3)"));
         assert!(path.to_string_lossy().contains("Rigged"));
-        assert!(parts.iter().any(|part| part == "Sem Categoria"));
+        assert!(parts.iter().any(|part| part == "#Sem Categoria"));
         let (override_path, override_parts) = fallback_relative_path(
             &mods, AppLanguage::Pt, "Overrides\\Overhaul\\unknown.package", "AABBCCDD"
         ).unwrap();
         assert_eq!(override_path, PathBuf::from("Overrides\\Overhaul\\unknown.package"));
         assert!(override_parts.is_empty());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn duplicate_quarantine_is_reversible_and_never_uses_a_legacy_folder() {
+        let base = std::env::temp_dir().join(format!("s3cc-duplicate-quarantine-{}", std::process::id()));
+        let packages = base.join("Packages");
+        let source = packages.join("#6 Slider").join("same.package");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let (relative, parts) = duplicate_quarantine_destination(
+            &packages, AppLanguage::Pt, &source, &"A".repeat(64),
+        ).unwrap();
+        assert_eq!(parts.first().map(String::as_str), Some("#Duplicados"));
+        assert!(relative.starts_with(Path::new("#Duplicados")));
+        assert!(!relative.starts_with(Path::new("#6 Slider")));
+        assert!(relative.to_string_lossy().contains("same.package"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn preview_extensions_exclude_windows_metadata_and_crdownload() {
+        assert!(preview_extension(Path::new("reference.PNG")));
+        assert!(preview_extension(Path::new("reference.jpeg")));
+        assert!(!preview_extension(Path::new("desktop.ini")));
+        assert!(!preview_extension(Path::new("download.package.crdownload")));
     }
 
     #[test]

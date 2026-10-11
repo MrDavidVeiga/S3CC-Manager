@@ -75,11 +75,13 @@ fn organized_parent(root: &Path, pairs: &[(PathBuf, PathBuf, String, u64)]) -> P
 }
 
 fn make_manifest_path(root: &Path) -> Result<PathBuf, String> {
-    let base = root
-        .parent()
-        .unwrap_or(root)
-        .join("S3CC Manager")
-        .join("Restore Manifests");
+    let base = std::env::var_os("S3CC_RESTORE_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root
+            .parent()
+            .unwrap_or(root)
+            .join("S3CC Manager")
+            .join("Restore Manifests"));
 
     fs::create_dir_all(&base)
         .map_err(|error| format!("Could not create restore manifest directory {}: {error}", base.display()))?;
@@ -113,6 +115,13 @@ fn package_extension(path: &Path) -> bool {
     lower.ends_with(".package") || lower.ends_with(".package.disabled")
 }
 
+fn snapshot_extension(path: &Path) -> bool {
+    if package_extension(path) { return true; }
+    path.extension().and_then(|value| value.to_str()).is_some_and(|value| {
+        matches!(value.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff")
+    })
+}
+
 fn snapshot_entries(root: &Path, ready: &[&PlanItem]) -> Result<Vec<RestoreEntry>, String> {
     let mut planned = HashMap::<PathBuf, (&PlanItem, PathBuf)>::new();
 
@@ -134,7 +143,7 @@ fn snapshot_entries(root: &Path, ready: &[&PlanItem]) -> Result<Vec<RestoreEntry
     let mut package_paths = Vec::new();
     for entry in WalkDir::new(root).follow_links(false).into_iter() {
         let entry = entry.map_err(|error| format!("Could not snapshot package tree: {error}"))?;
-        if entry.file_type().is_file() && package_extension(entry.path()) {
+        if entry.file_type().is_file() && snapshot_extension(entry.path()) {
             package_paths.push(entry.path().to_path_buf());
         }
     }

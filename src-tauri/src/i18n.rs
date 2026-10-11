@@ -17,6 +17,31 @@ impl AppLanguage {
         }
     }
 
+    /// Physical fallback folder used by the organizer. The leading marker
+    /// keeps this review-only bucket distinct from a real model category.
+    pub fn uncategorized_fallback_folder(self) -> &'static str {
+        match self {
+            Self::En => "#Not Categorized",
+            Self::Pt => "#Sem Categoria",
+            Self::Es => "#Sin Categorizar",
+        }
+    }
+
+    pub fn duplicates_folder(self) -> &'static str {
+        match self {
+            Self::En => "#Duplicates",
+            Self::Pt | Self::Es => "#Duplicados",
+        }
+    }
+
+    pub fn previews_folder(self) -> &'static str {
+        match self {
+            Self::En => "CC Previews",
+            Self::Pt => "Previews de CCs",
+            Self::Es => "Vistas previas de CC",
+        }
+    }
+
     pub fn cas(self) -> &'static str { "CAS" }
 
     pub fn clothing(self) -> &'static str {
@@ -197,5 +222,15 @@ mod tests {
         assert_eq!(AppLanguage::En.not_categorized_folder(), "Not Categorized");
         assert_eq!(AppLanguage::Pt.not_categorized_folder(), "Sem Categoria");
         assert_eq!(AppLanguage::Es.not_categorized_folder(), "Sin Categorizar");
+    }
+
+    #[test]
+    fn review_folders_are_localized_and_distinct() {
+        assert_eq!(AppLanguage::Pt.uncategorized_fallback_folder(), "#Sem Categoria");
+        assert_eq!(AppLanguage::Pt.duplicates_folder(), "#Duplicados");
+        assert_eq!(AppLanguage::Pt.previews_folder(), "Previews de CCs");
+        assert_eq!(AppLanguage::En.uncategorized_fallback_folder(), "#Not Categorized");
+        assert_eq!(AppLanguage::En.duplicates_folder(), "#Duplicates");
+        assert_eq!(AppLanguage::En.previews_folder(), "CC Previews");
     }
 }
