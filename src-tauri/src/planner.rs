@@ -11,7 +11,7 @@ use crate::{
     },
 };
 use chrono::{Local, SecondsFormat};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
@@ -107,14 +107,14 @@ struct ResourceCfgContext {
     directory: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManualModelFile {
     relative_path: String,
     directory_parts: Vec<String>,
     file_name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManualModelIndex {
     directories: BTreeMap<String, Vec<String>>,
     files_by_sha256: HashMap<String, Vec<ManualModelFile>>,
@@ -182,6 +182,93 @@ fn manual_model_packages_root() -> Result<PathBuf, String> {
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).map(|path| path.join("Downloads")))
         .ok_or_else(|| "Could not locate the current user's Downloads directory for the official manual model.".to_string())?;
     Ok(downloads.join("Mods - ESTRUTURA MODELO").join("Packages"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistentManualModelIndex {
+    version: u32,
+    generated_at: String,
+    reference_root: String,
+    index: ManualModelIndex,
+}
+
+const PERSISTENT_MANUAL_MODEL_INDEX_VERSION: u32 = 1;
+
+fn manual_model_index_path() -> PathBuf {
+    if let Ok(value) = std::env::var("S3CC_MANUAL_MODEL_INDEX") {
+        let path = PathBuf::from(value.trim());
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+    dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Veiga's S3CC Manager")
+        .join("Data")
+        .join("manual-model-index-v1.json")
+}
+
+fn manual_model_index_backup_path() -> PathBuf {
+    let path = manual_model_index_path();
+    PathBuf::from(format!("{}.bak", path.to_string_lossy()))
+}
+
+fn load_persistent_manual_model_index(root: &Path) -> Option<ManualModelIndex> {
+    let canonical_root = root.canonicalize().ok()?;
+    let text = fs::read_to_string(manual_model_index_path()).ok()?;
+    let envelope = serde_json::from_str::<PersistentManualModelIndex>(&text).ok()?;
+    if envelope.version != PERSISTENT_MANUAL_MODEL_INDEX_VERSION
+        || !envelope.reference_root.eq_ignore_ascii_case(&canonical_root.to_string_lossy())
+    {
+        return None;
+    }
+    Some(envelope.index)
+}
+
+fn save_persistent_manual_model_index(root: &Path, index: &ManualModelIndex) -> Result<(), String> {
+    let path = manual_model_index_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Manual model index has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create manual model index directory: {error}"))?;
+    if path.exists() {
+        fs::copy(&path, manual_model_index_backup_path())
+            .map_err(|error| format!("Could not back up manual model index: {error}"))?;
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve manual model root: {error}"))?;
+    let envelope = PersistentManualModelIndex {
+        version: PERSISTENT_MANUAL_MODEL_INDEX_VERSION,
+        generated_at: Local::now().to_rfc3339(),
+        reference_root: root.to_string_lossy().to_string(),
+        index: index.clone(),
+    };
+    let temp = parent.join(".manual-model-index-v1.json.tmp");
+    let data = serde_json::to_vec_pretty(&envelope)
+        .map_err(|error| format!("Could not serialize manual model index: {error}"))?;
+    fs::write(&temp, data)
+        .map_err(|error| format!("Could not write manual model index: {error}"))?;
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("Could not replace manual model index: {error}"))?;
+    }
+    fs::rename(&temp, &path)
+        .map_err(|error| format!("Could not commit manual model index: {error}"))
+}
+
+fn load_or_build_manual_model_index(root: &Path) -> Result<ManualModelIndex, String> {
+    if std::env::var("S3CC_REFRESH_MANUAL_MODEL").ok().as_deref() != Some("1") {
+        if let Some(index) = load_persistent_manual_model_index(root) {
+            return Ok(index);
+        }
+    }
+    let index = build_manual_model_index(root)?;
+    save_persistent_manual_model_index(root, &index)?;
+    Ok(index)
 }
 
 fn model_parts_for_selected_root(root: &Path, source: &Path, model_parts: &[String]) -> Result<Vec<String>, String> {
@@ -626,6 +713,13 @@ fn relative_key(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("\\")
+}
+
+fn exact_model_relative_path_matches(current: &str, canonical: &str) -> bool {
+    // This is deliberately an exact, component-by-component comparison. A
+    // folder such as "#6 Slider" or "Creator\\Sliders" is not equivalent to
+    // the model's "Sliders", even when the final component looks familiar.
+    relative_key(Path::new(current)) == relative_key(Path::new(canonical))
 }
 
 fn add_missing_directories(root: &Path, parts: &[String], output: &mut BTreeSet<String>) {
@@ -1185,7 +1279,7 @@ pub fn build_organization_plan_with_cfg(
     // Read the official model for every plan. Folder names that merely look
     // like categories are never enough to mark a package organized.
     let manual_model_root = manual_model_packages_root()?;
-    let manual_model = build_manual_model_index(&manual_model_root)?;
+    let manual_model = load_or_build_manual_model_index(&manual_model_root)?;
     // The selected root can be Mods, any Packages/Overrides subfolder, or a
     // self-contained CC staging library elsewhere. All moves remain inside
     // this canonical root. Never invent an out-of-root destination.
@@ -1852,7 +1946,7 @@ pub fn build_organization_plan_with_cfg(
         }
         let destination_relative_text = relative_key(&destination_relative);
 
-        if relative_key(Path::new(&item.relative_path)) == destination_relative_text {
+        if exact_model_relative_path_matches(&item.relative_path, &destination_relative_text) {
             stats.already_organized += 1;
             items.push(PlanItem {
                 id: item.id.clone(),
@@ -2760,16 +2854,23 @@ mod tests {
         std::fs::create_dir_all(model.join("Sliders")).unwrap();
         std::fs::create_dir_all(model.join("Roupas").join("Feminino")).unwrap();
         std::fs::create_dir_all(selected.join("#9 Sliders")).unwrap();
+        std::fs::create_dir_all(selected.join("#6 Slider")).unwrap();
         std::fs::create_dir_all(selected.join("Criador").join("Sliders")).unwrap();
         let canonical = model.join("Sliders").join("slider.package");
         let misplaced = selected.join("#9 Sliders").join("slider.package");
+        let misplaced_six = selected.join("#6 Slider").join("slider.package");
         std::fs::write(&canonical, b"real slider bytes").unwrap();
         std::fs::write(&misplaced, b"real slider bytes").unwrap();
+        std::fs::copy(&canonical, &misplaced_six).unwrap();
         let index = build_manual_model_index(&model).unwrap();
         let (hash, _) = sha256_file(&misplaced).unwrap();
         let resolved = resolve_model_destination(&index, &selected, &misplaced, &hash, &["#9 Sliders".to_string()]).unwrap();
         assert_eq!(resolved.parts, vec!["Sliders"]);
         assert_ne!(relative_key(Path::new("#9 Sliders\\slider.package")), format!("{}\\slider.package", resolved.parts.join("\\")));
+        let six_resolved = resolve_model_destination(&index, &selected, &misplaced_six, &hash, &["#6 Slider".to_string()]).unwrap();
+        assert_eq!(six_resolved.parts, vec!["Sliders"]);
+        assert!(!exact_model_relative_path_matches("#6 Slider\\slider.package", "Sliders\\slider.package"));
+        assert!(exact_model_relative_path_matches("Sliders\\slider.package", "Sliders\\slider.package"));
         let wrong = resolve_model_destination(&index, &selected, &selected.join("Criador").join("Sliders").join("new.package"), "NOT-IN-MODEL", &["Criador".to_string(), "Sliders".to_string()]);
         assert!(wrong.is_err());
         std::fs::remove_dir_all(base).unwrap();
