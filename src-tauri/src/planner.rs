@@ -150,7 +150,8 @@ fn build_manual_model_index(root: &Path) -> Result<ManualModelIndex, String> {
     }
     let mut directories = BTreeMap::new();
     let mut files_by_sha256 = HashMap::<String, Vec<ManualModelFile>>::new();
-    for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
+    for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter() {
+        let entry = entry.map_err(|error| format!("Failed to read complete manual model tree: {error}"))?;
         let relative = entry.path().strip_prefix(root)
             .map_err(|error| format!("Could not index model path: {error}"))?;
         let components = model_relative_components(relative)?;
@@ -208,21 +209,15 @@ fn resolve_model_destination(index: &ManualModelIndex, root: &Path, source: &Pat
     let name = source.file_name().and_then(|value| value.to_str())
         .ok_or_else(|| format!("Package has no valid filename: {}", source.display()))?;
     if let Some(matches) = index.files_by_sha256.get(&source_hash.to_ascii_uppercase()) {
+        // Compare all files with these bytes, including differently named
+        // ones. A filename match must not conceal a second model folder.
+        let directories = matches.iter().map(|entry| model_key(&entry.directory_parts)).collect::<BTreeSet<_>>();
+        if directories.len() > 1 {
+            return Err(format!("The SHA-256 matches multiple different canonical model destinations: {}",
+                matches.iter().map(|entry| entry.relative_path.clone()).collect::<Vec<_>>().join(" | ")));
+        }
         let named = matches.iter().filter(|entry| entry.file_name.eq_ignore_ascii_case(name)).collect::<Vec<_>>();
         let considered = if named.is_empty() { matches.iter().collect::<Vec<_>>() } else { named };
-        let directories = considered.iter().map(|entry| model_key(&entry.directory_parts)).collect::<BTreeSet<_>>();
-        if directories.len() > 1 {
-            let candidate_key = model_key(&strip_packages_prefix(candidate_parts));
-            if let Some(entry) = considered.iter().find(|entry| model_key(&entry.directory_parts) == candidate_key) {
-                let parts = model_parts_for_selected_root(root, source, &entry.directory_parts)?;
-                return Ok(ModelDestination {
-                    parts,
-                    evidence: format!("Exact SHA-256 match disambiguated by the internal classification and model directory: {}", entry.relative_path),
-                });
-            }
-            return Err(format!("The SHA-256 matches multiple different canonical model destinations: {}",
-                considered.iter().map(|entry| entry.relative_path.clone()).collect::<Vec<_>>().join(" | ")));
-        }
         let directory_key = directories.into_iter().next().ok_or_else(|| "The model hash match has no canonical directory.".to_string())?;
         let model_parts = index.directories.get(&directory_key).cloned().unwrap_or_else(|| considered[0].directory_parts.clone());
         let parts = model_parts_for_selected_root(root, source, &model_parts)?;
@@ -811,24 +806,29 @@ fn is_selected_content_keeper(
     keeper.is_none_or(|path| path == source)
 }
 
-// Prefer the copy whose complete path from the selected root already is the
-// canonical destination. The old lexical-only choice could make a legacy
-// nested source the keeper over an already organized package.
+// Select the duplicate keeper using the current MANUAL MODEL, never an old
+// scanner suggestion that happens to resemble a category name. If a model
+// hash is ambiguous, no legacy folder may gain priority on that basis.
 fn canonical_destination_for_keeper(
     root: &Path,
     source: &Path,
+    sha256: &str,
     item: &ScanPackageItem,
+    manual_model: &ManualModelIndex,
     resource_cfg: Option<&ResourceCfgContext>,
 ) -> Option<PathBuf> {
     let file_name = Path::new(&item.name).file_name()?;
+    if !source_uses_overrides(root, source) {
+        let model_destination = resolve_model_destination(
+            manual_model, root, source, sha256, &item.destination_parts,
+        ).ok()?;
+        return Some(destination_path(root, &model_destination.parts, file_name));
+    }
+    // Overrides are a separate loading branch: the Packages-only model must
+    // never turn an Override into a Packages move.
     let (parts, _) = fit_destination_to_resource_cfg(
-        root,
-        source,
-        file_name,
-        &item.destination_parts,
-        resource_cfg,
-    )
-    .ok()?;
+        root, source, file_name, &item.destination_parts, resource_cfg,
+    ).ok()?;
     Some(destination_path(root, &parts, file_name))
 }
 
@@ -838,6 +838,7 @@ fn is_selected_content_keeper_for_scan(
     sha256: &str,
     selected_hashes: &HashMap<PathBuf, String>,
     scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
+    manual_model: &ManualModelIndex,
     resource_cfg: Option<&ResourceCfgContext>,
 ) -> bool {
     let inactive = is_disabled_package_path(source);
@@ -850,7 +851,7 @@ fn is_selected_content_keeper_for_scan(
         .map(|(path, _)| {
             let canonical = scan_by_canonical
                 .get(path)
-                .and_then(|item| canonical_destination_for_keeper(root, path, item, resource_cfg))
+                .and_then(|item| canonical_destination_for_keeper(root, path, sha256, item, manual_model, resource_cfg))
                 .is_some_and(|destination| same_path_case_insensitive(path, &destination));
             let relative = path
                 .strip_prefix(root)
@@ -859,6 +860,13 @@ fn is_selected_content_keeper_for_scan(
             (path, canonical, relative.to_ascii_lowercase())
         })
         .collect::<Vec<_>>();
+
+    // If no selected copy can be proven to occupy a unique canonical model
+    // destination, do not let lexical ordering promote an arbitrary legacy
+    // folder to keeper. Every copy remains available for manual review.
+    if !candidates.iter().any(|(_, canonical, _)| *canonical) {
+        return false;
+    }
 
     candidates.sort_by_key(|(_, canonical, relative)| (!*canonical, relative.clone()));
     candidates.first().is_none_or(|(path, _, _)| *path == source)
@@ -870,6 +878,7 @@ fn selected_content_keeper_relative_path(
     sha256: &str,
     selected_hashes: &HashMap<PathBuf, String>,
     scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
+    manual_model: &ManualModelIndex,
     resource_cfg: Option<&ResourceCfgContext>,
 ) -> Option<String> {
     let inactive = is_disabled_package_path(source);
@@ -882,7 +891,7 @@ fn selected_content_keeper_relative_path(
         .map(|(path, _)| {
             let canonical = scan_by_canonical
                 .get(path)
-                .and_then(|item| canonical_destination_for_keeper(root, path, item, resource_cfg))
+                .and_then(|item| canonical_destination_for_keeper(root, path, sha256, item, manual_model, resource_cfg))
                 .is_some_and(|destination| same_path_case_insensitive(path, &destination));
             let relative = path
                 .strip_prefix(root)
@@ -891,6 +900,9 @@ fn selected_content_keeper_relative_path(
             (canonical, relative.to_ascii_lowercase(), relative)
         })
         .collect::<Vec<_>>();
+    if !candidates.iter().any(|(canonical, _, _)| *canonical) {
+        return None;
+    }
     candidates.sort_by_key(|(canonical, key, _)| (!*canonical, key.clone()));
     candidates.into_iter().next().map(|(_, _, relative)| relative)
 }
@@ -1412,6 +1424,7 @@ pub fn build_organization_plan_with_cfg(
                 &source_hash,
                 &selected_hashes,
                 &scan_by_canonical,
+                &manual_model,
                 resource_cfg.as_ref(),
             ))
         {
@@ -1439,6 +1452,7 @@ pub fn build_organization_plan_with_cfg(
                         &source_hash,
                         &selected_hashes,
                         &scan_by_canonical,
+                        &manual_model,
                         resource_cfg.as_ref(),
                     ).unwrap_or_else(|| "unresolved selected path".to_string()),
                     peers.len(),
@@ -2169,8 +2183,10 @@ mod tests {
         let canonical_relative = "Sliders/shared.package";
         let legacy_relative = "Danny/Sliders/shared.package";
         let second_legacy_relative = "Brian Vicente/Brian Vicente/Sliders/shared.package";
-        let (canonical_path, canonical_item) = synthetic_scan_item(&packages_root, canonical_relative, &["Sliders"]);
-        let (legacy_path, legacy_item) = synthetic_scan_item(&packages_root, legacy_relative, &["Sliders"]);
+        // Simulate stale path-based classification, including the canonical file.
+        // The manual model hash must win over these scanner-suggested folders.
+        let (canonical_path, canonical_item) = synthetic_scan_item(&packages_root, canonical_relative, &["#9 Sliders"]);
+        let (legacy_path, legacy_item) = synthetic_scan_item(&packages_root, legacy_relative, &["Danny", "Sliders"]);
         let (second_legacy_path, second_legacy_item) = synthetic_scan_item(
             &packages_root,
             second_legacy_relative,
@@ -2184,15 +2200,24 @@ mod tests {
         scan.insert(canonical_path.clone(), &canonical_item);
         scan.insert(legacy_path.clone(), &legacy_item);
         scan.insert(second_legacy_path.clone(), &second_legacy_item);
+        let mut directories = BTreeMap::new();
+        directories.insert(model_key(&["Sliders".to_string()]), vec!["Sliders".to_string()]);
+        let mut files_by_sha256 = HashMap::new();
+        files_by_sha256.insert("SAME".to_string(), vec![ManualModelFile {
+            relative_path: "Sliders\\shared.package".to_string(),
+            directory_parts: vec!["Sliders".to_string()],
+            file_name: "shared.package".to_string(),
+        }]);
+        let manual_model = ManualModelIndex { directories, files_by_sha256 };
 
         assert!(is_selected_content_keeper_for_scan(
-            &packages_root, &canonical_path, "SAME", &selected_hashes, &scan, None
+            &packages_root, &canonical_path, "SAME", &selected_hashes, &scan, &manual_model, None
         ));
         assert!(!is_selected_content_keeper_for_scan(
-            &packages_root, &legacy_path, "SAME", &selected_hashes, &scan, None
+            &packages_root, &legacy_path, "SAME", &selected_hashes, &scan, &manual_model, None
         ));
         assert!(!is_selected_content_keeper_for_scan(
-            &packages_root, &second_legacy_path, "SAME", &selected_hashes, &scan, None
+            &packages_root, &second_legacy_path, "SAME", &selected_hashes, &scan, &manual_model, None
         ));
         assert_eq!(
             selected_content_keeper_relative_path(
@@ -2201,6 +2226,7 @@ mod tests {
                 "SAME",
                 &selected_hashes,
                 &scan,
+                &manual_model,
                 None,
             ),
             Some(relative_key(Path::new(canonical_relative)))
@@ -2750,6 +2776,19 @@ mod tests {
     }
 
     #[test]
+    fn manual_model_blocks_lookalike_without_matching_hash_or_exact_category() {
+        let mut directories = BTreeMap::new();
+        directories.insert(model_key(&["Sliders".to_string()]), vec!["Sliders".to_string()]);
+        let index = ManualModelIndex { directories, files_by_sha256: HashMap::new() };
+        let root = Path::new("Mods").join("Packages");
+        let source = root.join("#9 Sliders").join("unrecognized.package");
+        let result = resolve_model_destination(
+            &index, &root, &source, "MISSING-HASH", &["#9 Sliders".to_string()],
+        );
+        assert!(result.unwrap_err().contains("No exact directory"));
+    }
+
+    #[test]
     fn manual_model_keeps_same_hash_in_distinct_canonical_folders_ambiguous() {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -2767,8 +2806,57 @@ mod tests {
         let (hash, _) = sha256_file(&source).unwrap();
         let result = resolve_model_destination(&index, &base.join("source"), &source, &hash, &[]);
         assert!(result.unwrap_err().contains("multiple different canonical model destinations"));
-        let resolved = resolve_model_destination(&index, &base.join("source"), &source, &hash, &["A".to_string()]).unwrap();
-        assert_eq!(resolved.parts, vec!["A"]);
+        // Even an apparently matching scanner category must not override a
+        // conflicting destination explicitly present in the manual model.
+        let preferred = resolve_model_destination(&index, &base.join("source"), &source, &hash, &["A".to_string()]);
+        assert!(preferred.unwrap_err().contains("multiple different canonical model destinations"));
+        // A different filename must not conceal that same-content packages
+        // exist in two distinct model destinations.
+        std::fs::rename(model.join("B").join("same.package"), model.join("B").join("renamed.package")).unwrap();
+        let differently_named_index = build_manual_model_index(&model).unwrap();
+        let differently_named = resolve_model_destination(
+            &differently_named_index, &base.join("source"), &source, &hash, &["A".to_string()],
+        );
+        assert!(differently_named.unwrap_err().contains("multiple different canonical model destinations"));
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_model_duplicate_group_has_no_arbitrary_keeper() {
+        let root = Path::new("Mods").join("Packages");
+        let (first_path, first_item) = synthetic_scan_item(&root, "Legacy\\same.package", &["Sliders"]);
+        let (second_path, second_item) = synthetic_scan_item(&root, "Other\\same.package", &["Sliders"]);
+        let mut selected_hashes = HashMap::new();
+        selected_hashes.insert(first_path.clone(), "SAME".to_string());
+        selected_hashes.insert(second_path.clone(), "SAME".to_string());
+        let mut scan = HashMap::new();
+        scan.insert(first_path.clone(), &first_item);
+        scan.insert(second_path.clone(), &second_item);
+        let mut directories = BTreeMap::new();
+        directories.insert(model_key(&["A".to_string()]), vec!["A".to_string()]);
+        directories.insert(model_key(&["B".to_string()]), vec!["B".to_string()]);
+        let mut files_by_sha256 = HashMap::new();
+        files_by_sha256.insert("SAME".to_string(), vec![
+            ManualModelFile {
+                relative_path: "A\\same.package".to_string(),
+                directory_parts: vec!["A".to_string()],
+                file_name: "same.package".to_string(),
+            },
+            ManualModelFile {
+                relative_path: "B\\same.package".to_string(),
+                directory_parts: vec!["B".to_string()],
+                file_name: "same.package".to_string(),
+            },
+        ]);
+        let manual_model = ManualModelIndex { directories, files_by_sha256 };
+        assert!(!is_selected_content_keeper_for_scan(
+            &root, &first_path, "SAME", &selected_hashes, &scan, &manual_model, None
+        ));
+        assert!(!is_selected_content_keeper_for_scan(
+            &root, &second_path, "SAME", &selected_hashes, &scan, &manual_model, None
+        ));
+        assert_eq!(selected_content_keeper_relative_path(
+            &root, &first_path, "SAME", &selected_hashes, &scan, &manual_model, None
+        ), None);
     }
 }
