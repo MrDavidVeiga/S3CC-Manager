@@ -113,6 +113,26 @@ async function refreshNativeAppearance() {
 
 const themeButton=document.getElementById("theme-button");
 const themeFlyout=document.getElementById("theme-flyout");
+
+/* Match Packer: theme icon + localized text, without changing theme handling. */
+function syncThemeControlLabel() {
+  const lang=(document.documentElement.lang || "en").toLowerCase();
+  const label=lang.startsWith("pt") || lang.startsWith("es") ? "Tema" : "Theme";
+  if (themeButton) {
+    themeButton.setAttribute("aria-label",label);
+    themeButton.setAttribute("title",label);
+  }
+  const copy=document.getElementById("theme-button-label");
+  if (copy) copy.textContent=label;
+  themeFlyout?.setAttribute("aria-label",label);
+  const heading=themeFlyout?.querySelector(".theme-flyout-title");
+  if (heading) heading.textContent=label;
+}
+syncThemeControlLabel();
+new MutationObserver(syncThemeControlLabel).observe(document.documentElement,{
+  attributes:true,attributeFilter:["lang"]
+});
+
 function closeThemeFlyout() {
   themeFlyout?.classList.add("hidden");
   themeButton?.setAttribute("aria-expanded","false");
