@@ -127,6 +127,10 @@ function syncThemeControlLabel() {
   themeFlyout?.setAttribute("aria-label",label);
   const heading=themeFlyout?.querySelector(".theme-flyout-title");
   if (heading) heading.textContent=label;
+  const localizedCampaignName=lang.startsWith("pt") ? "Meninas Malvadas"
+    : lang.startsWith("es") ? "Chicas Malasis" : "Mean Girls";
+  const campaignOption=themeFlyout?.querySelector('.theme-option[data-theme="mean-girls"] strong');
+  if (campaignOption) campaignOption.textContent=localizedCampaignName;
 }
 syncThemeControlLabel();
 new MutationObserver(syncThemeControlLabel).observe(document.documentElement,{
