@@ -4,7 +4,7 @@ use crate::{
     manifest::sha256_file,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     resource_cfg_update::{preview_resource_cfg_update, ResourceCfgUpdate},
-    scanner::{cached_scan_for, scan_packages_core, ScanPackageItem, ScanResult, ScanStats},
+    scanner::{cached_scan_for, scan_packages_core, scan_selected_package_paths, ScanPackageItem, ScanResult, ScanStats},
     workspace::{
         active_profile, is_protected, load_workspace_for_root, matching_rule, split_destination,
     },
@@ -2303,53 +2303,9 @@ fn scan_selected_roots(
     if selected.len() >= 512 {
         return scan_packages_core(root.to_string_lossy().to_string(), language, None);
     }
-    let mut top_level = BTreeSet::<String>::new();
-    for path in selected {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| format!("Selected path escaped root: {}", path.display()))?;
-        if let Some(Component::Normal(value)) = relative.components().next() {
-            top_level.insert(value.to_string_lossy().to_string());
-        }
-    }
-    if top_level.is_empty() {
-        return Ok(ScanResult {
-            root: root.to_string_lossy().to_string(),
-            items: Vec::new(),
-            stats: ScanStats::default(),
-        });
-    }
-
-    let mut items = Vec::new();
-    let mut stats = ScanStats::default();
-    for top in top_level {
-        let branch = root.join(&top);
-        if !branch.is_dir() {
-            continue;
-        }
-        let mut branch_scan =
-            scan_packages_core(branch.to_string_lossy().to_string(), language, None)?;
-        stats.packages += branch_scan.stats.packages;
-        stats.classified += branch_scan.stats.classified;
-        stats.mixed += branch_scan.stats.mixed;
-        stats.unknown += branch_scan.stats.unknown;
-        stats.disabled += branch_scan.stats.disabled;
-        stats.needs_review += branch_scan.stats.needs_review;
-        stats.invalid += branch_scan.stats.invalid;
-        stats.casp_resources += branch_scan.stats.casp_resources;
-        stats.objd_resources += branch_scan.stats.objd_resources;
-        stats.total_ms += branch_scan.stats.total_ms;
-        for item in &mut branch_scan.items {
-            item.relative_path = relative_key(&Path::new(&top).join(&item.relative_path));
-        }
-        items.append(&mut branch_scan.items);
-    }
-    items.sort_by_key(|item| item.relative_path.to_ascii_lowercase());
-    Ok(ScanResult {
-        root: root.to_string_lossy().to_string(),
-        items,
-        stats,
-    })
+    let mut paths = selected.iter().cloned().collect::<Vec<_>>();
+    paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    scan_selected_package_paths(root, &paths, language)
 }
 
 #[tauri::command]
@@ -3186,6 +3142,33 @@ pub fn build_organization_plan_with_cfg(
         }
         let mut destination_relative_text = relative_key(&destination_relative);
 
+        // Review fallbacks are canonical destinations too. Once a package
+        // has been moved to `#Sem Categoria` with its preserved source
+        // context, a later incremental plan must not propose the same move
+        // again merely because that fallback path is not an exemplar in the
+        // manual model. The destination was already validated above; this
+        // is an exact full-path comparison, never a folder-name heuristic.
+        if same_path_case_insensitive(&source_canonical, &destination) {
+            stats.already_organized += 1;
+            items.push(PlanItem {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                source_path: source_canonical.to_string_lossy().to_string(),
+                source_relative_path: item.relative_path.clone(),
+                destination_path: Some(destination.to_string_lossy().to_string()),
+                destination_relative_path: Some(destination_relative_text),
+                classification_status: item.status.clone(),
+                classification_reason: classification_reason.clone(),
+                plan_status: "already_organized_review".to_string(),
+                sha256: Some(source_hash),
+                size: item.file_size,
+                warnings: vec![
+                    "The package is already at the exact validated review destination; no move is proposed.".to_string(),
+                ],
+            });
+            continue;
+        }
+
         if exact_model_relative_path_matches(&item.relative_path, &destination_relative_text) {
             stats.already_organized += 1;
             items.push(PlanItem {
@@ -3248,6 +3231,26 @@ pub fn build_organization_plan_with_cfg(
                     "{} | Content conflict with canonical destination; preserved in review fallback.",
                     classification_reason.unwrap_or_default()
                 ));
+                if same_path_case_insensitive(&source_canonical, &destination) {
+                    stats.already_organized += 1;
+                    items.push(PlanItem {
+                        id: item.id.clone(),
+                        name: item.name.clone(),
+                        source_path: source_canonical.to_string_lossy().to_string(),
+                        source_relative_path: item.relative_path.clone(),
+                        destination_path: Some(destination.to_string_lossy().to_string()),
+                        destination_relative_path: Some(destination_relative_text),
+                        classification_status: item.status.clone(),
+                        classification_reason,
+                        plan_status: "already_organized_review".to_string(),
+                        sha256: Some(source_hash),
+                        size: source_size,
+                        warnings: vec![
+                            "The package is already at the exact validated review destination; no move is proposed.".to_string(),
+                        ],
+                    });
+                    continue;
+                }
                 add_missing_directories(&root, &review_parts, &mut directories);
                 stats.ready += 1;
                 items.push(PlanItem {
@@ -4876,6 +4879,33 @@ mod tests {
         .unwrap();
         assert!(scan.items.is_empty());
         assert_eq!(scan.stats.packages, 0);
+    }
+
+    #[test]
+    fn incremental_residual_plan_reads_only_explicit_paths_when_requested() {
+        let Ok(root) = std::env::var("S3CC_RESIDUAL_ROOT") else {
+            return;
+        };
+        let Ok(raw_selected) = std::env::var("S3CC_RESIDUAL_SELECTED") else {
+            return;
+        };
+        let selected = raw_selected
+            .split('|')
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let plan = build_organization_plan_with_cfg(root, AppLanguage::Pt, selected, false)
+            .expect("incremental residual plan");
+        if let Ok(expected) = std::env::var("S3CC_RESIDUAL_EXPECTED_SELECTED") {
+            assert_eq!(plan.stats.selected, expected.parse::<usize>().unwrap());
+        }
+        if let Ok(output) = std::env::var("S3CC_RESIDUAL_PLAN_OUTPUT") {
+            let output = PathBuf::from(output);
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(output, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+        }
     }
 
     #[test]

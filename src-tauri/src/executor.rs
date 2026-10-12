@@ -17,7 +17,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
 
@@ -112,12 +112,14 @@ fn ready_items(plan_items: &[PlanItem]) -> Vec<&PlanItem> {
 }
 
 fn requires_post_execution_package_scan(plan: &OrganizationPlan) -> bool {
-    plan.items.iter().any(|item| {
-        !matches!(
-            item.classification_status.as_str(),
-            "preview" | "auxiliary"
-        )
-    })
+    // A plan built from an explicit residual selection must not turn into a
+    // second full DBPF scan merely because one of its items is a package.
+    // The planner uses the same threshold as `scan_selected_roots`: below
+    // 512 selected packages it has already produced a focused scan and the
+    // executor can derive its post-state from the frozen plan.  Full plans
+    // retain the historical scan so the UI receives a complete current
+    // inventory after a broad organization.
+    plan.stats.selected >= 512
 }
 
 fn incremental_current_snapshot(
@@ -316,31 +318,53 @@ fn cleanup_empty_directories_after_organization_scoped(
         if !walk_root.is_dir() {
             continue;
         }
-        let minimum_depth = usize::from(walk_root == root);
-        for entry in WalkDir::new(&walk_root)
-            .follow_links(false)
-            .min_depth(minimum_depth)
-            .into_iter()
-        {
-            match entry {
-                Ok(entry) if entry.file_type().is_dir() => {
-                    let path = entry.path();
-                    // These are the two loading branch roots. They must survive
-                    // even if they contain zero packages after organization.
-                    if mods_root && path.parent() == Some(root) && path.file_name()
-                        .is_some_and(|name| {
-                            name.to_string_lossy().eq_ignore_ascii_case("Packages")
-                                || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
-                        })
-                    {
-                        continue;
+        if scope_roots.is_none() {
+            let minimum_depth = usize::from(walk_root == root);
+            for entry in WalkDir::new(&walk_root)
+                .follow_links(false)
+                .min_depth(minimum_depth)
+                .into_iter()
+            {
+                match entry {
+                    Ok(entry) if entry.file_type().is_dir() => {
+                        let path = entry.path();
+                        // These are the two loading branch roots. They must survive
+                        // even if they contain zero packages after organization.
+                        if mods_root && path.parent() == Some(root) && path.file_name()
+                            .is_some_and(|name| {
+                                name.to_string_lossy().eq_ignore_ascii_case("Packages")
+                                    || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
+                            })
+                        {
+                            continue;
+                        }
+                        candidates.push(path.to_path_buf());
                     }
-                    candidates.push(path.to_path_buf());
+                    Ok(_) => {}
+                    Err(error) => warnings.push(format!(
+                        "Could not inspect a folder during empty-directory cleanup: {error}"
+                    )),
                 }
-                Ok(_) => {}
-                Err(error) => warnings.push(format!(
-                    "Could not inspect a folder during empty-directory cleanup: {error}"
-                )),
+            }
+        } else {
+            // A focused plan only needs the old source directory and its
+            // ancestors. Recursing from a source parent such as `Jonas`
+            // would inspect unrelated siblings and defeat incremental mode.
+            candidates.push(walk_root.to_path_buf());
+        }
+
+        // The recursive walk is intentionally limited to the selected old
+        // source branch.  Add only its ancestors as direct candidates so a
+        // chain such as `Author\Legacy\Sliders` can be removed after its
+        // children disappear, without walking every sibling below `Author`.
+        if scope_roots.is_some() {
+            let mut ancestor = walk_root.parent();
+            while let Some(folder) = ancestor {
+                if folder == root || !folder.starts_with(root) {
+                    break;
+                }
+                candidates.push(folder.to_path_buf());
+                ancestor = folder.parent();
             }
         }
     }
@@ -401,15 +425,17 @@ fn cleanup_scope_roots(root: &Path, plan: &OrganizationPlan) -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
     for item in &plan.items {
         let source = PathBuf::from(&item.source_path);
-        let Ok(relative) = source.strip_prefix(root) else {
+        let Ok(_) = source.strip_prefix(root) else {
             continue;
         };
-        let Some(Component::Normal(first)) = relative.components().next() else {
+        let Some(parent) = source.parent() else {
             continue;
         };
-        let candidate = root.join(first);
-        if candidate.is_dir() {
-            roots.insert(candidate);
+        // Scope cleanup to the actual old-source branches.  Using only the
+        // first component (for example `Packages\Cabelos`) made a residual
+        // plan walk an entire category tree even when it contained one file.
+        if parent.is_dir() && parent.starts_with(root) {
+            roots.insert(parent.to_path_buf());
         }
     }
     roots.into_iter().collect()
@@ -1222,5 +1248,25 @@ mod tests {
         let mut fallback = items[1].clone();
         fallback.plan_status = "ready_uncategorized".into();
         assert_eq!(ready_items(&[items[0].clone(), fallback]).len(), 2);
+    }
+
+    #[test]
+    fn execute_frozen_external_plan_when_requested() {
+        let Ok(plan_path) = std::env::var("S3CC_EXECUTE_PLAN_JSON") else {
+            return;
+        };
+        let data = fs::read(&plan_path).expect("read frozen organization plan");
+        let plan = serde_json::from_slice::<OrganizationPlan>(&data)
+            .expect("deserialize frozen organization plan");
+        assert!(plan.can_execute, "frozen residual plan must be executable");
+        let result = execute_organization_plan_core(plan, AppLanguage::Pt, false, None, Vec::new())
+            .expect("execute frozen residual plan");
+        if let Ok(output) = std::env::var("S3CC_EXECUTE_RESULT_JSON") {
+            let output = PathBuf::from(output);
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(output, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+        }
     }
 }

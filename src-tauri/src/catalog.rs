@@ -742,6 +742,17 @@ fn casp_category(core: CaspCore) -> (&'static str, Option<&'static str>) {
     }
 }
 
+fn body_hair_root(language: AppLanguage) -> &'static str {
+    match language {
+        // The Portuguese manual model has a shared hair/fur container, with
+        // Body Hair as the next physical level. English keeps the explicit
+        // Body Hair name requested by the localized taxonomy.
+        AppLanguage::En => "Body Hair",
+        AppLanguage::Pt => "Cabelos e Pêlos",
+        AppLanguage::Es => "Cabello y Pelo",
+    }
+}
+
 pub fn classify_casp(data: &[u8], language: AppLanguage) -> Option<CatalogClassification> {
     let core = parse_casp_core(data)?;
     let (main_key, sub_key) = casp_category(core);
@@ -752,7 +763,14 @@ pub fn classify_casp(data: &[u8], language: AppLanguage) -> Option<CatalogClassi
     let gender = casp_gender_label(core.age_species_gender, language);
     let species = casp_species_label(core.age_species_gender, language);
 
-    let mut folder_parts = vec![tr(language, "CAS").to_string(), main_category.clone()];
+    let mut folder_parts = if main_key == "Body Hair" {
+        vec![
+            body_hair_root(language).to_string(),
+            main_category.clone(),
+        ]
+    } else {
+        vec![tr(language, "CAS").to_string(), main_category.clone()]
+    };
     if main_key != "Pets" {
         folder_parts.push(gender.clone());
         // Accessories retain gender and optional accessory subtype, but
@@ -1622,10 +1640,37 @@ mod tests {
             } else {
                 assert_eq!(item.main_category, "Pelos Corporais");
                 assert_eq!(item.sub_category, None);
-                assert_eq!(item.folder_parts.len(), 3);
+                assert_eq!(
+                    item.folder_parts,
+                    vec!["Cabelos e Pêlos", "Pelos Corporais", "Feminino"]
+                );
             }
             assert!(item.folder_parts.iter().all(|part| !part.contains("Idade")));
             assert!(item.folder_parts.iter().all(|part| part != "Múltiplas Idades"));
+        }
+    }
+
+    #[test]
+    fn body_hair_synthetic_male_female_and_unisex_use_only_gender() {
+        for (gender_bits, expected_gender) in [
+            (0x1u32 << 12, "Masculino"),
+            (0x2u32 << 12, "Feminino"),
+            (0x3u32 << 12, "Unissex"),
+        ] {
+            let item = classify_casp(
+                &minimal_casp(0x27, 0, gender_bits | 0x10 | 0x20 | 0x40, 0),
+                AppLanguage::Pt,
+            )
+            .unwrap();
+            assert_eq!(item.gender.as_deref(), Some(expected_gender));
+            assert_eq!(
+                item.folder_parts,
+                vec!["Cabelos e Pêlos", "Pelos Corporais", expected_gender]
+            );
+            assert!(!item
+                .folder_parts
+                .iter()
+                .any(|part| part.contains("Idade") || part.contains("Peito") || part.contains("Braço")));
         }
     }
 

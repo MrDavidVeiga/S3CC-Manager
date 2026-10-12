@@ -2122,17 +2122,17 @@ fn replacement_mesh_classification(
     } else {
         return None;
     };
-    let category = match language {
-        AppLanguage::En => "Replacements",
-        AppLanguage::Pt => "Substituições",
-        AppLanguage::Es => "Reemplazos",
+    let (category, body) = match language {
+        AppLanguage::En => ("Replacements", "Body"),
+        AppLanguage::Pt => ("Substituições", "Corpo"),
+        AppLanguage::Es => ("Reemplazos", "Cuerpo"),
     };
     let subcategory = match language {
         AppLanguage::En => en,
         AppLanguage::Pt => pt,
         AppLanguage::Es => es,
     };
-    let parts = vec![category.to_string(), subcategory.to_string()];
+    let parts = vec![category.to_string(), body.to_string(), subcategory.to_string()];
     Some(PackageFamilyClassification {
         main_category: category.to_string(),
         sub_category: Some(subcategory.to_string()),
@@ -2174,18 +2174,18 @@ fn verified_eye_mesh_replacement(
     if !names.iter().any(|v| v.to_ascii_lowercase().contains("face")) {
         return None;
     }
-    let (replacements, eyes) = match language {
-        AppLanguage::En => ("Replacements", "Eyes"),
-        AppLanguage::Pt => ("Substituições", "Olhos"),
-        AppLanguage::Es => ("Reemplazos", "Ojos"),
+    let (replacements, body, eyes) = match language {
+        AppLanguage::En => ("Replacements", "Body", "Eyes"),
+        AppLanguage::Pt => ("Substituições", "Corpo", "Olhos"),
+        AppLanguage::Es => ("Reemplazos", "Cuerpo", "Ojos"),
     };
     Some(PackageFamilyClassification {
         main_category: replacements.into(),
         sub_category: Some(eyes.into()),
-        folder_parts: vec![replacements.into(), eyes.into()],
+        folder_parts: vec![replacements.into(), body.into(), eyes.into()],
         detected_from: vec!["GEOM".into(), "NMAP".into(), "EyeMeshReplacement".into()],
         technical_reason: format!(
-            "Verified GEOM+NMAP face mesh and explicit eye replacement filename => {replacements}\\{eyes}"
+            "Verified GEOM+NMAP face mesh and explicit eye replacement filename => {replacements}\\{body}\\{eyes}"
         ),
     })
 }
@@ -3676,6 +3676,98 @@ pub fn scan_packages_core(
     })
 }
 
+/// Scan only an explicit set of package paths. Planner previews use this
+/// entry point for residual selections so a three-file correction does not
+/// reopen every package in the containing legacy branch. The same scanner,
+/// classifier and post-processing rules are used; only the path set differs.
+pub fn scan_selected_package_paths(
+    root: &Path,
+    package_paths: &[PathBuf],
+    language: AppLanguage,
+) -> Result<ScanResult, String> {
+    if !root.is_dir() {
+        return Err(format!("Folder does not exist: {}", root.display()));
+    }
+    let mut paths = package_paths
+        .iter()
+        .filter(|path| path.is_file() && package_extension(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    let mut slider_instances = HashSet::<u64>::new();
+    let fix_index = fix_signatures::load_persistent_index();
+    let mut items = paths
+        .iter()
+        .map(|path| scan_one(root, path, language, &mut slider_instances, fix_index.as_ref()))
+        .collect::<Vec<_>>();
+
+    apply_slider_companion_classification(&paths, &mut items, &slider_instances);
+    apply_nraas_family_subfolders(language, &mut items);
+    apply_named_mod_companions(&mut items);
+    apply_manual_classifications(root, &mut items);
+
+    for item in &mut items {
+        let sanitized = remove_generic_unknown_levels(item.destination_parts.clone());
+        if sanitized != item.destination_parts {
+            item.destination_parts = sanitized;
+            item.destination_path = (!item.destination_parts.is_empty())
+                .then(|| item.destination_parts.join("\\"));
+            item.detected_from.push("UnknownLevelRemoved".to_string());
+            item.detected_from.sort();
+            item.detected_from.dedup();
+            item.warnings.push(
+                "Generic Unknown/Desconhecido level was removed; no unsupported gender or age was invented."
+                    .to_string(),
+            );
+            if item.destination_parts.is_empty() && item.status == "classified" {
+                item.status = "needs_review".to_string();
+                item.classification_confidence = classification_confidence(&item.status).to_string();
+            }
+        }
+        item.destination_parts = physical_destination_parts(root, &item.relative_path, &item.destination_parts);
+        if item.destination_path.is_some() {
+            item.destination_path = Some(item.destination_parts.join("\\"));
+        }
+        item.candidate_destinations = item
+            .candidate_destinations
+            .iter()
+            .map(|value| physical_destination_parts(root, &item.relative_path, &split_destination(value)).join("\\"))
+            .collect();
+    }
+
+    let mut stats = ScanStats {
+        packages: items.len(),
+        ..ScanStats::default()
+    };
+    for item in &items {
+        if item.name.to_ascii_lowercase().ends_with(".package.disabled") {
+            stats.disabled += 1;
+        }
+        stats.casp_resources += item
+            .classifications
+            .iter()
+            .filter(|classification| classification.source == "CASP")
+            .count();
+        stats.objd_resources += item
+            .classifications
+            .iter()
+            .filter(|classification| classification.source == "OBJD")
+            .count();
+        match item.status.as_str() {
+            "classified" | "sim_export_merged" => stats.classified += 1,
+            "mixed" => stats.mixed += 1,
+            "needs_review" => stats.needs_review += 1,
+            "invalid" => stats.invalid += 1,
+            _ => stats.unknown += 1,
+        }
+    }
+    Ok(ScanResult {
+        root: root.to_string_lossy().to_string(),
+        items,
+        stats,
+    })
+}
+
 #[tauri::command]
 pub async fn scan_packages(folder: String, language: AppLanguage) -> Result<ScanResult, String> {
     const KIND: &str = "scan";
@@ -4752,6 +4844,180 @@ mod tests {
             script_creator_folder(AppLanguage::Pt, Some("TwinSimming")),
             vec!["Scripts", "Jogabilidade"]
         );
+    }
+
+    fn synthetic_body_hair_classification(gender: &str) -> CatalogClassification {
+        CatalogClassification {
+            source: "CASP".to_string(),
+            kind: "cas".to_string(),
+            main_category: "Pelos Corporais".to_string(),
+            sub_category: None,
+            gender: Some(gender.to_string()),
+            age: Some("Criança a Idoso".to_string()),
+            species: Some("Humano".to_string()),
+            usage_categories: Vec::new(),
+            folder_parts: vec![
+                "Cabelos e Pêlos".to_string(),
+                "Pelos Corporais".to_string(),
+                gender.to_string(),
+            ],
+            candidate_folder_parts: vec![vec![
+                "Cabelos e Pêlos".to_string(),
+                "Pelos Corporais".to_string(),
+                gender.to_string(),
+            ]],
+            ambiguous: false,
+            technical_reason: "synthetic CASP control".to_string(),
+        }
+    }
+
+    #[test]
+    fn body_hair_multiple_gender_family_keeps_shared_root_without_duplication() {
+        let classifications = vec![
+            synthetic_body_hair_classification("Masculino"),
+            synthetic_body_hair_classification("Feminino"),
+        ];
+        let shared = shared_casp_family(&classifications, &BTreeSet::from([TYPE_CASP])).unwrap();
+        assert_eq!(
+            shared.folder_parts,
+            vec!["Cabelos e Pêlos", "Pelos Corporais"]
+        );
+        assert_eq!(shared.gender, None);
+        assert!(shared
+            .folder_parts
+            .iter()
+            .all(|part| !part.contains("Idade") && !part.contains("Peito")));
+    }
+
+    #[test]
+    fn real_body_hair_model_cases_use_casp_gender_only_when_requested() {
+        let Ok(root) = std::env::var("S3CC_BODY_HAIR_MODEL_ROOT") else {
+            return;
+        };
+        let root_path = PathBuf::from(&root);
+        let targets = [
+            "Cabelos e Pêlos\\Pelos Corporais\\Masculino\\cmar_MalePubicHairFull.package",
+            "Cabelos e Pêlos\\Pelos Corporais\\Feminino\\cmar_FemalePubicHairFull.package",
+            "Cabelos e Pêlos\\Pelos Corporais\\Masculino\\TMZ_CustomBodyHair.package",
+        ];
+        let mut rows = Vec::new();
+        for relative in targets {
+            let path = root_path.join(relative);
+            assert!(path.is_file(), "real Body Hair fixture is absent: {relative}");
+            let mut slider_instances = HashSet::new();
+            let item = scan_one(
+                &root_path,
+                &path,
+                AppLanguage::Pt,
+                &mut slider_instances,
+                fix_signatures::load_persistent_index().as_ref(),
+            );
+            assert_eq!(item.status, "classified", "{relative}");
+            assert!(item.destination_parts.starts_with(&[
+                "Cabelos e Pêlos".to_string(),
+                "Pelos Corporais".to_string(),
+            ]));
+            assert!(!item.destination_parts.iter().any(|part| {
+                part.contains("Idade")
+                    || part.contains("Peito")
+                    || part.contains("Braço")
+                    || part.contains("Pern")
+                    || part.contains("Costas")
+                    || part.contains("Barriga")
+            }));
+            rows.push(serde_json::json!({
+                "relativePath": relative,
+                "sha256": sha256_file(&path).unwrap().0,
+                "status": item.status,
+                "gender": item.gender,
+                "age": item.age,
+                "destination": item.destination_parts,
+                "casp": item.classifications,
+                "reason": item.classification_reason,
+            }));
+        }
+        if let Ok(output) = std::env::var("S3CC_BODY_HAIR_REPORT") {
+            let output = PathBuf::from(output);
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(output, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn four_pending_slider_cases_use_real_dbpf_evidence_and_never_source_folder() {
+        let Ok(root) = std::env::var("S3CC_PENDING_SLIDER_ROOT") else {
+            return;
+        };
+        let root_path = PathBuf::from(&root);
+        let targets = [
+            "BloomBase afEyecorrection.package",
+            "Jonha Sliders Headshape Hairfix.package",
+            "PYXIS_Obscura_eyeballMeshPUCU.package",
+            "S-Club ts3 mod ea eyelash removal fm.package",
+        ];
+        let mut rows = Vec::new();
+        for target in targets {
+            let path = WalkDir::new(&root_path)
+                .into_iter()
+                .filter_map(Result::ok)
+                .find(|entry| entry.file_type().is_file() && entry.file_name().to_string_lossy().eq_ignore_ascii_case(target))
+                .map(|entry| entry.into_path())
+                .unwrap_or_else(|| panic!("pending package is absent: {target}"));
+            let package = Package::load(&path).expect("pending package must be valid DBPF");
+            let mut slider_instances = HashSet::new();
+            let item = scan_one(
+                &root_path,
+                &path,
+                AppLanguage::Pt,
+                &mut slider_instances,
+                fix_signatures::load_persistent_index().as_ref(),
+            );
+            assert!(
+                !package.entries.iter().any(|entry| entry.type_id == TYPE_FBLN),
+                "a pending non-FBLN control unexpectedly acquired FBLN: {target}"
+            );
+            assert_ne!(
+                item.sub_category.as_deref(),
+                Some("Sliders"),
+                "source folder must never classify a pending package as slider: {target}"
+            );
+            let resources = package
+                .entries
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "type": format!("0x{:08X}", entry.type_id),
+                        "label": resource_type_label(entry.type_id),
+                        "group": format!("0x{:08X}", entry.group),
+                        "instance": format!("0x{:016X}", entry.instance),
+                        "payloadBytes": package.data(entry).map(|data| data.len()).unwrap_or(0),
+                    })
+                })
+                .collect::<Vec<_>>();
+            rows.push(serde_json::json!({
+                "name": target,
+                "relativePath": path.strip_prefix(&root_path).unwrap_or(&path).to_string_lossy(),
+                "status": item.status,
+                "classificationConfidence": item.classification_confidence,
+                "destination": item.destination_parts,
+                "resourceCount": package.entries.len(),
+                "resources": resources,
+                "nmapNames": package_nmap_names(&package),
+                "internalIdentifiers": package_internal_identifiers(&package),
+                "detectedFrom": item.detected_from,
+                "classificationReason": item.classification_reason,
+                "warnings": item.warnings,
+            }));
+        }
+        if let Ok(output) = std::env::var("S3CC_PENDING_SLIDER_REPORT") {
+            let output = PathBuf::from(output);
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(output, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+        }
     }
 
     #[test]
