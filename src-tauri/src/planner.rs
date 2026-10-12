@@ -48,6 +48,10 @@ pub struct PlanStats {
     pub blocked: usize,
     pub directories_to_create: usize,
     pub empty_folders_to_clean: usize,
+    /// Files that will still be physically present below the selected legacy
+    /// roots after all `ready*` items are applied.
+    #[serde(default)]
+    pub remaining_legacy_files: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1928,6 +1932,29 @@ fn is_canonical_duplicate_peer(
         .is_some_and(|destination| same_path_case_insensitive(path, &destination))
 }
 
+/// Add model exemplars that are present in the selected root to a duplicate
+/// comparison.  The persistent model index can legitimately contain more
+/// than one exemplar for a SHA-256 (for example a migrated or disabled copy),
+/// so a hash match alone must never choose a keeper.  A file that is actually
+/// present at an exact model path is stronger evidence and is safe to use as
+/// the keeper candidate for the current execution.
+fn add_existing_model_peer_paths(
+    root: &Path,
+    sha256: &str,
+    inactive: bool,
+    manual_model: &ManualModelIndex,
+    candidate_paths: &mut BTreeSet<PathBuf>,
+) {
+    if let Some(files) = manual_model.files_by_sha256.get(&sha256.to_ascii_uppercase()) {
+        for file in files {
+            let path = root.join(&file.relative_path);
+            if path.is_file() && is_disabled_package_path(&path) == inactive {
+                candidate_paths.insert(path);
+            }
+        }
+    }
+}
+
 fn is_selected_content_keeper_for_scan(
     root: &Path,
     source: &Path,
@@ -1952,6 +1979,13 @@ fn is_selected_content_keeper_for_scan(
             candidate_paths.insert(path);
         }
     }
+    add_existing_model_peer_paths(
+        root,
+        sha256,
+        inactive,
+        manual_model,
+        &mut candidate_paths,
+    );
     let mut candidates = candidate_paths
         .into_iter()
         .map(|path| {
@@ -2008,6 +2042,13 @@ fn selected_content_keeper_relative_path(
             candidate_paths.insert(path);
         }
     }
+    add_existing_model_peer_paths(
+        root,
+        sha256,
+        inactive,
+        manual_model,
+        &mut candidate_paths,
+    );
     let mut candidates = candidate_paths
         .into_iter()
         .map(|path| {
@@ -2034,6 +2075,53 @@ fn selected_content_keeper_relative_path(
         .into_iter()
         .next()
         .map(|(_, _, relative)| relative)
+}
+
+/// When a persistent index was generated before a model folder was renamed,
+/// its hash entries may still point at paths that no longer exist.  A current
+/// classification can nevertheless provide an exact model directory.  Use
+/// that path only if the real peer is present there and it is one of the
+/// already-indexed duplicate peers; this never promotes a guessed or merely
+/// similarly named folder.
+fn current_model_destination_keeper_relative_path(
+    root: &Path,
+    source: &Path,
+    peer_relative_paths: &[String],
+    model_destination: Option<&ModelDestination>,
+    classified_parts: &[String],
+) -> Option<String> {
+    let file_name = source.file_name()?;
+    let candidate_parts = model_destination
+        .map(|destination| vec![destination.parts.clone()])
+        .unwrap_or_else(|| {
+            // Scanner classifications can carry a non-physical wrapper such
+            // as `CAS`. Test the complete classified path and each exact
+            // suffix, but accept only a real peer at a path already present
+            // in the duplicate index. This is not a name-based fallback.
+            (0..classified_parts.len())
+                .map(|start| classified_parts[start..].to_vec())
+                .collect()
+        });
+
+    let mut matches = BTreeSet::<String>::new();
+    for parts in candidate_parts {
+        let mut relative = PathBuf::new();
+        for part in parts {
+            relative.push(part);
+        }
+        relative.push(file_name);
+        let relative_text = relative_key(&relative);
+        let path = root.join(&relative);
+        if path.is_file()
+            && !same_path_case_insensitive(source, &path)
+            && peer_relative_paths
+                .iter()
+                .any(|peer| same_relative_path(peer, &relative_text))
+        {
+            matches.insert(relative_text);
+        }
+    }
+    (matches.len() == 1).then(|| matches.into_iter().next().unwrap())
 }
 
 fn index_exact_duplicates(
@@ -2322,6 +2410,145 @@ fn plan_can_execute(stats: &PlanStats, read_only: bool) -> bool {
     // Blocked items are excluded from movement. They must not prevent the
     // independently validated ready items from being organized and restored.
     !read_only && (stats.ready > 0 || stats.empty_folders_to_clean > 0)
+}
+
+fn plan_item_moves_source(item: &PlanItem) -> bool {
+    item.plan_status.starts_with("ready")
+}
+
+fn path_matches_item_source(path: &Path, item: &PlanItem) -> bool {
+    same_path_case_insensitive(path, Path::new(&item.source_path))
+}
+
+fn is_stable_review_or_quarantine_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy();
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "#sem categoria"
+                | "#not categorized"
+                | "#sin categoría"
+                | "#duplicados"
+                | "#duplicates"
+                | "previews de ccs"
+                | "cc previews"
+        )
+    })
+}
+
+fn projected_remaining_legacy_files(
+    selected: &HashSet<PathBuf>,
+    selected_roots: &[PathBuf],
+    items: &[PlanItem],
+) -> usize {
+    let mut files = BTreeSet::<PathBuf>::new();
+    for path in selected {
+        if path.is_file() {
+            files.insert(path.clone());
+        }
+    }
+    for selected_root in selected_roots {
+        if !selected_root.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(selected_root)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
+            if entry.file_type().is_file() {
+                files.insert(entry.path().to_path_buf());
+            }
+        }
+    }
+
+    files
+        .into_iter()
+        .filter(|path| match items.iter().find(|item| path_matches_item_source(path, item)) {
+            Some(item) => {
+                let destination_is_same = item
+                    .destination_path
+                    .as_deref()
+                    .is_some_and(|destination| {
+                        same_path_case_insensitive(path, Path::new(destination))
+                    }) || item
+                        .destination_relative_path
+                        .as_deref()
+                        .is_some_and(|destination| {
+                            same_relative_path(&item.source_relative_path, destination)
+                        });
+                !plan_item_moves_source(item)
+                    && !item.plan_status.starts_with("already_")
+                    && !destination_is_same
+            }
+            None => !is_stable_review_or_quarantine_path(path),
+        })
+        .count()
+}
+
+fn projected_empty_folders_to_clean(
+    root: &Path,
+    selected_roots: &[PathBuf],
+    items: &[PlanItem],
+) -> usize {
+    let mut candidates = BTreeSet::<PathBuf>::new();
+    for selected_root in selected_roots {
+        if selected_root.is_dir() && selected_root.starts_with(root) {
+            candidates.insert(selected_root.clone());
+        }
+    }
+    for item in items {
+        let source = PathBuf::from(&item.source_path);
+        let Some(parent) = source.parent() else {
+            continue;
+        };
+        if !parent.is_dir() || !parent.starts_with(root) || parent == root {
+            continue;
+        }
+        candidates.insert(parent.to_path_buf());
+        let mut ancestor = parent.parent();
+        while let Some(folder) = ancestor {
+            if folder == root || !folder.starts_with(root) {
+                break;
+            }
+            candidates.insert(folder.to_path_buf());
+            ancestor = folder.parent();
+        }
+    }
+
+    candidates
+        .into_iter()
+        .filter(|folder| {
+            if !folder.is_dir() {
+                return false;
+            }
+            let source_files_occupy = WalkDir::new(folder)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+                .filter(|entry| entry.file_type().is_file())
+                .any(|entry| {
+                    let source = entry.path();
+                    match items.iter().find(|item| path_matches_item_source(source, item)) {
+                        Some(item) if plan_item_moves_source(item) => item
+                            .destination_path
+                            .as_deref()
+                            .map(Path::new)
+                            .is_some_and(|destination| destination.starts_with(folder)),
+                        Some(_) | None => true,
+                    }
+                });
+            let destinations_occupy = items.iter().any(|item| {
+                plan_item_moves_source(item)
+                    && item
+                        .destination_path
+                        .as_deref()
+                        .map(Path::new)
+                        .is_some_and(|destination| destination.starts_with(folder))
+            });
+            !source_files_occupy && !destinations_occupy
+        })
+        .count()
 }
 
 fn manifest_preview(root: &Path, language: AppLanguage, ready_items: &[PlanItem]) -> String {
@@ -2723,6 +2950,15 @@ pub fn build_organization_plan_with_cfg(
                 &manual_model,
                 resource_cfg.as_ref(),
             )
+            .or_else(|| {
+                current_model_destination_keeper_relative_path(
+                    &root,
+                    &source_canonical,
+                    peers,
+                    hash_model_destination.as_ref().and_then(|result| result.as_ref().ok()),
+                    &item.destination_parts,
+                )
+            })
         });
         if let Some(peers) = duplicate_group {
             let Some(keeper) = duplicate_keeper.as_deref() else {
@@ -2803,7 +3039,15 @@ pub fn build_organization_plan_with_cfg(
                         &scan_by_canonical,
                         &manual_model,
                         resource_cfg.as_ref(),
-                    ).unwrap_or_else(|| "unresolved selected path".to_string()),
+                    ).or_else(|| {
+                        current_model_destination_keeper_relative_path(
+                            &root,
+                            &source_canonical,
+                            peers,
+                            hash_model_destination.as_ref().and_then(|result| result.as_ref().ok()),
+                            &item.destination_parts,
+                        )
+                    }).unwrap_or_else(|| "unresolved selected path".to_string()),
                     peers.len(),
                     peers.iter().take(4).cloned().collect::<Vec<_>>().join(" | ")
                 )],
@@ -3319,21 +3563,67 @@ pub fn build_organization_plan_with_cfg(
 
             let same = source_size == target_size && source_hash.eq_ignore_ascii_case(&target_hash);
             if same {
+                // An exact copy that is stranded in a legacy folder must not
+                // be left there merely because its canonical destination is
+                // already occupied. Move the extra copy to the flat,
+                // reversible quarantine instead; the canonical destination is
+                // retained byte-for-byte and no overwrite is attempted.
+                let (quarantine_relative, quarantine_parts) =
+                    duplicate_quarantine_destination(
+                        &root,
+                        language,
+                        &source_canonical,
+                        &source_hash,
+                        &reserved_duplicate_destinations,
+                    )?;
+                let quarantine = root.join(&quarantine_relative);
+                if !same_path_case_insensitive(&source_canonical, &quarantine) {
+                    add_missing_directories(&root, &quarantine_parts, &mut directories);
+                    reserved_duplicate_destinations
+                        .insert(relative_key(&quarantine_relative).to_ascii_lowercase());
+                    stats.ready += 1;
+                    items.push(PlanItem {
+                        id: item.id.clone(),
+                        name: item.name.clone(),
+                        source_path: source_canonical.to_string_lossy().to_string(),
+                        source_relative_path: item.relative_path.clone(),
+                        destination_path: Some(quarantine.to_string_lossy().to_string()),
+                        destination_relative_path: Some(relative_key(&quarantine_relative)),
+                        classification_status: item.status.clone(),
+                        classification_reason: Some(format!(
+                            "{} | Exact byte-identical copy quarantined; canonical keeper remains '{}'.",
+                            classification_reason.unwrap_or_default(),
+                            destination_relative_text
+                        )),
+                        plan_status: "ready_duplicate_quarantine".to_string(),
+                        sha256: Some(source_hash),
+                        size: source_size,
+                        warnings: vec![format!(
+                            "The canonical destination '{}' already contains identical bytes. The legacy copy will move intact to flat #Duplicados as '{}'; no overwrite or reactivation is performed.",
+                            destination_relative_text,
+                            relative_key(&quarantine_relative)
+                        )],
+                    });
+                    continue;
+                }
+
+                // A file already directly below #Duplicados is already in
+                // the requested flat quarantine and must remain idempotent.
                 stats.duplicate_skipped += 1;
                 items.push(PlanItem {
                     id: item.id.clone(),
                     name: item.name.clone(),
                     source_path: source_canonical.to_string_lossy().to_string(),
                     source_relative_path: item.relative_path.clone(),
-                    destination_path: Some(destination.to_string_lossy().to_string()),
-                    destination_relative_path: Some(destination_relative_text),
+                    destination_path: Some(quarantine.to_string_lossy().to_string()),
+                    destination_relative_path: Some(relative_key(&quarantine_relative)),
                     classification_status: item.status.clone(),
                     classification_reason: classification_reason.clone(),
                     plan_status: "duplicate_skipped".to_string(),
                     sha256: Some(source_hash),
                     size: source_size,
                     warnings: vec![
-                        "The categorized destination already contains byte-identical data; no overwrite was performed. Review it in Duplicates/Quarantine.".to_string(),
+                        "The byte-identical file is already directly in flat #Duplicados; no overwrite was performed.".to_string(),
                     ],
                 });
                 continue;
@@ -3541,28 +3831,13 @@ pub fn build_organization_plan_with_cfg(
         .collect::<Vec<_>>();
 
     stats.directories_to_create = directories.len();
-    // Enable a confirmed cleanup-only pass after a previous organization,
-    // but count only actually empty directories and never loading roots.
-    stats.empty_folders_to_clean = walkdir::WalkDir::new(&root)
-        .follow_links(false)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_dir())
-        .filter(|entry| {
-            let path = entry.path();
-            let protected = is_mods_root(&root)
-                && path.parent() == Some(root.as_path())
-                && path.file_name().is_some_and(|name| {
-                    name.to_string_lossy().eq_ignore_ascii_case("Packages")
-                        || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
-                });
-            !protected
-                && fs::read_dir(path)
-                    .map(|mut items| items.next().is_none())
-                    .unwrap_or(false)
-        })
-        .count();
+    // Project the post-move state instead of counting unrelated empty folders
+    // across the whole Packages tree. This keeps cleanup indicators aligned
+    // with the focused branches the executor is actually allowed to visit.
+    stats.remaining_legacy_files =
+        projected_remaining_legacy_files(&selected, &selected_roots, &items);
+    stats.empty_folders_to_clean =
+        projected_empty_folders_to_clean(&root, &selected_roots, &items);
 
     let can_execute = plan_can_execute(&stats, workspace.read_only);
     let cfg_opt_in = update_resource_cfg
@@ -3601,7 +3876,7 @@ pub fn build_organization_plan_with_cfg(
         items,
         can_execute,
         analysis_before: OrganizationAnalysisSnapshot::from_scan("analysis_before", &scan.stats)
-            .with_plan(&stats, 0),
+            .with_plan(&stats, stats.remaining_legacy_files),
     })
 }
 
@@ -5103,6 +5378,38 @@ mod tests {
             }
             std::fs::write(output, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
         }
+    }
+
+    #[test]
+    fn projected_remaining_ignores_stable_review_companions() {
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-projected-remaining-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let stable = base.join("#Sem Categoria").join("Arquivos Auxiliares");
+        let legacy = base.join("Jonas");
+        std::fs::create_dir_all(&stable).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(stable.join("Jonas_Scott.sim"), b"stable").unwrap();
+        std::fs::write(legacy.join("pending.txt"), b"pending").unwrap();
+
+        let stable_count = projected_remaining_legacy_files(
+            &HashSet::new(),
+            &[stable.clone()],
+            &[],
+        );
+        let legacy_count = projected_remaining_legacy_files(
+            &HashSet::new(),
+            &[legacy.clone()],
+            &[],
+        );
+        assert_eq!(stable_count, 0);
+        assert_eq!(legacy_count, 1);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
