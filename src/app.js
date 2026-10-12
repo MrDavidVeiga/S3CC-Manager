@@ -531,6 +531,7 @@ const I18N = {
     scriptConflict: "Script Conflict",
     textOverride: "Text Override",
     potentialConflict: "Potential Conflict",
+    filenameCollisionReview: "Same Name · Different Bytes",
     casMorphOverlap: "CAS Morph Overlap",
     conflictCasMorphExplanation: "Both packages contain different CAS morph data with the same Type, Group and Instance. This requires review, but does not alone prove that either mod is broken.",
     mixedOverride: "Mixed Override",
@@ -548,6 +549,7 @@ const I18N = {
     conflictScriptExplanation: "The same script assembly TGI exists in both packages with a different payload. This is a high-risk script collision.",
     conflictTextExplanation: "The same STBL TGI exists with different text payloads. This is a text/localization override.",
     conflictPotentialExplanation: "The same TGI exists with a different payload, but its resource family is not yet classified deeply enough for a stronger conclusion.",
+    conflictFilenameCollisionExplanation: "The packages have the same filename but different SHA-256 bytes. This is a review finding only; the filename does not prove a shared TGI conflict.",
     conflictMixedExplanation: "This package pair contains multiple classes of differing shared resources.",
     sharedCount: "Shared TGIs",
     samePayloadCount: "Identical payloads",
@@ -1100,6 +1102,7 @@ const I18N = {
     scriptConflict: "Conflito de Script",
     textOverride: "Override de Texto",
     potentialConflict: "Conflito Potencial",
+    filenameCollisionReview: "Mesmo Nome · Bytes Diferentes",
     casMorphOverlap: "Sobreposição de Morfologia CAS",
     conflictCasMorphExplanation: "Os packages contêm dados diferentes de morfologia CAS com o mesmo Type, Group e Instance. É necessário revisar, mas isso não comprova que algum mod esteja com defeito.",
     mixedOverride: "Override Misto",
@@ -1117,6 +1120,7 @@ const I18N = {
     conflictScriptExplanation: "O mesmo TGI de assembly/script existe nos dois packages com payload diferente. É uma colisão de script de alto risco.",
     conflictTextExplanation: "O mesmo TGI STBL existe com textos diferentes. É um override de texto/localização.",
     conflictPotentialExplanation: "O mesmo TGI existe com payload diferente, mas a família do resource ainda não está classificada em profundidade suficiente para uma conclusão mais forte.",
+    conflictFilenameCollisionExplanation: "Os packages têm o mesmo nome, mas bytes SHA-256 diferentes. É apenas um resultado para revisão; o nome não comprova conflito de TGI compartilhado.",
     conflictMixedExplanation: "Este par de packages contém várias classes de resources compartilhados com conteúdo diferente.",
     sharedCount: "TGIs compartilhados",
     samePayloadCount: "Payloads idênticos",
@@ -1668,6 +1672,7 @@ const I18N = {
     scriptConflict: "Conflicto de Script",
     textOverride: "Override de Texto",
     potentialConflict: "Conflicto Potencial",
+    filenameCollisionReview: "Mismo Nombre · Bytes Diferentes",
     casMorphOverlap: "Superposición de Morfología CAS",
     conflictCasMorphExplanation: "Los packages contienen datos distintos de morfología CAS con el mismo Type, Group e Instance. Requiere revisión, pero no demuestra por sí solo que algún mod esté dañado.",
     mixedOverride: "Override Mixto",
@@ -1685,6 +1690,7 @@ const I18N = {
     conflictScriptExplanation: "El mismo TGI de assembly/script existe en ambos packages con un payload diferente. Es una colisión de script de alto riesgo.",
     conflictTextExplanation: "El mismo TGI STBL existe con textos diferentes. Es un override de texto/localización.",
     conflictPotentialExplanation: "El mismo TGI existe con un payload diferente, pero la familia del resource todavía no está clasificada con suficiente profundidad para una conclusión más fuerte.",
+    conflictFilenameCollisionExplanation: "Los packages tienen el mismo nombre, pero bytes SHA-256 diferentes. Es solo un resultado para revisión; el nombre no demuestra un conflicto de TGI compartido.",
     conflictMixedExplanation: "Este par de packages contiene varias clases de resources compartidos con contenido diferente.",
     sharedCount: "TGIs compartidos",
     samePayloadCount: "Payloads idénticos",
@@ -4140,6 +4146,7 @@ function renderConflictFilter() {
     ["visual_override", t("visualOverride")],
     ["text_override", t("textOverride")],
     ["potential_conflict", t("potentialConflict")],
+    ["filename_collision_review", t("filenameCollisionReview")],
     ["cas_morph_overlap", t("casMorphOverlap")],
     ["mixed_override", t("mixedOverride")],
     ["shared_identical", t("sharedIdentical")],
@@ -4438,6 +4445,7 @@ function conflictKindLabel(kind) {
     script_conflict: t("scriptConflict"),
     text_override: t("textOverride"),
     potential_conflict: t("potentialConflict"),
+    filename_collision_review: t("filenameCollisionReview"),
     cas_morph_overlap: t("casMorphOverlap"),
     mixed_override: t("mixedOverride"),
   }[kind] || kind;
@@ -4463,6 +4471,7 @@ function conflictExplanation(kind) {
     script_conflict: t("conflictScriptExplanation"),
     text_override: t("conflictTextExplanation"),
     potential_conflict: t("conflictPotentialExplanation"),
+    filename_collision_review: t("conflictFilenameCollisionExplanation"),
     cas_morph_overlap: t("conflictCasMorphExplanation"),
     mixed_override: t("conflictMixedExplanation"),
   }[kind] || "";
@@ -4497,7 +4506,8 @@ function visibleConflictFindings() {
       if (outsideLoadRules &&
           !["all", "inactive"].includes(state.conflictsFilter)) return false;
       if (state.conflictsFilter === "attention" &&
-          (item.severity === "info" || mark === "intentional" || mark === "reviewed" || item.differentPayloadCount === 0)) return false;
+          (item.severity === "info" || mark === "intentional" || mark === "reviewed" ||
+            (item.differentPayloadCount === 0 && item.kind !== "filename_collision_review"))) return false;
       if (state.conflictsFilter === "inactive" && !outsideLoadRules) return false;
       if (state.conflictsFilter !== "all" &&
           state.conflictsFilter !== "attention" && state.conflictsFilter !== "inactive") {

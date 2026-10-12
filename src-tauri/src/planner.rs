@@ -1066,6 +1066,12 @@ fn relative_key(path: &Path) -> String {
         .join("\\")
 }
 
+fn same_relative_path(left: &str, right: &str) -> bool {
+    left.replace('/', "\\")
+        .trim_matches('\\')
+        .eq_ignore_ascii_case(right.replace('/', "\\").trim_matches('\\'))
+}
+
 fn exact_model_relative_path_matches(current: &str, canonical: &str) -> bool {
     // This is deliberately an exact, component-by-component comparison. A
     // folder such as "#6 Slider" or "Creator\\Sliders" is not equivalent to
@@ -1846,39 +1852,78 @@ fn canonical_destination_for_keeper(
     Some(destination_path(root, &parts, file_name))
 }
 
+fn is_canonical_duplicate_peer(
+    root: &Path,
+    path: &Path,
+    sha256: &str,
+    scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
+    manual_model: &ManualModelIndex,
+    resource_cfg: Option<&ResourceCfgContext>,
+) -> bool {
+    let relative = path
+        .strip_prefix(root)
+        .map(relative_key)
+        .unwrap_or_else(|_| relative_key(path));
+    if manual_model
+        .files_by_sha256
+        .get(&sha256.to_ascii_uppercase())
+        .is_some_and(|files| {
+            files.iter().any(|file| {
+                same_relative_path(&file.relative_path, &relative)
+                    && is_disabled_package_path(path)
+                        == file.relative_path.to_ascii_lowercase().ends_with(".package.disabled")
+            })
+        })
+    {
+        return true;
+    }
+    scan_by_canonical
+        .get(path)
+        .and_then(|item| {
+            canonical_destination_for_keeper(root, path, sha256, item, manual_model, resource_cfg)
+        })
+        .is_some_and(|destination| same_path_case_insensitive(path, &destination))
+}
+
 fn is_selected_content_keeper_for_scan(
     root: &Path,
     source: &Path,
     sha256: &str,
     selected_hashes: &HashMap<PathBuf, String>,
+    peer_relative_paths: &[String],
     scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
     manual_model: &ManualModelIndex,
     resource_cfg: Option<&ResourceCfgContext>,
 ) -> bool {
     let inactive = is_disabled_package_path(source);
-    let mut candidates = selected_hashes
+    let mut candidate_paths = selected_hashes
         .iter()
         .filter(|(path, hash)| {
             hash.eq_ignore_ascii_case(sha256) && is_disabled_package_path(path) == inactive
         })
-        .map(|(path, _)| {
-            let canonical = scan_by_canonical
-                .get(path)
-                .and_then(|item| {
-                    canonical_destination_for_keeper(
-                        root,
-                        path,
-                        sha256,
-                        item,
-                        manual_model,
-                        resource_cfg,
-                    )
-                })
-                .is_some_and(|destination| same_path_case_insensitive(path, &destination));
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    for relative in peer_relative_paths {
+        let path = root.join(relative);
+        if path.is_file() && is_disabled_package_path(&path) == inactive {
+            candidate_paths.insert(path);
+        }
+    }
+    let mut candidates = candidate_paths
+        .into_iter()
+        .map(|path| {
+            let canonical = is_canonical_duplicate_peer(
+                root,
+                &path,
+                sha256,
+                scan_by_canonical,
+                manual_model,
+                resource_cfg,
+            );
             let relative = path
                 .strip_prefix(root)
                 .map(relative_key)
-                .unwrap_or_else(|_| relative_key(path));
+                .unwrap_or_else(|_| relative_key(&path));
             (path, canonical, relative.to_ascii_lowercase())
         })
         .collect::<Vec<_>>();
@@ -1901,34 +1946,40 @@ fn selected_content_keeper_relative_path(
     source: &Path,
     sha256: &str,
     selected_hashes: &HashMap<PathBuf, String>,
+    peer_relative_paths: &[String],
     scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
     manual_model: &ManualModelIndex,
     resource_cfg: Option<&ResourceCfgContext>,
 ) -> Option<String> {
     let inactive = is_disabled_package_path(source);
-    let mut candidates = selected_hashes
+    let mut candidate_paths = selected_hashes
         .iter()
         .filter(|(path, hash)| {
             hash.eq_ignore_ascii_case(sha256) && is_disabled_package_path(path) == inactive
         })
-        .map(|(path, _)| {
-            let canonical = scan_by_canonical
-                .get(path)
-                .and_then(|item| {
-                    canonical_destination_for_keeper(
-                        root,
-                        path,
-                        sha256,
-                        item,
-                        manual_model,
-                        resource_cfg,
-                    )
-                })
-                .is_some_and(|destination| same_path_case_insensitive(path, &destination));
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    for relative in peer_relative_paths {
+        let path = root.join(relative);
+        if path.is_file() && is_disabled_package_path(&path) == inactive {
+            candidate_paths.insert(path);
+        }
+    }
+    let mut candidates = candidate_paths
+        .into_iter()
+        .map(|path| {
+            let canonical = is_canonical_duplicate_peer(
+                root,
+                &path,
+                sha256,
+                scan_by_canonical,
+                manual_model,
+                resource_cfg,
+            );
             let relative = path
                 .strip_prefix(root)
                 .map(relative_key)
-                .unwrap_or_else(|_| relative_key(path));
+                .unwrap_or_else(|_| relative_key(&path));
             (canonical, relative.to_ascii_lowercase(), relative)
         })
         .collect::<Vec<_>>();
@@ -2617,17 +2668,38 @@ pub fn build_organization_plan_with_cfg(
             && !source_uses_overrides(&root, &source_canonical);
 
         let duplicates = duplicate_peers.get(&source_hash.to_ascii_uppercase());
-        if let Some(peers) = duplicates.filter(|peers| peers.len() > 1).filter(|_| {
-            !is_selected_content_keeper_for_scan(
+        let duplicate_group = duplicates.filter(|peers| peers.len() > 1);
+        let duplicate_keeper = duplicate_group.and_then(|peers| {
+            selected_content_keeper_relative_path(
                 &root,
                 &source_canonical,
                 &source_hash,
                 &selected_hashes,
+                peers,
                 &scan_by_canonical,
                 &manual_model,
                 resource_cfg.as_ref(),
             )
-        }) {
+        });
+        if let Some(peers) = duplicate_group {
+            let Some(keeper) = duplicate_keeper.as_deref() else {
+                stats.blocked += 1;
+                let mut blocked = make_blocked(
+                    item,
+                    format!(
+                        "Exact duplicate group has no confirmed canonical keeper; preserved in place for review. Matching paths: {}.",
+                        peers.iter().take(6).cloned().collect::<Vec<_>>().join(" | ")
+                    ),
+                );
+                blocked.plan_status = "blocked_duplicate_no_keeper".to_string();
+                blocked.sha256 = Some(source_hash.clone());
+                items.push(blocked);
+                continue;
+            };
+            if same_relative_path(&item.relative_path, keeper) {
+                // The confirmed keeper remains in its canonical location and
+                // continues through normal classification/idempotence checks.
+            } else {
             // A confirmed byte-identical extra copy is not silently stranded
             // in a legacy folder. Move it to a reversible quarantine bucket;
             // the keeper continues through normal canonical-model handling.
@@ -2684,6 +2756,7 @@ pub fn build_organization_plan_with_cfg(
                         &source_canonical,
                         &source_hash,
                         &selected_hashes,
+                        peers,
                         &scan_by_canonical,
                         &manual_model,
                         resource_cfg.as_ref(),
@@ -2693,6 +2766,7 @@ pub fn build_organization_plan_with_cfg(
                 )],
             });
             continue;
+            }
         }
 
         if let Some(loose_files) = possible_merged_peers.get(&item.relative_path.to_lowercase()) {
@@ -3414,7 +3488,7 @@ pub fn build_organization_plan_with_cfg(
         .count();
     stats.blocked = items
         .iter()
-        .filter(|item| item.plan_status == "blocked")
+        .filter(|item| item.plan_status.starts_with("blocked"))
         .count();
 
     let ready_items = items
@@ -3890,6 +3964,7 @@ mod tests {
             &canonical_path,
             "SAME",
             &selected_hashes,
+            &[],
             &scan,
             &manual_model,
             None
@@ -3899,6 +3974,7 @@ mod tests {
             &legacy_path,
             "SAME",
             &selected_hashes,
+            &[],
             &scan,
             &manual_model,
             None
@@ -3908,6 +3984,7 @@ mod tests {
             &second_legacy_path,
             "SAME",
             &selected_hashes,
+            &[],
             &scan,
             &manual_model,
             None
@@ -3918,6 +3995,7 @@ mod tests {
                 &legacy_path,
                 "SAME",
                 &selected_hashes,
+                &[],
                 &scan,
                 &manual_model,
                 None,
@@ -4842,6 +4920,7 @@ mod tests {
             &first_path,
             "SAME",
             &selected_hashes,
+            &[],
             &scan,
             &manual_model,
             None
@@ -4851,6 +4930,7 @@ mod tests {
             &second_path,
             "SAME",
             &selected_hashes,
+            &[],
             &scan,
             &manual_model,
             None
@@ -4861,6 +4941,7 @@ mod tests {
                 &first_path,
                 "SAME",
                 &selected_hashes,
+                &[],
                 &scan,
                 &manual_model,
                 None

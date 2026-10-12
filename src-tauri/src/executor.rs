@@ -376,6 +376,11 @@ fn cleanup_empty_directories_after_organization_scoped(
     for folder in candidates {
         match fs::remove_dir(&folder) {
             Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The child may have removed this directory earlier in the
+                // same cleanup pass. Missing is the expected idempotent
+                // outcome, not a cleanup failure.
+            }
             Err(error) => {
                 // A nonempty directory is expected and must be kept intact.
                 // Surface only failures concerning an actually empty folder.
@@ -388,11 +393,14 @@ fn cleanup_empty_directories_after_organization_scoped(
                             ));
                         }
                     },
+                    Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
+                        // A concurrent/earlier removal is also expected while
+                        // walking ancestors in the same cleanup pass.
+                    }
                     Err(read_error) => warnings.push(format!(
                         "Could not inspect folder {} after failed cleanup: {read_error}",
                         folder.display()
                     )),
-                    _ => {}
                 }
             }
         }
@@ -1188,6 +1196,26 @@ mod tests {
         assert!(!packages.join("Empty").exists());
         assert!(overrides.join("Unrelated Empty").is_dir());
         std::fs::remove_dir_all(mods.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cleanup_ignores_expected_missing_directory_after_duplicate_scope_visit() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let base = std::env::temp_dir()
+            .join(format!("s3cc-cleanup-missing-{}-{nonce}", std::process::id()));
+        let root = base.join("Packages");
+        let legacy = root.join("Jonas").join("Empty");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let scopes = vec![legacy.clone(), legacy.clone()];
+
+        let (removed, _, warnings) =
+            cleanup_empty_directories_after_organization_scoped(&root, &[], Some(&scopes));
+
+        assert_eq!(removed, 2);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!legacy.exists());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(unix)]

@@ -7,7 +7,7 @@ use crate::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -142,6 +142,8 @@ pub struct ConflictStats {
     pub text_overrides: usize,
     pub potential_conflicts: usize,
     pub mixed_overrides: usize,
+    /// Same filename with different package bytes; not evidence of a TGI collision.
+    pub filename_collisions: usize,
     pub analysis_truncated: bool,
     pub cache_hits: usize,
     pub cache_misses: usize,
@@ -170,6 +172,39 @@ struct PairAccumulator {
     impact_kinds: BTreeSet<String>,
     evidence: Vec<ConflictEvidence>,
     evidence_truncated: bool,
+    filename_collision: bool,
+}
+
+fn mark_filename_collisions(
+    packages: &[PackageInfo],
+    pairs: &mut HashMap<(usize, usize), PairAccumulator>,
+) {
+    let mut by_name = BTreeMap::<String, Vec<usize>>::new();
+    for (index, package) in packages.iter().enumerate() {
+        if package.file_sha256.is_empty() {
+            continue;
+        }
+        by_name
+            .entry(package.name.to_ascii_lowercase())
+            .or_default()
+            .push(index);
+    }
+    for indices in by_name.values() {
+        for left_pos in 0..indices.len() {
+            for right_pos in (left_pos + 1)..indices.len() {
+                let left = indices[left_pos];
+                let right = indices[right_pos];
+                if packages[left]
+                    .file_sha256
+                    .eq_ignore_ascii_case(&packages[right].file_sha256)
+                {
+                    continue;
+                }
+                let key = (left.min(right), left.max(right));
+                pairs.entry(key).or_default().filename_collision = true;
+            }
+        }
+    }
 }
 
 fn is_package(path: &Path) -> bool {
@@ -341,6 +376,12 @@ fn finding_severity(
     load_order_status: &str,
     reliable_resource_cfg: bool,
 ) -> &'static str {
+    if kind == "filename_collision_review" {
+        // Filename collisions stay visible for manual review even when the
+        // packages are outside the current load rules or share identical
+        // internal payloads.
+        return "review";
+    }
     // Resource conflicts require both packages to be loaded. Keep evidence
     // for diagnostics, but do not warn about a pair not loaded by these rules.
     if reliable_resource_cfg
@@ -372,6 +413,7 @@ fn explanation_key(kind: &str) -> &'static str {
         "gameplay_override" => "same_tgi_different_gameplay_payload",
         "script_conflict" => "same_tgi_different_script_payload",
         "text_override" => "same_tgi_different_text_payload",
+        "filename_collision_review" => "same_filename_different_package_bytes",
         "mixed_override" => "multiple_override_classes",
         _ => "same_tgi_different_unknown_payload",
     }
@@ -508,11 +550,10 @@ pub fn analyze_conflicts_core(
             selected.insert(canonical);
         }
 
-        all_paths
-            .iter()
-            .filter(|path| path.canonicalize().ok().map(|value| selected.contains(&value)).unwrap_or(false))
-            .cloned()
-            .collect::<Vec<_>>()
+        // An explicit selection is authoritative. Do not intersect it with
+        // the cache-backed all_paths list: a package moved by a previous
+        // execution may be valid on disk but absent from a stale cache.
+        selected.into_iter().collect::<Vec<_>>()
     } else {
         all_paths.clone()
     };
@@ -657,6 +698,9 @@ pub fn analyze_conflicts_core(
 
     let comparison_started = Instant::now();
     let mut pairs = HashMap::<(usize, usize), PairAccumulator>::new();
+    // Same-name collisions are review evidence only; resource-level evidence
+    // is still collected independently below.
+    mark_filename_collisions(&packages, &mut pairs);
     let mut truncated = false;
     let mut comparisons = 0usize;
 
@@ -774,7 +818,12 @@ pub fn analyze_conflicts_core(
     });
 
     for ((left_index, right_index), accumulator) in ordered_pairs {
-        let kind = primary_kind(&accumulator.impact_kinds, accumulator.different_payload_count);
+        let kind = if accumulator.filename_collision && accumulator.different_payload_count == 0
+        {
+            "filename_collision_review".to_string()
+        } else {
+            primary_kind(&accumulator.impact_kinds, accumulator.different_payload_count)
+        };
 
         match kind.as_str() {
             "shared_identical" => stats.shared_identical += 1,
@@ -786,12 +835,16 @@ pub fn analyze_conflicts_core(
             "text_override" => stats.text_overrides += 1,
             "potential_conflict" => stats.potential_conflicts += 1,
             "mixed_override" => stats.mixed_overrides += 1,
+            "filename_collision_review" => stats.filename_collisions += 1,
             _ => stats.potential_conflicts += 1,
         }
 
         let left = &packages[left_index];
         let right = &packages[right_index];
-        let impact_kinds = accumulator.impact_kinds.iter().cloned().collect::<Vec<_>>();
+        let mut impact_kinds = accumulator.impact_kinds.iter().cloned().collect::<Vec<_>>();
+        if accumulator.filename_collision {
+            impact_kinds.push("filename_collision_review".to_string());
+        }
 
         let (load_order_status, higher_priority_path, load_order_explanation_key) =
             load_order_info(
@@ -946,6 +999,59 @@ mod tests {
         assert!(is_package_local_metadata(TYPE_MANIFEST));
         assert!(!is_package_local_metadata(TYPE_STBL));
         assert!(!is_package_local_metadata(TYPE_GEOM));
+    }
+
+    #[test]
+    fn same_name_different_bytes_is_review_only_until_resources_prove_overlap() {
+        let package = |name: &str, sha: &str| PackageInfo {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            relative_path: PathBuf::from(name),
+            file_sha256: sha.to_string(),
+            readable: true,
+            load_priority: None,
+            load_rule: None,
+        };
+        let packages = vec![
+            package("cmar_MalePubicHairFull.package", "A"),
+            package("cmar_MalePubicHairFull.package", "B"),
+            package("cmar_MalePubicHairFull.package", "A"),
+        ];
+        let mut pairs = HashMap::new();
+        mark_filename_collisions(&packages, &mut pairs);
+        assert!(pairs
+            .get(&(0, 1))
+            .is_some_and(|pair| pair.filename_collision && pair.shared_resource_count == 0));
+        assert!(!pairs.contains_key(&(0, 2)));
+        assert!(pairs.contains_key(&(1, 2)));
+    }
+
+    #[test]
+    fn directed_selected_conflict_analysis_can_export_review_findings() {
+        let Ok(root) = std::env::var("S3CC_CONFLICT_ROOT") else {
+            return;
+        };
+        let Ok(raw_selected) = std::env::var("S3CC_CONFLICT_SELECTED") else {
+            return;
+        };
+        let selected = raw_selected
+            .split('|')
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let analysis = analyze_conflicts_core(root, Some(selected), None)
+            .expect("directed conflict analysis");
+        if let Ok(output) = std::env::var("S3CC_CONFLICT_OUTPUT") {
+            let output = PathBuf::from(output);
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&output, serde_json::to_vec_pretty(&analysis).unwrap()).unwrap();
+        }
+        assert!(analysis
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "filename_collision_review"));
     }
 
     #[test]
