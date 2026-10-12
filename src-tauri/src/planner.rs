@@ -365,6 +365,15 @@ fn semantic_path_component(value: &str) -> String {
     value
         .chars()
         .flat_map(|character| character.to_lowercase())
+        .map(|character| match character {
+            'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            other => other,
+        })
         .filter(|character| !character.is_whitespace() && !matches!(character, '-' | '_' | '+'))
         .collect()
 }
@@ -458,6 +467,14 @@ fn model_components_match(candidate: &str, canonical: &str) -> bool {
             | ("reemplazos", "substituicoes")
             | ("substituições", "reemplazos")
             | ("reemplazos", "substituições")
+            | ("iluminador", "iluminadores")
+            | ("iluminadores", "iluminador")
+            | ("batom", "batons")
+            | ("batons", "batom")
+            | ("delineador", "delineadores")
+            | ("delineadores", "delineador")
+            | ("tatuagem", "tatuagens")
+            | ("tatuagens", "tatuagem")
     )
 }
 
@@ -2406,6 +2423,10 @@ fn move_intra_plan_conflicts_to_review(
     Ok(())
 }
 
+fn is_manual_review_status(status: &str) -> bool {
+    matches!(status, "needs_review" | "mixed")
+}
+
 fn plan_can_execute(stats: &PlanStats, read_only: bool) -> bool {
     // Blocked items are excluded from movement. They must not prevent the
     // independently validated ready items from being organized and restored.
@@ -3084,6 +3105,32 @@ pub fn build_organization_plan_with_cfg(
                 item,
                 "This package belongs to a Keep Together group. Select every member of the group before organizing it.".to_string(),
             ));
+            continue;
+        }
+
+        // A manual-review result is a protected decision state, not an
+        // invitation to move the package into a guessed fallback. Unknown
+        // packages may still use #Sem Categoria when the user explicitly
+        // selects them, but mixed/needs_review records stay in place until
+        // their evidence is resolved in the interface.
+        if is_manual_review_status(&item.status) {
+            stats.kept_uncategorized += 1;
+            items.push(PlanItem {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                source_path: source_canonical.to_string_lossy().to_string(),
+                source_relative_path: item.relative_path.clone(),
+                destination_path: None,
+                destination_relative_path: None,
+                classification_status: item.status.clone(),
+                classification_reason: item.classification_reason.clone(),
+                plan_status: "keep_manual_review".to_string(),
+                sha256: Some(source_hash),
+                size: item.file_size,
+                warnings: vec![
+                    "The package has multiple or insufficient technical destinations. It remains in place for manual review; no fallback or inferred category move is proposed.".to_string(),
+                ],
+            });
             continue;
         }
 
@@ -4921,6 +4968,14 @@ mod tests {
     }
 
     #[test]
+    fn manual_review_items_are_protected_from_automatic_fallback_moves() {
+        assert!(is_manual_review_status("needs_review"));
+        assert!(is_manual_review_status("mixed"));
+        assert!(!is_manual_review_status("unknown"));
+        assert!(!is_manual_review_status("classified"));
+    }
+
+    #[test]
     fn blocked_items_are_skipped_without_blocking_independent_ready_moves() {
         let stats = PlanStats {
             selected: 2,
@@ -5052,6 +5107,24 @@ mod tests {
         );
         assert!(wrong.is_err());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn model_aliases_are_component_exact_and_do_not_accept_intermediate_folders() {
+        assert!(model_components_match("Iluminador", "Iluminadores"));
+        assert!(model_components_match("Gameplay", "Jogabilidade"));
+        assert!(!exact_model_relative_path_matches(
+            "#6 Sliders\\hat.package",
+            "Sliders\\hat.package"
+        ));
+        assert!(!exact_model_relative_path_matches(
+            "Creator\\Sliders\\hat.package",
+            "Sliders\\hat.package"
+        ));
+        assert!(exact_model_relative_path_matches(
+            "Sliders\\hat.package",
+            "Sliders\\hat.package"
+        ));
     }
 
     #[test]

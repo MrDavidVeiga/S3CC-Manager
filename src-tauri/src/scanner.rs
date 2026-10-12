@@ -478,7 +478,6 @@ fn script_creator_folder(language: AppLanguage, creator: Option<&str>) -> Vec<St
     if creator.is_some_and(|name| name.eq_ignore_ascii_case("NRaas")) {
         return vec![
             localized_special_folder(language, "scripts").to_string(),
-            localized_special_folder(language, "gameplay").to_string(),
             "NRaas".to_string(),
         ];
     }
@@ -607,8 +606,12 @@ fn package_internal_identifiers(package: &Package) -> Vec<String> {
         "acbody",
         "adbody",
         "albody",
+        "ambody",
+        "embody",
+        "tmbody",
         "ccbody",
         "cdbody",
+        "genital",
         "defaultface",
         "defaultwhisker",
         "defaultbrow",
@@ -914,6 +917,7 @@ fn phase3_directed_family_classification(
         types,
         relative,
         language,
+        &internal_names,
     ) {
         return Some(classification);
     }
@@ -975,24 +979,21 @@ fn phase3_directed_family_classification(
     if lower.contains("cmar")
         && has_geom
         && !has_catalog
-        && (lower.contains("fpreg") || lower.contains("jeans") || lower.contains("nude"))
+        && types.contains(&TYPE_NMAP_LOCAL)
+        && internal_names.iter().any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("ambody")
+                || value.contains("embody")
+                || value.contains("tmbody")
+                || value.contains("genital")
+        })
     {
-        return Some(PackageFamilyClassification {
-            main_category: "Roupas".to_string(),
-            sub_category: None,
-            folder_parts: vec!["Roupas".to_string()],
-            detected_from: vec!["Phase3FamilyRule".to_string(), "CmarClothingFamily".to_string(), "GEOM".to_string()],
-            technical_reason: "Cmar GEOM family exposes pregnancy/clothing mesh roles (fpreg/jeans/nude); this is a clothing family and must not be routed to anatomical Genetics.".to_string(),
-        });
-    }
-
-    if lower.contains("cmar") && has_geom && !has_catalog {
         return Some(PackageFamilyClassification {
             main_category: "Genética".to_string(),
             sub_category: Some("Genitálias".to_string()),
             folder_parts: vec!["Genética".to_string(), "Genitálias".to_string(), "Masculina".to_string(), "Cmar".to_string()],
-            detected_from: vec!["Phase3FamilyRule".to_string(), "CmarFamily".to_string(), "GEOM".to_string()],
-            technical_reason: "Coherent Cmar body-mesh family with GEOM and am/em/tm internal mesh roles; variants remain together.".to_string(),
+            detected_from: vec!["Phase3FamilyRule".to_string(), "CmarFamily".to_string(), "GEOM".to_string(), "NMAP".to_string()],
+            technical_reason: "Cmar GEOM family is recognized as anatomical content only when NMAP identifiers corroborate am/em/tm or genital roles. A mesh-only cmar package remains for review instead of being assigned from its legacy filename or folder.".to_string(),
         });
     }
 
@@ -1303,6 +1304,7 @@ fn canonical_script_source_classification(
     types: &BTreeSet<u32>,
     relative: &str,
     language: AppLanguage,
+    internal_names: &[String],
 ) -> Option<PackageFamilyClassification> {
     let normalized = relative.replace('\\', "/").to_ascii_lowercase();
     if normalized.contains("#4 hair/eyebrows/") && types.contains(&TYPE_CASP) {
@@ -1317,6 +1319,10 @@ fn canonical_script_source_classification(
     if normalized.contains("contacts")
         && types.contains(&TYPE_CASP)
         && (types.contains(&0x626F_60CE) || types.contains(&0x2E75_C765))
+        && internal_names.iter().any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("contact") || value.contains("iris") || value.contains("eyeball")
+        })
     {
         return Some(PackageFamilyClassification {
             main_category: "Maquiagem".to_string(),
@@ -1329,6 +1335,10 @@ fn canonical_script_source_classification(
     if normalized.contains("lipstickbasegame")
         && types.contains(&TYPE_CASP)
         && (types.contains(&0x626F_60CC) || types.contains(&0x626F_60CD))
+        && internal_names.iter().any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("default") && (value.contains("lip") || value.contains("makeup"))
+        })
     {
         let replacements = localized_special_folder(language, "replacements");
         return Some(PackageFamilyClassification {
@@ -1343,6 +1353,10 @@ fn canonical_script_source_classification(
         && normalized.contains("uvfix")
         && types.contains(&0x015A_1849)
         && types.contains(&TYPE_NMAP_LOCAL)
+        && internal_names.iter().any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("face") && (value.contains("eye") || value.contains("eyeball"))
+        })
     {
         let replacements = localized_special_folder(language, "replacements");
         return Some(PackageFamilyClassification {
@@ -1450,6 +1464,43 @@ fn canonical_script_source_classification(
     })
 }
 
+fn preserved_correction_family_classification(
+    types: &BTreeSet<u32>,
+    relative: &str,
+) -> Option<PackageFamilyClassification> {
+    if !types.contains(&TYPE_S3SA) || types.contains(&TYPE_CASP) {
+        return None;
+    }
+    let mut parts = relative
+        .split(['\\', '/'])
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>();
+    let file = parts.pop()?;
+    if !file.to_ascii_lowercase().ends_with(".package")
+        && !file.to_ascii_lowercase().ends_with(".disabled")
+    {
+        return None;
+    }
+    let correction_index = parts.iter().position(|part| {
+        matches!(
+            part.to_ascii_lowercase().as_str(),
+            "correções" | "correcoes" | "corrections" | "fixes" | "eps fixes"
+        )
+    })?;
+    let destination = parts[correction_index..].to_vec();
+    (!destination.is_empty()).then(|| PackageFamilyClassification {
+        main_category: destination[0].clone(),
+        sub_category: destination.get(1).cloned(),
+        folder_parts: destination,
+        detected_from: vec![
+            "ProtectedExistingCorrectionFamily".to_string(),
+            "S3SA".to_string(),
+        ],
+        technical_reason: "The package is already inside a protected Correções/Fixes family. S3SA alone does not authorize flattening or migration to Scripts; the existing family path remains the canonical destination until an explicit rule is approved.".to_string(),
+    })
+}
+
 fn script_family_result(
     language: AppLanguage,
     family_source: &str,
@@ -1534,17 +1585,11 @@ fn legacy_source_evidence_classification(
             vec!["LegacyWindowsDoorsSource".to_string(), "OBJD".to_string()],
             "Windows and Doors source branch plus OBJD evidence identifies construction content when one object record also exposes a vehicle candidate.",
         )
-    } else if normalized.contains("#8 scripts/") && has_visual {
+    } else if normalized.contains("#8 scripts/") && has_visual && !types.contains(&TYPE_CASP) {
         (
             vec![replacements.to_string()],
             vec!["LegacyReplacementSource".to_string(), "VisualResourceSet".to_string()],
             "Legacy Scripts source branch plus visual replacement resources identifies a replacement package rather than a gameplay assembly.",
-        )
-    } else if (normalized.starts_with("roupas/") || normalized.contains("/roupas/")) && has_visual {
-        (
-            vec![replacements.to_string(), "Corpo".to_string()],
-            vec!["LegacyClothingSource".to_string(), "VisualResourceSet".to_string()],
-            "Clothing source branch plus visual resources identifies a body replacement family.",
         )
     } else if normalized.contains("penisbuttbones") && types.contains(&0x8EAF_13DE) {
         (
@@ -1707,6 +1752,29 @@ fn nraas_family_destination(
     destination
 }
 
+// The model's NRaas branch is `Scripts\NRaas`, not a translated Gameplay
+// wrapper. Preserve an existing family subfolder when it is already present;
+// in particular, Dreamer and OnceRead are intentional model subfolders and
+// must not be flattened just because no module pair was detected in the
+// selected incremental scan.
+fn existing_nraas_subfolder(relative: &str) -> Option<String> {
+    let parts = relative
+        .split(['\\', '/'])
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| part.trim().to_string())
+        .collect::<Vec<_>>();
+    let scripts_index = parts.iter().position(|part| part.eq_ignore_ascii_case("Scripts"))?;
+    let nraas_index = parts
+        .iter()
+        .enumerate()
+        .skip(scripts_index + 1)
+        .find_map(|(index, part)| part.eq_ignore_ascii_case("NRaas").then_some(index))?;
+    let candidate = parts.get(nraas_index + 1)?;
+    (!candidate.to_ascii_lowercase().ends_with(".package")
+        && !candidate.to_ascii_lowercase().ends_with(".disabled"))
+        .then(|| candidate.clone())
+}
+
 fn apply_nraas_family_subfolders(language: AppLanguage, items: &mut [ScanPackageItem]) {
     let mut families = HashMap::<String, (bool, bool)>::new();
     for item in items.iter().filter(|item| item.detected_from.iter().any(|source| source == "NRaasInternal")) {
@@ -1724,7 +1792,14 @@ fn apply_nraas_family_subfolders(language: AppLanguage, items: &mut [ScanPackage
                 family
             ));
         }
-        let destination = nraas_family_destination(language, family, has_primary, has_module);
+        let mut destination = nraas_family_destination(language, family, has_primary, has_module);
+        if !has_primary || !has_module {
+            if let Some(existing) = existing_nraas_subfolder(&item.relative_path) {
+                if !destination.iter().any(|part| part.eq_ignore_ascii_case(&existing)) {
+                    destination.push(existing);
+                }
+            }
+        }
         item.destination_parts = destination;
         item.destination_path = Some(item.destination_parts.join("\\"));
         item.detected_from.push("NRaasConditionalFamily".to_string());
@@ -2370,6 +2445,16 @@ fn slider_destination_from_internal_name(
     language: AppLanguage,
 ) -> Option<Vec<String>> {
     let (region, part) = slider_region_keys(internal_name)?;
+    // Hats are a direct model category. The previous `Sliders\Cabeça\Chapéus`
+    // result was an invented intermediate level caused by treating every
+    // head slider as a generic anatomy tree. Keep other head sliders under
+    // Cabeça, but resolve the verified hats branch exactly.
+    if region == "head" && part == Some("hats") {
+        return Some(vec![
+            "Sliders".to_string(),
+            slider_folder_label(language, "hats").to_string(),
+        ]);
+    }
     let mut result = vec![
         "Sliders".to_string(),
         slider_folder_label(language, region).to_string(),
@@ -2632,6 +2717,11 @@ fn named_mod_companion_folder(relative: &str) -> Option<String> {
 fn may_reclassify_as_companion(item: &ScanPackageItem) -> bool {
     // Explicit CASP/OBJD classifications and independently identified
     // scripts must not be overwritten by a neighboring mod's destination.
+    // A source folder is not an internal relationship. The old implementation
+    // promoted any low-confidence package beside two scripts, which made
+    // Correções and other broad folders look like script families. Only a
+    // package that carries an explicit composite-family marker may be grouped
+    // here; otherwise it remains unknown/review for the user's decision.
     item.status != "invalid"
         && item.status != "mixed"
         && item.status != "needs_review"
@@ -2639,6 +2729,7 @@ fn may_reclassify_as_companion(item: &ScanPackageItem) -> bool {
         && item.catalog_resource_count == 0
         && item.classification_confidence != "high"
         && !item.detected_from.iter().any(|source| value_is_authoritative_mod_source(source))
+        && item.detected_from.iter().any(|source| source == "CompositeModFamily" || source == "InternalModLink")
 }
 
 fn value_is_authoritative_mod_source(source: &str) -> bool {
@@ -2840,6 +2931,116 @@ fn refine_headwear_accessory(
     item.technical_reason.push_str(&format!(
         " | Filename headwear evidence '{}' refines the accessory-slot Arm Band label; original CASP slot retained in evidence.",
         filename
+    ));
+}
+
+fn package_semantic_identifiers(package: &Package) -> Vec<String> {
+    let mut values = Vec::new();
+    for entry in &package.entries {
+        if entry.type_id == TYPE_NMAP_LOCAL {
+            if let Ok(data) = package.data(entry) {
+                values.extend(nmap_names(&data));
+            }
+        } else if entry.type_id == TYPE_STBL_LOCAL {
+            if let Ok(data) = package.data(entry) {
+                values.extend(stbl_entries(&data).into_iter().map(|(_, value)| value));
+            }
+        }
+    }
+    values
+}
+
+fn makeup_semantic_folder_key(identifiers: &[String]) -> Option<(&'static str, &'static str)> {
+    let text = identifiers
+        .iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let markers = [
+        ("eyebag", "eye bag", "Bolsas sob os Olhos"),
+        ("nosemask", "nose mask", "Máscaras de Nariz"),
+        ("freckle", "freckles", "Pintas e Sardas"),
+        ("mole", "beautymark", "Pintas e Sardas"),
+        ("highlighter", "face shine", "Iluminador"),
+        ("faceshine", "highlight", "Iluminador"),
+        ("contour", "face definition", "Contornos e Sombras Faciais"),
+        ("lipcorner", "mouth corner", "Detalhes Faciais"),
+        ("dry lips", "lip detail", "Detalhes Labiais"),
+        ("contact", "iris", "Lentes de Contato"),
+        ("tattoo", "tattoos", "Tatuagens"),
+    ];
+    markers.iter().find_map(|(first, second, label)| {
+        (text.contains(first) || text.contains(second)).then_some((*label, *first))
+    })
+}
+
+// CASP's ClothingType identifies the technical UI slot, not necessarily the
+// visual subject. Refine only when internal NMAP/STBL identifiers corroborate
+// a semantic subject. A filename or source folder alone never changes a CASP
+// slot, and no new age/gender level is synthesized here.
+fn refine_makeup_semantics(
+    item: &mut CatalogClassification,
+    package: &Package,
+    language: AppLanguage,
+) {
+    let makeup = match language {
+        AppLanguage::En => "Makeup",
+        AppLanguage::Pt => "Maquiagem",
+        AppLanguage::Es => "Maquillaje",
+    };
+    if item.source != "CASP" || item.main_category != makeup {
+        return;
+    }
+    // A package-level NMAP/STBL marker cannot be assigned to every CASP when
+    // the package contains several independent catalog records. Let the
+    // multi-CASP aggregation decide in that case instead of forcing one
+    // visual function onto unrelated slots.
+    if package
+        .entries
+        .iter()
+        .filter(|entry| entry.type_id == TYPE_CASP)
+        .count()
+        != 1
+    {
+        return;
+    }
+    let identifiers = package_semantic_identifiers(package);
+    let Some((label, marker)) = makeup_semantic_folder_key(&identifiers) else {
+        return;
+    };
+    let localized_label = match (language, label) {
+        (AppLanguage::En, "Bolsas sob os Olhos") => "Under-Eye Bags",
+        (AppLanguage::Es, "Bolsas sob os Olhos") => "Bolsas bajo los Ojos",
+        (AppLanguage::En, "Máscaras de Nariz") => "Nose Masks",
+        (AppLanguage::Es, "Máscaras de Nariz") => "Máscaras de Nariz",
+        (AppLanguage::En, "Pintas e Sardas") => "Moles & Freckles",
+        (AppLanguage::Es, "Pintas e Sardas") => "Lunares y Pecas",
+        (AppLanguage::En, "Iluminador") => "Highlighter",
+        (AppLanguage::Es, "Iluminador") => "Iluminador",
+        (AppLanguage::En, "Contornos e Sombras Faciais") => "Face Contours",
+        (AppLanguage::Es, "Contornos e Sombras Faciais") => "Contornos Faciales",
+        (AppLanguage::En, "Detalhes Faciais") => "Facial Details",
+        (AppLanguage::Es, "Detalhes Faciais") => "Detalles Faciales",
+        (AppLanguage::En, "Detalhes Labiais") => "Lip Details",
+        (AppLanguage::Es, "Detalhes Labiais") => "Detalles Labiales",
+        (AppLanguage::En, "Lentes de Contato") => "Contact Lenses",
+        (AppLanguage::Es, "Lentes de Contato") => "Lentes de Contacto",
+        (AppLanguage::En, "Tatuagens") => "Tattoos",
+        (AppLanguage::Es, "Tatuagens") => "Tatuajes",
+        _ => label,
+    };
+    item.sub_category = Some(localized_label.to_string());
+    if let Some(last) = item.folder_parts.last_mut() {
+        *last = localized_label.to_string();
+    }
+    for candidate in &mut item.candidate_folder_parts {
+        if let Some(last) = candidate.last_mut() {
+            *last = localized_label.to_string();
+        }
+    }
+    item.technical_reason.push_str(&format!(
+        " | CASP slot retained as evidence; internal NMAP/STBL marker '{}' refines visual function to '{}'.",
+        marker, localized_label
     ));
 }
 
@@ -3127,6 +3328,13 @@ fn scan_one(
             Ok(data) => match classify_resource(entry.type_id, &data, language) {
                 Some(mut classification) => {
                     refine_headwear_accessory(&mut classification, &name, language);
+                    refine_makeup_semantics(&mut classification, &package, language);
+                    if classification
+                        .technical_reason
+                        .contains("CASP slot retained as evidence")
+                    {
+                        detected_from.insert("CASPSemanticEvidence".to_string());
+                    }
                     classifications.push(classification);
                 },
                 None => warnings.push(format!(
@@ -3139,7 +3347,8 @@ fn scan_one(
         }
     }
 
-    let special_primary = merged_sim_export_classification(&package, language)
+    let special_primary = preserved_correction_family_classification(&type_ids, &relative)
+        .or_else(|| merged_sim_export_classification(&package, language))
         .or_else(|| has_fbln.then(|| fbln_slider_classification(&package, &fbln_metadata, &name, language)))
         .or_else(|| {
             fix_signatures::learned_fix_classification(
@@ -4383,7 +4592,7 @@ mod tests {
         assert_eq!(script_creator_folder(AppLanguage::Pt, Some("TwinSimming")),
             vec!["Scripts", "Jogabilidade"]);
         assert_eq!(script_creator_folder(AppLanguage::En, Some("NRaas")),
-            vec!["Scripts", "Gameplay", "NRaas"]);
+            vec!["Scripts", "NRaas"]);
         assert_eq!(script_creator_folder(AppLanguage::Es, None),
             vec!["Scripts", "Jugabilidad"]);
         assert!(script_source_roles("Scripts/Jogabilidade/TwinSimming/X.package").0);
@@ -4538,6 +4747,8 @@ mod tests {
         item.scripted = false;
         item.classification_confidence = "low".into();
         item.status = "unknown".into();
+        assert!(!may_reclassify_as_companion(&item));
+        item.detected_from.push("CompositeModFamily".into());
         assert!(may_reclassify_as_companion(&item));
     }
 
@@ -4677,6 +4888,10 @@ mod tests {
                 "Pernas".to_string(),
             ])
         );
+        assert_eq!(
+            slider_destination_from_internal_name("aWT_HatGrip_MoveX_slider", AppLanguage::Pt),
+            Some(vec!["Sliders".to_string(), "Chapéus".to_string()])
+        );
     }
 
     #[test]
@@ -4725,6 +4940,62 @@ mod tests {
         assert_eq!(category(AppLanguage::Pt, "Feet"), "Pés");
         assert_eq!(category(AppLanguage::Es, "Eyelashes"), "Pestañas");
         assert!(types.contains(&0x015A_1849));
+    }
+
+    #[test]
+    fn makeup_semantics_require_internal_subject_evidence() {
+        assert_eq!(
+            makeup_semantic_folder_key(&["faceShine140104".into()]),
+            Some(("Iluminador", "faceshine"))
+        );
+        assert_eq!(
+            makeup_semantic_folder_key(&["BrntWafflesNoseMask".into()]),
+            Some(("Máscaras de Nariz", "nosemask"))
+        );
+        assert_eq!(
+            makeup_semantic_folder_key(&["ordinary_blush".into()]),
+            None
+        );
+    }
+
+    #[test]
+    fn clothing_source_and_visual_resources_do_not_become_replacements() {
+        let types = BTreeSet::from([TYPE_CASP, 0x015A_1849, TYPE_IMG]);
+        assert!(legacy_source_evidence_classification(
+            &types,
+            "ordinary.package",
+            r"Roupas\Feminino\Parte de Cima",
+            AppLanguage::Pt,
+        )
+        .is_none());
+
+        let mesh_only = BTreeSet::from([0x015A_1849, TYPE_BGEO]);
+        assert!(legacy_source_evidence_classification(
+            &mesh_only,
+            "cmar_fpreg_BottomNude.package",
+            r"Roupas\Feminino\Parte de Baixo",
+            AppLanguage::Pt,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn s3sa_does_not_flatten_existing_correction_families() {
+        let types = BTreeSet::from([TYPE_S3SA]);
+        let classification = preserved_correction_family_classification(
+            &types,
+            r"Correções\ld_LotPopulation.package",
+        )
+        .unwrap();
+        assert_eq!(classification.folder_parts, vec!["Correções"]);
+        assert!(classification
+            .detected_from
+            .contains(&"ProtectedExistingCorrectionFamily".into()));
+        assert!(preserved_correction_family_classification(
+            &BTreeSet::from([TYPE_S3SA, TYPE_CASP]),
+            r"Correções\not-a-script-casp.package",
+        )
+        .is_none());
     }
 
     #[test]
@@ -4824,9 +5095,17 @@ mod tests {
         assert_eq!(nraas_family_role("NRaas_MasterControllerCheats.package"), Some(("MasterController", true)));
         assert_eq!(nraas_family_role("NRaas_Careers.package"), Some(("Careers", false)));
         assert_eq!(nraas_family_destination(AppLanguage::Pt, "MasterController", true, false),
-            vec!["Scripts", "Jogabilidade", "NRaas"]);
+            vec!["Scripts", "NRaas"]);
         assert_eq!(nraas_family_destination(AppLanguage::Pt, "MasterController", true, true),
-            vec!["Scripts", "Jogabilidade", "NRaas", "MasterController"]);
+            vec!["Scripts", "NRaas", "MasterController"]);
+        assert_eq!(
+            existing_nraas_subfolder(r"Scripts\NRaas\Dreamer\NRaas_Dreamer.package"),
+            Some("Dreamer".into())
+        );
+        assert_eq!(
+            existing_nraas_subfolder(r"Scripts\Jogabilidade\NRaas\OnceRead\NRaas_OnceRead.package"),
+            Some("OnceRead".into())
+        );
     }
 
     #[test]
