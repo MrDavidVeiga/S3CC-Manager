@@ -851,6 +851,7 @@ fn duplicate_quarantine_destination(
     language: AppLanguage,
     source: &Path,
     source_hash: &str,
+    reserved: &HashSet<String>,
 ) -> Result<(PathBuf, Vec<String>), String> {
     let file_name = source
         .file_name()
@@ -860,60 +861,137 @@ fn duplicate_quarantine_destination(
         return Err(format!("Duplicate source has no SHA-256: {}", source.display()));
     }
     let source_relative = source.strip_prefix(root).unwrap_or(source);
-    let mut provenance = source_relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if is_mods_root(root) && provenance.first().is_some_and(|part| part.eq_ignore_ascii_case("Packages")) {
-        provenance.remove(0);
-    }
-
-    let mut parts = if is_mods_root(root) {
+    let parts = if is_mods_root(root) {
         vec!["Packages".to_string(), language.duplicates_folder().to_string()]
     } else {
         vec![language.duplicates_folder().to_string()]
     };
-    parts.push(hash_key.clone());
 
-    // A source already inside quarantine is idempotent. For a legacy source,
-    // retain the full relative origin below the hash so same-name copies from
-    // different legacy folders never converge on one destination.
-    let duplicate_index = parts.iter().position(|part| part.eq_ignore_ascii_case(language.duplicates_folder()));
-    if let Some(index) = provenance.iter().position(|part| part.eq_ignore_ascii_case(language.duplicates_folder())) {
-        if duplicate_index.is_some() && index == provenance.len().saturating_sub(3) {
-            let mut existing_parts = provenance.clone();
-            existing_parts.pop();
-            return Ok((source_relative.to_path_buf(), existing_parts));
+    // A file directly below #Duplicados is already in the canonical flat
+    // quarantine. Nested descendants are deliberately treated as migration
+    // sources and are flattened on the next organization run.
+    let direct_quarantine_parent = source_relative.parent().is_some_and(|parent| {
+        let mut expected = PathBuf::new();
+        for part in &parts {
+            expected.push(part);
         }
+        same_path_case_insensitive(parent, &expected)
+    });
+    if direct_quarantine_parent {
+        return Ok((source_relative.to_path_buf(), parts));
     }
-    if !provenance.is_empty() { parts.extend(provenance[..provenance.len().saturating_sub(1)].iter().cloned()); }
 
     let mut candidate = PathBuf::new();
     for part in &parts { candidate.push(part); }
     candidate.push(file_name);
-    if same_path_case_insensitive(source_relative, &candidate) {
-        return Ok((candidate, parts));
-    }
+    let occupied = |relative: &Path| {
+        root.join(relative).exists()
+            || reserved.contains(&relative_key(relative).to_ascii_lowercase())
+    };
 
-    if root.join(&candidate).exists() {
+    if occupied(&candidate) {
         let path = Path::new(file_name);
         let stem = path.file_stem().and_then(|v| v.to_str()).unwrap_or("package");
         let extension = path.extension().and_then(|v| v.to_str()).unwrap_or("package");
-        for attempt in 1usize..10_000 {
-            let name = format!("{stem} [{hash_key}-{attempt}].{extension}");
+        for attempt in 0usize..10_000 {
+            let name = if attempt == 0 {
+                format!("{stem} [{hash_key}].{extension}")
+            } else {
+                format!("{stem} [{hash_key}-{attempt}].{extension}")
+            };
             let mut alternative = PathBuf::new();
             for part in &parts { alternative.push(part); }
             alternative.push(name);
-            if !root.join(&alternative).exists() {
+            if !occupied(&alternative) {
                 return Ok((alternative, parts));
             }
         }
         return Err(format!("Could not allocate duplicate quarantine path for {}", source.display()));
     }
     Ok((candidate, parts))
+}
+
+/// Move legacy nested duplicate quarantine entries into the canonical flat
+/// root. This is part of the real planner, so old layouts are repaired by the
+/// same executor and remain reversible through the normal restore manifest.
+fn append_nested_duplicate_quarantine_items(
+    root: &Path,
+    language: AppLanguage,
+    items: &mut Vec<PlanItem>,
+    directories: &mut BTreeSet<String>,
+    stats: &mut PlanStats,
+    reserved: &mut HashSet<String>,
+) -> Result<(), String> {
+    let quarantine = if is_mods_root(root) {
+        root.join("Packages").join(language.duplicates_folder())
+    } else {
+        root.join(language.duplicates_folder())
+    };
+    if !quarantine.is_dir() {
+        return Ok(());
+    }
+
+    let mut nested = WalkDir::new(&quarantine)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| {
+            let relative = entry.path().strip_prefix(root).ok()?.to_path_buf();
+            let parent = relative.parent()?;
+            let flat_parent = if is_mods_root(root) {
+                Path::new("Packages").join(language.duplicates_folder())
+            } else {
+                PathBuf::from(language.duplicates_folder())
+            };
+            if same_path_case_insensitive(parent, &flat_parent) {
+                None
+            } else {
+                Some(entry.path().to_path_buf())
+            }
+        })
+        .collect::<Vec<_>>();
+    nested.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+
+    for source in nested {
+        let source_canonical = source
+            .canonicalize()
+            .map_err(|error| format!("Could not resolve nested duplicate {}: {error}", source.display()))?;
+        let (hash, size) = sha256_file(&source_canonical)
+            .map_err(|error| format!("Could not hash nested duplicate {}: {error}", source.display()))?;
+        let (destination_relative, destination_parts) = duplicate_quarantine_destination(
+            root, language, &source_canonical, &hash, reserved,
+        )?;
+        let destination = root.join(&destination_relative);
+        if same_path_case_insensitive(&source_canonical, &destination) {
+            continue;
+        }
+        add_missing_directories(root, &destination_parts, directories);
+        reserved.insert(relative_key(&destination_relative).to_ascii_lowercase());
+        stats.ready += 1;
+        let relative = source_canonical
+            .strip_prefix(root)
+            .map_err(|_| format!("Nested duplicate escaped root: {}", source.display()))?;
+        items.push(PlanItem {
+            id: format!("duplicate-quarantine-migration:{}", relative_key(relative)),
+            name: source_canonical.file_name().map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| "duplicate.package".to_string()),
+            source_path: source_canonical.to_string_lossy().to_string(),
+            source_relative_path: relative_key(relative),
+            destination_path: Some(destination.to_string_lossy().to_string()),
+            destination_relative_path: Some(relative_key(&destination_relative)),
+            classification_status: "duplicate_quarantine".to_string(),
+            classification_reason: Some("Confirmed duplicate quarantine migration".to_string()),
+            plan_status: "ready_duplicate_quarantine_migration".to_string(),
+            sha256: Some(hash.clone()),
+            size,
+            warnings: vec![format!(
+                "Flatten legacy duplicate quarantine entry from '{}' to '{}'; SHA-256 {}. No overwrite or deletion is permitted.",
+                relative_key(relative), relative_key(&destination_relative), hash
+            )],
+        });
+    }
+    Ok(())
 }
 
 fn preview_extension(path: &Path) -> bool {
@@ -1643,6 +1721,7 @@ pub fn build_organization_plan_with_cfg(
     };
     let mut items = Vec::with_capacity(selected.len());
     let mut directories = BTreeSet::new();
+    let mut reserved_duplicate_destinations = HashSet::<String>::new();
 
     let mut ordered = selected
         .iter()
@@ -1793,7 +1872,13 @@ pub fn build_organization_plan_with_cfg(
             // Suspected merged packages are handled separately below and are
             // intentionally never auto-quarantined.
             let (quarantine_relative, quarantine_parts) =
-                duplicate_quarantine_destination(&root, language, &source_canonical, &source_hash)?;
+                duplicate_quarantine_destination(
+                    &root,
+                    language,
+                    &source_canonical,
+                    &source_hash,
+                    &reserved_duplicate_destinations,
+                )?;
             let quarantine = root.join(&quarantine_relative);
             let already_quarantined = same_path_case_insensitive(&source_canonical, &quarantine);
             if already_quarantined {
@@ -1815,6 +1900,9 @@ pub fn build_organization_plan_with_cfg(
                 continue;
             }
             add_missing_directories(&root, &quarantine_parts, &mut directories);
+            reserved_duplicate_destinations.insert(
+                relative_key(&quarantine_relative).to_ascii_lowercase(),
+            );
             stats.ready += 1;
             items.push(PlanItem {
                 id: item.id.clone(),
@@ -2331,6 +2419,18 @@ pub fn build_organization_plan_with_cfg(
         &mut stats,
     )?;
 
+    // Also repair duplicate entries created by older versions of the Manager.
+    // This runs independently of the selected legacy roots, but never touches
+    // files already directly below the canonical #Duplicados root.
+    append_nested_duplicate_quarantine_items(
+        &root,
+        language,
+        &mut items,
+        &mut directories,
+        &mut stats,
+        &mut reserved_duplicate_destinations,
+    )?;
+
     // Detect collisions created by the plan itself before any filesystem write occurs.
     // This catches multiple selected packages that resolve to the same final path.
     mark_intra_plan_destination_collisions(&mut items, &mut stats);
@@ -2497,13 +2597,91 @@ mod tests {
         let packages = base.join("Packages");
         let source = packages.join("#6 Slider").join("same.package");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let reserved = HashSet::new();
         let (relative, parts) = duplicate_quarantine_destination(
-            &packages, AppLanguage::Pt, &source, &"A".repeat(64),
+            &packages, AppLanguage::Pt, &source, &"A".repeat(64), &reserved,
         ).unwrap();
         assert_eq!(parts.first().map(String::as_str), Some("#Duplicados"));
-        assert!(relative.starts_with(Path::new("#Duplicados")));
+        assert_eq!(relative.parent(), Some(Path::new("#Duplicados")));
         assert!(!relative.starts_with(Path::new("#6 Slider")));
         assert!(relative.to_string_lossy().contains("same.package"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn duplicate_quarantine_collision_uses_flat_deterministic_suffix() {
+        let base = std::env::temp_dir().join(format!("s3cc-duplicate-flat-collision-{}", std::process::id()));
+        let packages = base.join("Packages");
+        let quarantine = packages.join("#Duplicados");
+        let source = packages.join("Old").join("same.package");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&quarantine).unwrap();
+        std::fs::write(quarantine.join("same.package"), b"existing").unwrap();
+        let mut reserved = HashSet::new();
+        reserved.insert(String::from("#duplicados\\same [aaaaaaaaaaaaaaaa].package"));
+        let (relative, parts) = duplicate_quarantine_destination(
+            &packages, AppLanguage::Pt, &source, &"A".repeat(64), &reserved,
+        ).unwrap();
+        assert_eq!(parts, vec!["#Duplicados"]);
+        assert_eq!(relative.parent(), Some(Path::new("#Duplicados")));
+        assert_eq!(relative.file_name().unwrap(), "same [AAAAAAAAAAAAAAAA-1].package");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn nested_duplicate_quarantine_is_planned_for_flat_migration() {
+        let base = std::env::temp_dir().join(format!("s3cc-duplicate-flat-migration-{}", std::process::id()));
+        let packages = base.join("Packages");
+        let nested = packages.join("#Duplicados").join("abcdef0123456789").join("Old");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("same.package"), b"duplicate bytes").unwrap();
+        let mut items = Vec::new();
+        let mut directories = BTreeSet::new();
+        let mut stats = PlanStats::default();
+        let mut reserved = HashSet::new();
+        let packages = packages.canonicalize().unwrap();
+        append_nested_duplicate_quarantine_items(
+            &packages, AppLanguage::Pt, &mut items, &mut directories, &mut stats, &mut reserved,
+        ).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].plan_status, "ready_duplicate_quarantine_migration");
+        assert_eq!(Path::new(items[0].destination_relative_path.as_deref().unwrap()).parent(), Some(Path::new("#Duplicados")));
+        assert!(!items[0].destination_relative_path.as_deref().unwrap().contains("abcdef"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn flat_duplicate_migration_is_idempotent_after_relocation() {
+        let base = std::env::temp_dir().join(format!("s3cc-duplicate-flat-idempotent-{}", std::process::id()));
+        let packages = base.join("Packages");
+        let nested = packages.join("#Duplicados").join("legacy").join("Old");
+        std::fs::create_dir_all(&nested).unwrap();
+        let source = nested.join("same.package");
+        std::fs::write(&source, b"duplicate bytes").unwrap();
+        let packages = packages.canonicalize().unwrap();
+        let source = source.canonicalize().unwrap();
+
+        let mut items = Vec::new();
+        let mut directories = BTreeSet::new();
+        let mut stats = PlanStats::default();
+        let mut reserved = HashSet::new();
+        append_nested_duplicate_quarantine_items(
+            &packages, AppLanguage::Pt, &mut items, &mut directories, &mut stats, &mut reserved,
+        ).unwrap();
+        let destination = packages.join(items[0].destination_relative_path.as_deref().unwrap());
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &destination).unwrap();
+
+        let mut second_items = Vec::new();
+        let mut second_directories = BTreeSet::new();
+        let mut second_stats = PlanStats::default();
+        let mut second_reserved = HashSet::new();
+        append_nested_duplicate_quarantine_items(
+            &packages, AppLanguage::Pt, &mut second_items, &mut second_directories,
+            &mut second_stats, &mut second_reserved,
+        ).unwrap();
+        assert!(second_items.is_empty());
+        assert_eq!(second_stats.ready, 0);
         std::fs::remove_dir_all(base).unwrap();
     }
 
