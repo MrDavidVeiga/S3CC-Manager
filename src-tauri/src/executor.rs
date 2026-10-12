@@ -17,7 +17,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use walkdir::WalkDir;
 
@@ -111,6 +111,24 @@ fn ready_items(plan_items: &[PlanItem]) -> Vec<&PlanItem> {
         .collect()
 }
 
+fn requires_post_execution_package_scan(plan: &OrganizationPlan) -> bool {
+    plan.items.iter().any(|item| {
+        !matches!(
+            item.classification_status.as_str(),
+            "preview" | "auxiliary"
+        )
+    })
+}
+
+fn incremental_current_snapshot(
+    plan: &OrganizationPlan,
+    remaining_legacy_files: usize,
+) -> OrganizationAnalysisSnapshot {
+    let mut snapshot = plan.analysis_before.clone();
+    snapshot.phase = "analysis_current".to_string();
+    snapshot.with_plan(&plan.stats, remaining_legacy_files)
+}
+
 fn package_extension(path: &Path) -> bool {
     let lower = path.file_name().map(|v| v.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
@@ -124,7 +142,11 @@ fn snapshot_extension(path: &Path) -> bool {
     })
 }
 
-fn snapshot_entries(root: &Path, ready: &[&PlanItem]) -> Result<Vec<RestoreEntry>, String> {
+fn snapshot_entries(
+    root: &Path,
+    ready: &[&PlanItem],
+    targeted_only: bool,
+) -> Result<Vec<RestoreEntry>, String> {
     let mut planned = HashMap::<PathBuf, (&PlanItem, PathBuf)>::new();
 
     for &item in ready {
@@ -139,14 +161,25 @@ fn snapshot_entries(root: &Path, ready: &[&PlanItem]) -> Result<Vec<RestoreEntry
         planned.insert(source, (item, destination));
     }
 
-    // Collect file paths first so we can show a genuine determinate progress
-    // bar while hashing the full pre-organization Restore snapshot. This may
-    // be a large library and cannot be represented by move count alone.
-    let mut package_paths = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false).into_iter() {
-        let entry = entry.map_err(|error| format!("Could not snapshot package tree: {error}"))?;
-        if entry.file_type().is_file() && snapshot_extension(entry.path()) {
-            package_paths.push(entry.path().to_path_buf());
+    // A focused preview/auxiliary transaction needs a rollback snapshot only
+    // for the files that it will move. Hashing the complete Packages tree at
+    // this point defeats the prebuilt-plan optimization and can keep a
+    // three-image cleanup busy for hours. Full package plans retain the
+    // historical complete snapshot for broad recovery.
+    let mut package_paths = if targeted_only {
+        ready
+            .iter()
+            .map(|item| PathBuf::from(&item.source_path))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if !targeted_only {
+        for entry in WalkDir::new(root).follow_links(false).into_iter() {
+            let entry = entry.map_err(|error| format!("Could not snapshot package tree: {error}"))?;
+            if entry.file_type().is_file() && snapshot_extension(entry.path()) {
+                package_paths.push(entry.path().to_path_buf());
+            }
         }
     }
     // The denominator describes only the active phase. Snapshot files are
@@ -263,30 +296,52 @@ pub(crate) fn cleanup_empty_directories_after_organization(
     root: &Path,
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
 ) -> (usize, usize, Vec<String>) {
+    cleanup_empty_directories_after_organization_scoped(root, moved_pairs, None)
+}
+
+fn cleanup_empty_directories_after_organization_scoped(
+    root: &Path,
+    moved_pairs: &[(PathBuf, PathBuf, String, u64)],
+    scope_roots: Option<&[PathBuf]>,
+) -> (usize, usize, Vec<String>) {
     let mods_root = crate::resource_cfg::is_mods_layout_root(root);
     let mut candidates = Vec::<PathBuf>::new();
     let mut warnings = Vec::<String>::new();
 
-    for entry in WalkDir::new(root).follow_links(false).min_depth(1).into_iter() {
-        match entry {
-            Ok(entry) if entry.file_type().is_dir() => {
-                let path = entry.path();
-                // These are the two loading branch roots. They must survive
-                // even if they contain zero packages after organization.
-                if mods_root && path.parent() == Some(root) && path.file_name()
-                    .is_some_and(|name| {
-                        name.to_string_lossy().eq_ignore_ascii_case("Packages")
-                            || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
-                    })
-                {
-                    continue;
+    let walk_roots = scope_roots
+        .filter(|roots| !roots.is_empty())
+        .map(|roots| roots.to_vec())
+        .unwrap_or_else(|| vec![root.to_path_buf()]);
+    for walk_root in walk_roots {
+        if !walk_root.is_dir() {
+            continue;
+        }
+        let minimum_depth = usize::from(walk_root == root);
+        for entry in WalkDir::new(&walk_root)
+            .follow_links(false)
+            .min_depth(minimum_depth)
+            .into_iter()
+        {
+            match entry {
+                Ok(entry) if entry.file_type().is_dir() => {
+                    let path = entry.path();
+                    // These are the two loading branch roots. They must survive
+                    // even if they contain zero packages after organization.
+                    if mods_root && path.parent() == Some(root) && path.file_name()
+                        .is_some_and(|name| {
+                            name.to_string_lossy().eq_ignore_ascii_case("Packages")
+                                || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
+                        })
+                    {
+                        continue;
+                    }
+                    candidates.push(path.to_path_buf());
                 }
-                candidates.push(path.to_path_buf());
+                Ok(_) => {}
+                Err(error) => warnings.push(format!(
+                    "Could not inspect a folder during empty-directory cleanup: {error}"
+                )),
             }
-            Ok(_) => {}
-            Err(error) => warnings.push(format!(
-                "Could not inspect a folder during empty-directory cleanup: {error}"
-            )),
         }
     }
 
@@ -340,6 +395,24 @@ pub(crate) fn cleanup_empty_directories_after_organization(
     }
     let retained = old_folders.into_iter().filter(|path| path.is_dir()).count();
     (removed, retained, warnings)
+}
+
+fn cleanup_scope_roots(root: &Path, plan: &OrganizationPlan) -> Vec<PathBuf> {
+    let mut roots = BTreeSet::new();
+    for item in &plan.items {
+        let source = PathBuf::from(&item.source_path);
+        let Ok(relative) = source.strip_prefix(root) else {
+            continue;
+        };
+        let Some(Component::Normal(first)) = relative.components().next() else {
+            continue;
+        };
+        let candidate = root.join(first);
+        if candidate.is_dir() {
+            roots.insert(candidate);
+        }
+    }
+    roots.into_iter().collect()
 }
 
 // An empty-folder cleanup cannot remove folders that still contain
@@ -576,8 +649,16 @@ fn execute_organization_plan_core(
         // A previous organization may already have emptied legacy category
         // directories. Clean only genuinely empty ones, even if no new move
         // was necessary. Never remove files or the Packages/Overrides roots.
-        let (removed, retained, cleanup_warnings) =
-            cleanup_empty_directories_after_organization(&root, &[]);
+        let focused_cleanup_roots = cleanup_scope_roots(&root, &plan);
+        let (removed, retained, cleanup_warnings) = if requires_post_execution_package_scan(&plan) {
+            cleanup_empty_directories_after_organization(&root, &[])
+        } else {
+            cleanup_empty_directories_after_organization_scoped(
+                &root,
+                &[],
+                Some(&focused_cleanup_roots),
+            )
+        };
         let remaining_legacy_details = remaining_legacy_details(&root, &[], &plan.items);
         let remaining_legacy_files = remaining_legacy_details.len();
         let remaining_legacy_examples = remaining_legacy_details
@@ -585,9 +666,13 @@ fn execute_organization_plan_core(
             .take(12)
             .map(|detail| detail.relative_path.clone())
             .collect();
-        let analysis_current = scan_packages_core(root.to_string_lossy().to_string(), language, None)
-            .ok()
-            .map(|scan| OrganizationAnalysisSnapshot::from_scan("analysis_current", &scan.stats));
+        let analysis_current = if requires_post_execution_package_scan(&plan) {
+            scan_packages_core(root.to_string_lossy().to_string(), language, None)
+                .ok()
+                .map(|scan| OrganizationAnalysisSnapshot::from_scan("analysis_current", &scan.stats))
+        } else {
+            Some(incremental_current_snapshot(&plan, remaining_legacy_files))
+        };
         return Ok(ExecutionResult {
             status: "NO_CHANGES".to_string(),
             moved_files: Vec::new(),
@@ -609,7 +694,11 @@ fn execute_organization_plan_core(
     }
 
     let manifest_path = make_manifest_path(&root)?;
-    let snapshot = snapshot_entries(&root, &ready)?;
+    let snapshot = snapshot_entries(
+        &root,
+        &ready,
+        !requires_post_execution_package_scan(&plan),
+    )?;
      operation::set_total("organize", move_total);
     operation::update("organize", 0, None, "preparing");
     let mut manifest = manifest_from_snapshot(
@@ -844,8 +933,17 @@ fn execute_organization_plan_core(
 
     operation::set_total("organize", 1);
     operation::update("organize", 0, None, "cleaning");
+    let focused_cleanup_roots = cleanup_scope_roots(&root, &plan);
     let (old_folders_removed, old_folders_retained, cleanup_warnings) =
-        cleanup_empty_directories_after_organization(&root, &moved_pairs);
+        if requires_post_execution_package_scan(&plan) {
+            cleanup_empty_directories_after_organization(&root, &moved_pairs)
+        } else {
+            cleanup_empty_directories_after_organization_scoped(
+                &root,
+                &moved_pairs,
+                Some(&focused_cleanup_roots),
+            )
+        };
 
     let remaining_legacy_details =
         remaining_legacy_details(&root, &moved_pairs, &plan.items);
@@ -863,9 +961,13 @@ fn execute_organization_plan_core(
     // Invalidate the Rust scan cache before any later plan preview: the
     // cache contains pre-move absolute paths and must never be reused.
     invalidate_latest_scan_for(&root);
-    let analysis_current = scan_packages_core(root.to_string_lossy().to_string(), language, None)
-        .ok()
-        .map(|scan| OrganizationAnalysisSnapshot::from_scan("analysis_current", &scan.stats));
+    let analysis_current = if requires_post_execution_package_scan(&plan) {
+        scan_packages_core(root.to_string_lossy().to_string(), language, None)
+            .ok()
+            .map(|scan| OrganizationAnalysisSnapshot::from_scan("analysis_current", &scan.stats))
+    } else {
+        Some(incremental_current_snapshot(&plan, remaining_legacy_files))
+    };
     let moved_files = moved_pairs.iter().map(|(source, destination, _, _)| {
         OrganizationMove {
             source_path: source.to_string_lossy().to_string(),

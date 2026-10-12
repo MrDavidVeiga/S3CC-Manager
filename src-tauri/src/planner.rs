@@ -426,6 +426,28 @@ fn model_components_match(candidate: &str, canonical: &str) -> bool {
             | ("peloscorporais", "pelocorporal")
             | ("pelofacial", "pelosfaciais")
             | ("pelosfaciais", "pelofacial")
+            | ("fixes", "corrections")
+            | ("corrections", "fixes")
+            | ("fixes", "correcoes")
+            | ("correcoes", "fixes")
+            | ("fixes", "correções")
+            | ("correções", "fixes")
+            | ("fixes", "correcciones")
+            | ("correcciones", "fixes")
+            | ("corrections", "correcoes")
+            | ("correcoes", "corrections")
+            | ("corrections", "correcciones")
+            | ("correcciones", "corrections")
+            | ("substituicoes", "replacements")
+            | ("replacements", "substituicoes")
+            | ("substituições", "replacements")
+            | ("replacements", "substituições")
+            | ("reemplazos", "replacements")
+            | ("replacements", "reemplazos")
+            | ("substituicoes", "reemplazos")
+            | ("reemplazos", "substituicoes")
+            | ("substituições", "reemplazos")
+            | ("reemplazos", "substituições")
     )
 }
 
@@ -2267,6 +2289,17 @@ fn scan_selected_roots(
     language: AppLanguage,
     selected: &HashSet<PathBuf>,
 ) -> Result<ScanResult, String> {
+    // A selected directory may contain only previews or auxiliary files.
+    // There are no DBPF packages to scan in that case, so returning an empty
+    // package scan prevents a targeted operation from reopening the complete
+    // Packages tree.
+    if selected.is_empty() {
+        return Ok(ScanResult {
+            root: root.to_string_lossy().to_string(),
+            items: Vec::new(),
+            stats: ScanStats::default(),
+        });
+    }
     if selected.len() >= 512 {
         return scan_packages_core(root.to_string_lossy().to_string(), language, None);
     }
@@ -2280,7 +2313,11 @@ fn scan_selected_roots(
         }
     }
     if top_level.is_empty() {
-        return scan_packages_core(root.to_string_lossy().to_string(), language, None);
+        return Ok(ScanResult {
+            root: root.to_string_lossy().to_string(),
+            items: Vec::new(),
+            stats: ScanStats::default(),
+        });
     }
 
     let mut items = Vec::new();
@@ -2400,9 +2437,19 @@ pub fn build_organization_plan_with_cfg(
     let workspace = load_workspace_for_root(&root);
     let profile = active_profile(&workspace);
     let resource_cfg = resource_cfg_context(&root);
-    let scan = match cached_scan_for(&root, language) {
-        Some(scan) => scan,
-        None => scan_selected_roots(&root, language, &selected)?,
+    let scan = if selected.is_empty() {
+        // The selected roots are still handled below for previews and
+        // auxiliary companions; no package parser is needed for them.
+        ScanResult {
+            root: root.to_string_lossy().to_string(),
+            items: Vec::new(),
+            stats: ScanStats::default(),
+        }
+    } else {
+        match cached_scan_for(&root, language) {
+            Some(scan) => scan,
+            None => scan_selected_roots(&root, language, &selected)?,
+        }
     };
 
     let mut scan_by_canonical = HashMap::<PathBuf, &ScanPackageItem>::new();
@@ -4817,5 +4864,25 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn empty_selected_directory_does_not_trigger_a_package_scan() {
+        let scan = scan_selected_roots(
+            Path::new(r"C:\isolated\Packages"),
+            AppLanguage::Pt,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert!(scan.items.is_empty());
+        assert_eq!(scan.stats.packages, 0);
+    }
+
+    #[test]
+    fn translated_fix_and_replacement_names_match_one_model_component() {
+        assert!(model_components_match("Fixes", "Correções"));
+        assert!(model_components_match("Correcciones", "Fixes"));
+        assert!(model_components_match("Substituições", "Replacements"));
+        assert!(model_components_match("Reemplazos", "Substituições"));
     }
 }

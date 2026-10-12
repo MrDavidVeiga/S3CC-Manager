@@ -658,11 +658,7 @@ fn path_independent_directed_classification(
     internal_names: &[String],
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
-    let corrections = match language {
-        AppLanguage::En => "Corrections",
-        AppLanguage::Pt => "Correções",
-        AppLanguage::Es => "Correcciones",
-    };
+    let corrections = language.corrections();
     let replacements = match language {
         AppLanguage::En => "Replacements",
         AppLanguage::Pt => "Substituições",
@@ -933,11 +929,7 @@ fn phase3_directed_family_classification(
     let has_geom = types.contains(&0x015A_1849);
     let has_s3sa = types.contains(&TYPE_S3SA);
     let has_catalog = types.contains(&TYPE_CASP) || types.contains(&TYPE_OBJD);
-    let corrections = match language {
-        AppLanguage::En => "Corrections",
-        AppLanguage::Pt => "Correções",
-        AppLanguage::Es => "Correcciones",
-    };
+    let corrections = language.corrections();
     let replacements = match language {
         AppLanguage::En => "Replacements",
         AppLanguage::Pt => "Substituições",

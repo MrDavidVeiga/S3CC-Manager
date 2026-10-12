@@ -42,6 +42,16 @@ impl AppLanguage {
         }
     }
 
+    /// Canonical physical folder for functional fixes. The English model
+    /// uses `Fixes`; `Corrections` is not a second physical tree.
+    pub fn corrections(self) -> &'static str {
+        match self {
+            Self::En => "Fixes",
+            Self::Pt => "Correções",
+            Self::Es => "Correcciones",
+        }
+    }
+
     pub fn cas(self) -> &'static str { "CAS" }
 
     pub fn clothing(self) -> &'static str {
@@ -232,5 +242,12 @@ mod tests {
         assert_eq!(AppLanguage::En.uncategorized_fallback_folder(), "#Not Categorized");
         assert_eq!(AppLanguage::En.duplicates_folder(), "#Duplicates");
         assert_eq!(AppLanguage::En.previews_folder(), "CC Previews");
+    }
+
+    #[test]
+    fn fixes_folder_uses_the_canonical_english_name() {
+        assert_eq!(AppLanguage::En.corrections(), "Fixes");
+        assert_eq!(AppLanguage::Pt.corrections(), "Correções");
+        assert_eq!(AppLanguage::Es.corrections(), "Correcciones");
     }
 }
