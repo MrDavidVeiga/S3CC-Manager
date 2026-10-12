@@ -24,6 +24,7 @@ pub mod resource_cfg;
 pub mod resource_cfg_update;
 pub mod scanner;
 pub mod sims3pack_converter;
+pub mod slider;
 pub mod structure_manager;
 pub mod workspace;
 pub mod snapshots;
@@ -55,6 +56,7 @@ fn apply_runtime_window_icon(app: &tauri::App) -> Result<(), Box<dyn std::error:
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(not(test))]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -142,3 +144,10 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running S3CC Manager");
 }
+
+// The Tauri context macro requires Cargo's application build environment and
+// cannot be expanded for a library test target. The application entry point
+// remains unchanged; this test-only stub lets the Rust classifier and DBPF
+// regressions run without starting or building the desktop application.
+#[cfg(test)]
+pub fn run() {}

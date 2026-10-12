@@ -167,14 +167,13 @@ pub fn classify_package_family(
         ));
     }
 
-    // GEOM/VPXY meshes commonly contain BGEO/BBLN resources in replacements
-    // and custom meshes (feet, eyelashes, pregnancy clothing). Their presence
-    // alone does NOT make the package an actual CAS slider.
-    let has_geom_mesh = types.contains(&0x015A_1849);
-    let definitive_slider = has_any(types, &[TYPE_BONE_DELTA, TYPE_FACE, TYPE_FBLN]);
-    let legacy_morph_candidate = has_any(types, &[TYPE_BBLN, TYPE_BGEO]) && !has_geom_mesh;
+    // FBLN is the BlendUnit/slider definition. FACE, BGEO, BBLN and BOND are
+    // supporting morph resources and are intentionally insufficient on their
+    // own: replacements and mesh companions may contain the same resource
+    // families without defining a CAS slider.
+    let definitive_slider = types.contains(&TYPE_FBLN);
 
-    if definitive_slider || legacy_morph_candidate {
+    if definitive_slider {
         let mut detected = Vec::new();
         for (resource_type, label) in [
             (TYPE_BONE_DELTA, "BoneDelta"),
@@ -288,13 +287,16 @@ mod tests {
     }
 
     #[test]
-    fn slider_family_accepts_morph_resource_types() {
+    fn slider_family_requires_the_fbln_blend_unit() {
         let result = classify_package_family(
             &set(&[TYPE_FACE, TYPE_BGEO]),
             AppLanguage::En,
         );
+        assert!(matches!(result, PackageFamilyResult::None));
+
+        let result = classify_package_family(&set(&[TYPE_FBLN, TYPE_FACE]), AppLanguage::En);
         let PackageFamilyResult::Classified(value) = result else {
-            panic!("expected classified");
+            panic!("expected FBLN classified");
         };
         assert_eq!(value.folder_parts, vec!["Sliders"]);
     }

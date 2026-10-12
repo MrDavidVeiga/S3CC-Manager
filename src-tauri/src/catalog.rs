@@ -730,7 +730,10 @@ fn casp_category(core: CaspCore) -> (&'static str, Option<&'static str>) {
         0x21 | 0x22 => ("Makeup", Some("Tattoos")),
         0x23 => ("Genetics", Some("Teeth")),
         0x24 | 0x25 => ("Accessories", Some("Garters")),
-        0x27..=0x2E => ("Hair", Some("Body Hair")),
+        // BodyHairChestStomach and the related CASP values are one approved
+        // Body Hair family. Keep only the gender level physically; the
+        // individual body region and age flags remain metadata.
+        0x27..=0x2E => ("Body Hair", None),
         0x2F..=0x3B => ("Pets", Some("Other")),
         _ if (core.type_flags & 0x10) != 0 => ("Accessories", Some("Other")),
         _ if (core.type_flags & 0x01) != 0 => ("Hair", None),
@@ -754,10 +757,9 @@ pub fn classify_casp(data: &[u8], language: AppLanguage) -> Option<CatalogClassi
         folder_parts.push(gender.clone());
         // Accessories retain gender and optional accessory subtype, but
         // age flags remain available as metadata rather than folder levels.
-        // Body hair and facial hair follow the approved hair layout and do
-        // not receive an age folder. This also saves Resource.cfg depth in
-        // both loading branches.
-        let age_is_physical = !matches!(sub_key, Some("Facial Hair" | "Body Hair"));
+        // Facial hair does not receive an age folder. Body Hair is a primary
+        // category and therefore also has only its gender level physically.
+        let age_is_physical = !matches!(sub_key, Some("Facial Hair")) && main_key != "Body Hair";
         if main_key != "Accessories" && age_is_physical {
             folder_parts.push(age.clone());
         }
@@ -1614,7 +1616,14 @@ mod tests {
                 AppLanguage::Pt,
             )
             .unwrap();
-            assert_eq!(item.main_category, "Cabelos");
+            if clothing_type == 0x10 {
+                assert_eq!(item.main_category, "Cabelos");
+                assert_eq!(item.sub_category.as_deref(), Some("Pelos Faciais"));
+            } else {
+                assert_eq!(item.main_category, "Pelos Corporais");
+                assert_eq!(item.sub_category, None);
+                assert_eq!(item.folder_parts.len(), 3);
+            }
             assert!(item.folder_parts.iter().all(|part| !part.contains("Idade")));
             assert!(item.folder_parts.iter().all(|part| part != "Múltiplas Idades"));
         }

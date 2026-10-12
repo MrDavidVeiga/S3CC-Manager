@@ -12,6 +12,7 @@ use crate::{
         TYPE_BGEO, TYPE_BONE_DELTA, TYPE_FACE, TYPE_FBLN, TYPE_HAIR_TONE, TYPE_IMG, TYPE_S3SA,
         TYPE_SKIN_TONE,
     },
+    slider::{fbln_evidence, read_fbln_metadata, FblnMetadata},
 };
 use serde::Serialize;
 use std::{
@@ -1507,14 +1508,6 @@ fn legacy_source_evidence_classification(
             vec!["LegacyHairSource".to_string(), "VisualResourceSet".to_string()],
             "Legacy hair/beard source branch plus visual resources identifies a CAS replacement family.",
         )
-    } else if (normalized.contains("#6 sliders/") || normalized.contains("/sliders/"))
-        && has_body_mesh
-    {
-        (
-            vec!["Sliders".to_string()],
-            vec!["LegacySliderSource".to_string(), "GEOM".to_string()],
-            "Legacy slider source branch plus GEOM morph payload identifies a slider package.",
-        )
     } else if normalized.contains("#8 scripts/cas/") && has_visual {
         (
             vec![replacements.to_string(), "CAS".to_string()],
@@ -2476,6 +2469,44 @@ fn slider_internal_evidence(
         .map(|(name, source)| (name, source, None))
 }
 
+fn fbln_slider_classification(
+    package: &Package,
+    metadata: &[FblnMetadata],
+    filename: &str,
+    language: AppLanguage,
+) -> PackageFamilyClassification {
+    let mut folder_parts = vec!["Sliders".to_string()];
+    let mut detected_from = vec!["FBLN".to_string()];
+    let evidence = fbln_evidence(metadata);
+    let mut reason = format!(
+        "FBLN BlendUnit is authoritative slider evidence; {}. CASPanelGroup/Sort are retained as raw metadata and do not determine anatomy.",
+        evidence
+    );
+
+    // Anatomical refinement is allowed only from independent internal labels
+    // (NMAP/STBL or a verified filename alias), never from CASPanelGroup.
+    if let Some((internal_name, source, Some(destination))) =
+        slider_internal_evidence(package, filename, language)
+    {
+        if destination.first().is_some_and(|part| part == "Sliders") {
+            folder_parts = destination;
+            detected_from.push(source.to_string());
+            reason.push_str(&format!(
+                " Independent internal label from {source} '{}' refines the destination without inferring anatomy from the CAS panel.",
+                internal_name
+            ));
+        }
+    }
+
+    PackageFamilyClassification {
+        main_category: "CAS".to_string(),
+        sub_category: Some("Sliders".to_string()),
+        folder_parts,
+        detected_from,
+        technical_reason: reason,
+    }
+}
+
 
 fn is_slider_morph_type(type_id: u32) -> bool {
     matches!(
@@ -2546,7 +2577,10 @@ fn apply_slider_companion_classification(
 
         item.status = "classified".to_string();
         item.category = Some("CAS".to_string());
-        item.sub_category = Some("Sliders".to_string());
+        // The STBL is a label/dependency carrier, not a second slider. Keep
+        // it with the slider loading branch without counting it as an FBLN
+        // slider or inferring anatomy from its source folder.
+        item.sub_category = Some("Slider Support".to_string());
         item.destination_parts = vec!["Sliders".to_string()];
         item.destination_path = Some("Sliders".to_string());
         if !item
@@ -3064,6 +3098,14 @@ fn scan_one(
     let mut warnings = Vec::new();
     let mut catalog_resource_count = 0usize;
     let is_merged_sim_export = merged_sim_export_evidence(&package).is_some();
+    let fbln_metadata = read_fbln_metadata(&package);
+    let has_fbln = !fbln_metadata.is_empty();
+    if has_fbln {
+        detected_from.insert("FBLN".to_string());
+        if fbln_metadata.len() > 1 {
+            detected_from.insert(format!("FBLNCount:{}", fbln_metadata.len()));
+        }
+    }
 
     for entry in &package.entries {
         type_ids.insert(entry.type_id);
@@ -3098,6 +3140,7 @@ fn scan_one(
     }
 
     let special_primary = merged_sim_export_classification(&package, language)
+        .or_else(|| has_fbln.then(|| fbln_slider_classification(&package, &fbln_metadata, &name, language)))
         .or_else(|| {
             fix_signatures::learned_fix_classification(
                 &package,
@@ -4709,5 +4752,91 @@ mod tests {
             script_creator_folder(AppLanguage::Pt, Some("TwinSimming")),
             vec!["Scripts", "Jogabilidade"]
         );
+    }
+
+    #[test]
+    fn external_slider_corpus_is_a_read_only_dry_run_when_requested() {
+        let Ok(root) = std::env::var("S3CC_SLIDER_CORPUS_ROOT") else { return; };
+        let root_path = PathBuf::from(&root);
+        let package_paths = WalkDir::new(&root_path)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && package_extension(entry.path()))
+            .map(|entry| entry.into_path())
+            .collect::<Vec<_>>();
+        assert_eq!(package_paths.len(), 299, "slider corpus package count changed");
+
+        let mut package_items = HashMap::<String, &ScanPackageItem>::new();
+        let result = scan_packages_core(root.clone(), AppLanguage::Pt, None).expect("scan corpus");
+        for item in &result.items {
+            package_items.insert(item.relative_path.replace('/', "\\").to_ascii_lowercase(), item);
+        }
+
+        let mut fbln_packages = 0usize;
+        let mut fbln_resources = 0usize;
+        let mut no_fbln = 0usize;
+        let mut hashes = BTreeSet::new();
+        let mut dry_run = Vec::with_capacity(package_paths.len());
+        for path in package_paths {
+            let package = Package::load(&path).expect("DBPF package");
+            let metadata = read_fbln_metadata(&package);
+            let fbln_count = package.entries.iter().filter(|entry| entry.type_id == TYPE_FBLN).count();
+            assert_eq!(fbln_count, metadata.len(), "every FBLN must be readable: {}", path.display());
+            if fbln_count > 0 { fbln_packages += 1; fbln_resources += fbln_count; } else { no_fbln += 1; }
+            let (sha256, size) = sha256_file(&path).expect("hash corpus package");
+            assert!(hashes.insert(sha256.clone()), "corpus contains an identical SHA-256");
+            let relative = path.strip_prefix(&root_path).unwrap().to_string_lossy().replace('/', "\\");
+            let item = package_items.get(&relative.to_ascii_lowercase()).expect("scan item");
+            let destination = item.destination_path.clone().unwrap_or_default();
+            let bucket = if fbln_count > 0 {
+                "sliders"
+            } else if destination.to_ascii_lowercase().contains("fix") || item.detected_from.iter().any(|v| v.to_ascii_lowercase().contains("fix")) {
+                "fixes"
+            } else if destination.to_ascii_lowercase().contains("substit") || destination.to_ascii_lowercase().contains("reempl") || destination.to_ascii_lowercase().contains("replacement") {
+                "replacements"
+            } else if item.status == "classified" {
+                "support_or_other"
+            } else {
+                "review"
+            };
+            dry_run.push(serde_json::json!({
+                "relativePath": relative,
+                "name": item.name,
+                "size": size,
+                "sha256": sha256,
+                "resourceTypes": item.resource_types,
+                "fblnCount": fbln_count,
+                "fbln": metadata,
+                "status": item.status,
+                "destination": item.destination_path,
+                "detectedFrom": item.detected_from,
+                "classificationReason": item.classification_reason,
+                "bucket": bucket,
+            }));
+        }
+        assert_eq!(fbln_packages, 290, "FBLN package count changed");
+        assert_eq!(fbln_resources, 292, "FBLN resource count changed");
+        assert_eq!(no_fbln, 9, "non-FBLN package count changed");
+        assert_eq!(result.stats.invalid, 0, "corpus contains an unreadable DBPF");
+        let non_fbln_slider_items = result.items.iter().filter(|item| {
+            item.sub_category.as_deref() == Some("Sliders") && !item.resource_types.iter().any(|kind| kind == "FBLN")
+        }).collect::<Vec<_>>();
+        for item in &non_fbln_slider_items { println!("NON_FBLN_SLIDER {} {:?} {:?}", item.relative_path, item.resource_types, item.detected_from); }
+        assert!(non_fbln_slider_items.is_empty(), "non-FBLN resources must not be auto-classified as sliders");
+
+        if let Ok(output) = std::env::var("S3CC_SLIDER_DRY_RUN_OUTPUT") {
+            let path = PathBuf::from(output);
+            if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
+            std::fs::write(&path, serde_json::to_vec_pretty(&serde_json::json!({
+                "packageCount": result.stats.packages,
+                "fblnPackages": fbln_packages,
+                "fblnResources": fbln_resources,
+                "withoutFbln": no_fbln,
+                "dbpfIndexErrors": result.stats.invalid,
+                "identicalSha256": 0,
+                "dryRunOnly": true,
+                "items": dry_run,
+            })).unwrap()).unwrap();
+        }
     }
 }
