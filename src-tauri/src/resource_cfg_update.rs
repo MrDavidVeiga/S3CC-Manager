@@ -8,7 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{collections::{BTreeSet, HashMap, HashSet}, fs, io::Write, path::{Path, PathBuf}};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceCfgUpdate {
     pub path: String,

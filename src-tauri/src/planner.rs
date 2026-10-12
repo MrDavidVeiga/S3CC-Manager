@@ -1,13 +1,12 @@
 use crate::{
-    i18n::AppLanguage,
     cache::load_cache,
+    i18n::AppLanguage,
     manifest::sha256_file,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     resource_cfg_update::{preview_resource_cfg_update, ResourceCfgUpdate},
     scanner::{cached_scan_for, scan_packages_core, ScanPackageItem, ScanResult, ScanStats},
     workspace::{
-        active_profile, is_protected, load_workspace_for_root, matching_rule,
-        split_destination,
+        active_profile, is_protected, load_workspace_for_root, matching_rule, split_destination,
     },
 };
 use chrono::{Local, SecondsFormat};
@@ -19,7 +18,7 @@ use std::{
 };
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanItem {
     pub id: String,
@@ -36,7 +35,7 @@ pub struct PlanItem {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanStats {
     pub selected: usize,
@@ -51,7 +50,7 @@ pub struct PlanStats {
     pub empty_folders_to_clean: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrganizationAnalysisSnapshot {
     pub phase: String,
@@ -128,60 +127,99 @@ struct ModelDestination {
 }
 
 fn model_key(parts: &[String]) -> String {
-    parts.iter().map(|part| part.to_lowercase()).collect::<Vec<_>>().join("\u{1f}")
+    parts
+        .iter()
+        .map(|part| part.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
 }
 
 fn model_relative_components(path: &Path) -> Result<Vec<String>, String> {
-    path.components().map(|component| match component {
-        Component::Normal(value) => Ok(value.to_string_lossy().to_string()),
-        _ => Err(format!("Unsafe model path: {}", path.display())),
-    }).collect()
+    path.components()
+        .map(|component| match component {
+            Component::Normal(value) => Ok(value.to_string_lossy().to_string()),
+            _ => Err(format!("Unsafe model path: {}", path.display())),
+        })
+        .collect()
 }
 
 fn is_package_file(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()).map(|name| {
-        let name = name.to_lowercase();
-        name.ends_with(".package") || name.ends_with(".package.disabled")
-    }).unwrap_or(false)
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let name = name.to_lowercase();
+            name.ends_with(".package") || name.ends_with(".package.disabled")
+        })
+        .unwrap_or(false)
 }
 
 fn build_manual_model_index(root: &Path) -> Result<ManualModelIndex, String> {
     if !root.is_dir() {
-        return Err(format!("The official manual model Packages directory is unavailable: {}", root.display()));
+        return Err(format!(
+            "The official manual model Packages directory is unavailable: {}",
+            root.display()
+        ));
     }
     let mut directories = BTreeMap::new();
     let mut files_by_sha256 = HashMap::<String, Vec<ManualModelFile>>::new();
     for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter() {
-        let entry = entry.map_err(|error| format!("Failed to read complete manual model tree: {error}"))?;
-        let relative = entry.path().strip_prefix(root)
+        let entry =
+            entry.map_err(|error| format!("Failed to read complete manual model tree: {error}"))?;
+        let relative = entry
+            .path()
+            .strip_prefix(root)
             .map_err(|error| format!("Could not index model path: {error}"))?;
         let components = model_relative_components(relative)?;
         if entry.file_type().is_dir() {
             directories.insert(model_key(&components), components);
             continue;
         }
-        if !entry.file_type().is_file() || !is_package_file(entry.path()) { continue; }
-        let file_name = components.last().cloned()
+        if !entry.file_type().is_file() || !is_package_file(entry.path()) {
+            continue;
+        }
+        let file_name = components
+            .last()
+            .cloned()
             .ok_or_else(|| format!("Model package has no filename: {}", entry.path().display()))?;
         let directory_parts = components[..components.len().saturating_sub(1)].to_vec();
         let (sha256, _) = sha256_file(entry.path()).map_err(|error| {
-            format!("Could not hash model package {}: {error}", entry.path().display())
+            format!(
+                "Could not hash model package {}: {error}",
+                entry.path().display()
+            )
         })?;
-        files_by_sha256.entry(sha256.to_ascii_uppercase()).or_default().push(ManualModelFile {
-            relative_path: relative_key(relative), directory_parts, file_name,
-        });
+        files_by_sha256
+            .entry(sha256.to_ascii_uppercase())
+            .or_default()
+            .push(ManualModelFile {
+                relative_path: relative_key(relative),
+                directory_parts,
+                file_name,
+            });
     }
-    Ok(ManualModelIndex { directories, files_by_sha256 })
+    Ok(ManualModelIndex {
+        directories,
+        files_by_sha256,
+    })
 }
 
 fn manual_model_packages_root() -> Result<PathBuf, String> {
     if let Ok(value) = std::env::var("S3CC_MANUAL_MODEL_PACKAGES") {
         let path = PathBuf::from(value.trim());
-        if !path.as_os_str().is_empty() { return Ok(path); }
+        if !path.as_os_str().is_empty() {
+            return Ok(path);
+        }
     }
     let downloads = dirs::download_dir()
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).map(|path| path.join("Downloads")))
-        .ok_or_else(|| "Could not locate the current user's Downloads directory for the official manual model.".to_string())?;
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .map(|path| path.join("Downloads"))
+        })
+        .ok_or_else(|| {
+            "Could not locate the current user's Downloads directory for the official manual model."
+                .to_string()
+        })?;
     Ok(downloads.join("Mods - ESTRUTURA MODELO").join("Packages"))
 }
 
@@ -221,7 +259,9 @@ fn load_persistent_manual_model_index(root: &Path) -> Option<ManualModelIndex> {
     let text = fs::read_to_string(manual_model_index_path()).ok()?;
     let envelope = serde_json::from_str::<PersistentManualModelIndex>(&text).ok()?;
     if envelope.version != PERSISTENT_MANUAL_MODEL_INDEX_VERSION
-        || !envelope.reference_root.eq_ignore_ascii_case(&canonical_root.to_string_lossy())
+        || !envelope
+            .reference_root
+            .eq_ignore_ascii_case(&canonical_root.to_string_lossy())
     {
         return None;
     }
@@ -272,51 +312,255 @@ fn load_or_build_manual_model_index(root: &Path) -> Result<ManualModelIndex, Str
     Ok(index)
 }
 
-fn model_parts_for_selected_root(root: &Path, source: &Path, model_parts: &[String]) -> Result<Vec<String>, String> {
+fn model_parts_for_selected_root(
+    root: &Path,
+    source: &Path,
+    model_parts: &[String],
+) -> Result<Vec<String>, String> {
     if is_mods_root(root) {
-        let mut parts = vec!["Packages".to_string()]; parts.extend(model_parts.iter().cloned()); return Ok(parts);
+        let mut parts = vec!["Packages".to_string()];
+        parts.extend(model_parts.iter().cloned());
+        return Ok(parts);
     }
     if let Some(branch) = loading_branch_ancestor(root, is_packages_root) {
         let target = branch.join(model_parts.iter().collect::<PathBuf>());
         if !path_is_within_root(root, &target) {
-            return Err(format!("The exact model destination for '{}' is outside the selected Packages subtree.", source.display()));
+            return Err(format!(
+                "The exact model destination for '{}' is outside the selected Packages subtree.",
+                source.display()
+            ));
         }
-        return target.strip_prefix(root).map(|relative| {
-            relative_key(relative).split('\\').map(str::to_string).collect()
-        }).map_err(|error| format!("Could not derive model destination: {error}"));
+        return target
+            .strip_prefix(root)
+            .map(|relative| {
+                relative_key(relative)
+                    .split('\\')
+                    .map(str::to_string)
+                    .collect()
+            })
+            .map_err(|error| format!("Could not derive model destination: {error}"));
     }
-    if is_packages_root(root) { return Ok(model_parts.to_vec()); }
+    if is_packages_root(root) {
+        return Ok(model_parts.to_vec());
+    }
     Ok(model_parts.to_vec())
 }
 
 fn strip_packages_prefix(parts: &[String]) -> Vec<String> {
-    if parts.first().is_some_and(|part| part.eq_ignore_ascii_case("Packages")) { parts[1..].to_vec() } else { parts.to_vec() }
+    if parts
+        .first()
+        .is_some_and(|part| part.eq_ignore_ascii_case("Packages"))
+    {
+        parts[1..].to_vec()
+    } else {
+        parts.to_vec()
+    }
 }
 
-fn resolve_model_destination(index: &ManualModelIndex, root: &Path, source: &Path, source_hash: &str, candidate_parts: &[String]) -> Result<ModelDestination, String> {
-    let name = source.file_name().and_then(|value| value.to_str())
+fn semantic_path_component(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| character.to_lowercase())
+        .filter(|character| !character.is_whitespace() && !matches!(character, '-' | '_' | '+'))
+        .collect()
+}
+
+fn age_set(value: &str) -> Option<BTreeSet<String>> {
+    let normalized = value.to_lowercase();
+    let ages = [
+        "recém-nascido",
+        "bebê",
+        "criança",
+        "adolescente",
+        "jovem adulto",
+        "adulto",
+        "idoso",
+    ];
+    let mut positions = Vec::new();
+    for (index, age) in ages.iter().enumerate() {
+        let search = if *age == "adulto" && normalized.contains("jovem adulto") {
+            normalized.replace("jovem adulto", "")
+        } else {
+            normalized.clone()
+        };
+        if search.contains(age) {
+            positions.push(index);
+        }
+    }
+    let mut result = BTreeSet::new();
+    if normalized.contains(" a ") && positions.len() >= 2 {
+        for index in *positions.first().unwrap()..=*positions.last().unwrap() {
+            result.insert(ages[index].replace('-', " "));
+        }
+    } else {
+        for index in positions {
+            result.insert(ages[index].replace('-', " "));
+        }
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+fn model_components_match(candidate: &str, canonical: &str) -> bool {
+    if candidate.eq_ignore_ascii_case(canonical) {
+        return true;
+    }
+    let candidate_key = semantic_path_component(candidate);
+    let canonical_key = semantic_path_component(canonical);
+    if candidate_key == canonical_key {
+        return true;
+    }
+    if let (Some(left), Some(right)) = (age_set(candidate), age_set(canonical)) {
+        return left == right;
+    }
+    matches!(
+        (candidate_key.as_str(), canonical_key.as_str()),
+        ("jogabilidade", "gameplay")
+            | ("gameplay", "jogabilidade")
+            | ("makeup", "maquiagem")
+            | ("maquiagem", "makeup")
+            | ("pelocorporal", "peloscorporais")
+            | ("peloscorporais", "pelocorporal")
+            | ("pelofacial", "pelosfaciais")
+            | ("pelosfaciais", "pelofacial")
+    )
+}
+
+fn semantic_model_directory(index: &ManualModelIndex, candidate: &[String]) -> Option<Vec<String>> {
+    let mut matches = index
+        .directories
+        .values()
+        .filter(|canonical| {
+            canonical.len() == candidate.len()
+                && candidate
+                    .iter()
+                    .zip(canonical.iter())
+                    .all(|(left, right)| model_components_match(left, right))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // A classifier may omit an age bucket for content whose CASP age range is
+    // already part of the evidence. Permit exactly one omitted age component
+    // only when the model has a single unambiguous canonical directory.
+    if matches.is_empty() && candidate.len() >= 3 {
+        matches = index
+            .directories
+            .values()
+            .filter(|canonical| {
+                if canonical.len() != candidate.len() + 1 {
+                    return false;
+                }
+                let mut candidate_index = 0usize;
+                let mut skipped_age = false;
+                for canonical_component in canonical.iter() {
+                    if candidate_index < candidate.len()
+                        && model_components_match(&candidate[candidate_index], canonical_component)
+                    {
+                        candidate_index += 1;
+                    } else if !skipped_age && age_set(canonical_component).is_some() {
+                        skipped_age = true;
+                    } else {
+                        return false;
+                    }
+                }
+                candidate_index == candidate.len() && skipped_age
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+    }
+
+    let unique = matches
+        .iter()
+        .map(|parts| model_key(parts))
+        .collect::<BTreeSet<_>>();
+    if unique.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
+}
+
+fn resolve_model_destination(
+    index: &ManualModelIndex,
+    root: &Path,
+    source: &Path,
+    source_hash: &str,
+    candidate_parts: &[String],
+) -> Result<ModelDestination, String> {
+    let name = source
+        .file_name()
+        .and_then(|value| value.to_str())
         .ok_or_else(|| format!("Package has no valid filename: {}", source.display()))?;
     if let Some(matches) = index.files_by_sha256.get(&source_hash.to_ascii_uppercase()) {
         // Compare all files with these bytes, including differently named
         // ones. A filename match must not conceal a second model folder.
-        let directories = matches.iter().map(|entry| model_key(&entry.directory_parts)).collect::<BTreeSet<_>>();
+        let directories = matches
+            .iter()
+            .map(|entry| model_key(&entry.directory_parts))
+            .collect::<BTreeSet<_>>();
         if directories.len() > 1 {
-            return Err(format!("The SHA-256 matches multiple different canonical model destinations: {}",
-                matches.iter().map(|entry| entry.relative_path.clone()).collect::<Vec<_>>().join(" | ")));
+            return Err(format!(
+                "The SHA-256 matches multiple different canonical model destinations: {}",
+                matches
+                    .iter()
+                    .map(|entry| entry.relative_path.clone())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
         }
-        let named = matches.iter().filter(|entry| entry.file_name.eq_ignore_ascii_case(name)).collect::<Vec<_>>();
-        let considered = if named.is_empty() { matches.iter().collect::<Vec<_>>() } else { named };
-        let directory_key = directories.into_iter().next().ok_or_else(|| "The model hash match has no canonical directory.".to_string())?;
-        let model_parts = index.directories.get(&directory_key).cloned().unwrap_or_else(|| considered[0].directory_parts.clone());
+        let named = matches
+            .iter()
+            .filter(|entry| entry.file_name.eq_ignore_ascii_case(name))
+            .collect::<Vec<_>>();
+        let considered = if named.is_empty() {
+            matches.iter().collect::<Vec<_>>()
+        } else {
+            named
+        };
+        let directory_key = directories
+            .into_iter()
+            .next()
+            .ok_or_else(|| "The model hash match has no canonical directory.".to_string())?;
+        let model_parts = index
+            .directories
+            .get(&directory_key)
+            .cloned()
+            .unwrap_or_else(|| considered[0].directory_parts.clone());
         let parts = model_parts_for_selected_root(root, source, &model_parts)?;
-        return Ok(ModelDestination { parts, evidence: format!("Exact SHA-256 match in the manual model: {}", considered.iter().map(|entry| entry.relative_path.as_str()).collect::<Vec<_>>().join(" | ")) });
+        return Ok(ModelDestination {
+            parts,
+            evidence: format!(
+                "Exact SHA-256 match in the manual model: {}",
+                considered
+                    .iter()
+                    .map(|entry| entry.relative_path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ),
+        });
     }
     let candidate = strip_packages_prefix(candidate_parts);
-    let Some(canonical_parts) = index.directories.get(&model_key(&candidate)).cloned() else {
-        return Err(format!("No exact directory in the manual model matches the classified destination '{}'. The package remains protected for review.", candidate_parts.join("\\")));
-    };
+    let canonical_parts = index.directories.get(&model_key(&candidate)).cloned()
+        .or_else(|| semantic_model_directory(index, &candidate))
+        .ok_or_else(|| format!("No authorized taxonomy directory in the manual model matches the classified destination '{}'.", candidate_parts.join("\\")))?;
     let parts = model_parts_for_selected_root(root, source, &canonical_parts)?;
-    Ok(ModelDestination { parts, evidence: format!("The classified destination matched the model directory exactly: {}", canonical_parts.join("\\")) })
+    let evidence = if model_key(&canonical_parts) == model_key(&candidate) {
+        format!(
+            "The classified destination matched the model directory exactly: {}",
+            canonical_parts.join("\\")
+        )
+    } else {
+        format!(
+            "The classified destination matched the authorized model taxonomy alias '{}': {}",
+            candidate.join("\\"),
+            canonical_parts.join("\\")
+        )
+    };
+    Ok(ModelDestination { parts, evidence })
 }
 
 fn resource_cfg_context(root: &Path) -> Option<ResourceCfgContext> {
@@ -348,9 +592,8 @@ fn is_overrides_root(root: &Path) -> bool {
 // Resolve that real in-game loading branch from ancestors, not only from
 // the name of the final directory. The resulting moves stay within root.
 fn loading_branch_ancestor<'a>(root: &'a Path, is_branch: fn(&Path) -> bool) -> Option<&'a Path> {
-    root.ancestors().find(|ancestor| {
-        is_branch(ancestor) && ancestor.parent().is_some_and(is_mods_root)
-    })
+    root.ancestors()
+        .find(|ancestor| is_branch(ancestor) && ancestor.parent().is_some_and(is_mods_root))
 }
 
 fn is_within_packages(root: &Path) -> bool {
@@ -364,18 +607,23 @@ fn is_within_overrides(root: &Path) -> bool {
 // A user scanning Packages/Clothing/Male must not receive the redundant
 // destination Packages/Clothing/Male/Clothing/Male/YA-A/Top. Only trim when
 // the entire already-selected subpath is a matching prefix.
-fn trim_selected_branch_prefix(
-    root: &Path,
-    branch: &Path,
-    parts: &mut Vec<String>,
-) {
-    let Ok(relative) = root.strip_prefix(branch) else { return };
-    let existing = relative.components().filter_map(|part| match part {
-        Component::Normal(value) => Some(value.to_string_lossy().to_string()),
-        _ => None,
-    }).collect::<Vec<_>>();
-    if !existing.is_empty() && parts.len() >= existing.len()
-        && parts.iter().take(existing.len()).zip(existing.iter())
+fn trim_selected_branch_prefix(root: &Path, branch: &Path, parts: &mut Vec<String>) {
+    let Ok(relative) = root.strip_prefix(branch) else {
+        return;
+    };
+    let existing = relative
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !existing.is_empty()
+        && parts.len() >= existing.len()
+        && parts
+            .iter()
+            .take(existing.len())
+            .zip(existing.iter())
             .all(|(left, right)| left.eq_ignore_ascii_case(right))
     {
         parts.drain(..existing.len());
@@ -391,7 +639,9 @@ fn source_uses_overrides(root: &Path, source: &Path) -> bool {
     if !is_mods_root(root) {
         return false;
     }
-    source.strip_prefix(root).ok()
+    source
+        .strip_prefix(root)
+        .ok()
         .and_then(|relative| relative.components().next())
         .is_some_and(|part| match part {
             Component::Normal(name) => name.to_string_lossy().eq_ignore_ascii_case("Overrides"),
@@ -405,12 +655,15 @@ fn ensure_source_loading_branch(root: &Path, source: &Path, parts: &[String]) ->
     }
 
     let mut parts = parts.to_vec();
-    if parts.first().is_some_and(|part| part.eq_ignore_ascii_case("Packages")
-        || part.eq_ignore_ascii_case("Overrides"))
-    {
+    if parts.first().is_some_and(|part| {
+        part.eq_ignore_ascii_case("Packages") || part.eq_ignore_ascii_case("Overrides")
+    }) {
         parts.remove(0);
     }
-    if parts.first().is_some_and(|part| part.eq_ignore_ascii_case("CAS")) {
+    if parts
+        .first()
+        .is_some_and(|part| part.eq_ignore_ascii_case("CAS"))
+    {
         parts.remove(0);
     }
     if is_mods_root(root) {
@@ -426,16 +679,39 @@ fn ensure_source_loading_branch(root: &Path, source: &Path, parts: &[String]) ->
 // just because that folder is not a Manager-generated category. However,
 // never reorganize the game's cache, downloads, backups or recovery trees.
 fn is_mods_system_source(root: &Path, source: &Path) -> bool {
-    if !is_mods_root(root) { return false; }
-    let Some(Component::Normal(top)) = source.strip_prefix(root).ok()
-        .and_then(|relative| relative.components().next()) else { return false; };
+    if !is_mods_root(root) {
+        return false;
+    }
+    let Some(Component::Normal(top)) = source
+        .strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+    else {
+        return false;
+    };
     let top = top.to_string_lossy().to_ascii_lowercase();
-    matches!(top.as_str(),
-        "dccache" | "dcbackup" | "downloads" | "savedsims" | "library"
-        | "saves" | "installedworlds" | "exports" | "screenshots"
-        | "collections" | "thumbnails" | "cache" | "caches"
-        | "quarantine" | "restore manifests" | "s3cc manager"
-        | "s3cc organizer" | "backups" | "backup")
+    matches!(
+        top.as_str(),
+        "dccache"
+            | "dcbackup"
+            | "downloads"
+            | "savedsims"
+            | "library"
+            | "saves"
+            | "installedworlds"
+            | "exports"
+            | "screenshots"
+            | "collections"
+            | "thumbnails"
+            | "cache"
+            | "caches"
+            | "quarantine"
+            | "restore manifests"
+            | "s3cc manager"
+            | "s3cc organizer"
+            | "backups"
+            | "backup"
+    )
 }
 
 // Older versions created their category trees beside Packages inside Mods.
@@ -451,27 +727,61 @@ fn legacy_manager_source(root: &Path, source: &Path) -> bool {
     if relative.components().count() < 2 {
         return false;
     }
-    let Some(name) = relative.components().next().and_then(|component| match component {
-        Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
-        _ => None,
-    }) else {
+    let Some(name) = relative
+        .components()
+        .next()
+        .and_then(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+    else {
         return false;
     };
     [
-        "cas", "sliders", "clothing", "roupas", "ropa",
-        "hair", "cabelos", "cabello",
-        "accessories", "acessórios", "accesorios",
-        "makeup", "maquiagem", "maquillaje",
-        "genetics", "genética", "genetica",
-        "pets", "animais", "mascotas",
-        "patterns", "padrões", "patrones",
-        "buy", "compra", "build", "construção", "construcción",
-        "objects", "objetos",
-        "gameplay", "jogabilidade", "jugabilidad",
-        "scripts", "store", "nraas",
-        "localization", "localização", "localización",
-        "poses and animations", "poses e animações", "poses y animaciones",
-    ].contains(&name.as_str())
+        "cas",
+        "sliders",
+        "clothing",
+        "roupas",
+        "ropa",
+        "hair",
+        "cabelos",
+        "cabello",
+        "accessories",
+        "acessórios",
+        "accesorios",
+        "makeup",
+        "maquiagem",
+        "maquillaje",
+        "genetics",
+        "genética",
+        "genetica",
+        "pets",
+        "animais",
+        "mascotas",
+        "patterns",
+        "padrões",
+        "patrones",
+        "buy",
+        "compra",
+        "build",
+        "construção",
+        "construcción",
+        "objects",
+        "objetos",
+        "gameplay",
+        "jogabilidade",
+        "jugabilidad",
+        "scripts",
+        "store",
+        "nraas",
+        "localization",
+        "localização",
+        "localización",
+        "poses and animations",
+        "poses e animações",
+        "poses y animaciones",
+    ]
+    .contains(&name.as_str())
 }
 
 // When the user selected Mods rather than Mods/Packages, the organizer's
@@ -479,12 +789,16 @@ fn legacy_manager_source(root: &Path, source: &Path) -> bool {
 // package has no reliable Resource.cfg rule.
 fn ensure_packages_destination(root: &Path, parts: &[String]) -> Vec<String> {
     let mut parts = parts.to_vec();
-    let has_packages_prefix = parts.first()
+    let has_packages_prefix = parts
+        .first()
         .is_some_and(|part| part.eq_ignore_ascii_case("Packages"));
     // Explicit legacy rules may contain CAS or Packages/CAS. CAS must not
     // consume a Resource.cfg nesting level. Never produce Packages/Packages.
     let cas_index = usize::from(has_packages_prefix);
-    if parts.get(cas_index).is_some_and(|part| part.eq_ignore_ascii_case("CAS")) {
+    if parts
+        .get(cas_index)
+        .is_some_and(|part| part.eq_ignore_ascii_case("CAS"))
+    {
         parts.remove(cas_index);
     }
     if is_within_packages(root) && has_packages_prefix {
@@ -538,23 +852,33 @@ fn fit_destination_to_resource_cfg(
             .filter(|part| !part.is_empty())
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let root_relative = root.strip_prefix(&context.directory).ok()
-            .map(|value| value.components()
-                .filter_map(|part| match part {
-                    Component::Normal(value) => Some(value.to_string_lossy().to_string()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>())
+        let root_relative = root
+            .strip_prefix(&context.directory)
+            .ok()
+            .map(|value| {
+                value
+                    .components()
+                    .filter_map(|part| match part {
+                        Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let mut prefix = Vec::<String>::new();
         if root_relative.len() < rule_prefix.len()
-            && rule_prefix.iter().take(root_relative.len()).zip(root_relative.iter())
+            && rule_prefix
+                .iter()
+                .take(root_relative.len())
+                .zip(root_relative.iter())
                 .all(|(left, right)| left.eq_ignore_ascii_case(right))
         {
             prefix.extend(rule_prefix.iter().skip(root_relative.len()).cloned());
         }
         if packages_parts.len() >= prefix.len()
-            && prefix.iter().zip(packages_parts.iter())
+            && prefix
+                .iter()
+                .zip(packages_parts.iter())
                 .all(|(left, right)| left.eq_ignore_ascii_case(right))
         {
             packages_parts.clone()
@@ -583,7 +907,9 @@ fn fit_destination_to_resource_cfg(
     // requested hierarchy and makes re-organization inconsistent. A
     // Resource.cfg update must be previewed and confirmed instead.
     let is_canonical_script = parts.first().is_some_and(|part| part == "Scripts")
-        || (parts.first().is_some_and(|part| part == "Packages" || part == "Overrides")
+        || (parts
+            .first()
+            .is_some_and(|part| part == "Packages" || part == "Overrides")
             && parts.get(1).is_some_and(|part| part == "Scripts"));
     if is_canonical_script && !override_source {
         return Err(format!(
@@ -599,7 +925,11 @@ fn fit_destination_to_resource_cfg(
     // preserve the slider/category as metadata instead of creating unloaded
     // subfolders. Never rename or merge "Overrides" with the category.
     let minimum_depth = if override_source {
-        if is_mods_root(root) { 1 } else { 0 }
+        if is_mods_root(root) {
+            1
+        } else {
+            0
+        }
     } else if is_mods_root(root) {
         2
     } else {
@@ -636,8 +966,7 @@ fn fit_destination_to_resource_cfg(
     ))
 }
 
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrganizationPlan {
     pub root: String,
@@ -665,10 +994,9 @@ fn invalid_windows_component(value: &str) -> bool {
     if value.ends_with(' ') || value.ends_with('.') {
         return true;
     }
-    if value
-        .chars()
-        .any(|ch| ch < '\u{20}' || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
-    {
+    if value.chars().any(|ch| {
+        ch < '\u{20}' || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+    }) {
         return true;
     }
 
@@ -812,7 +1140,10 @@ fn fallback_relative_path(
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("package");
-        let extension = file.extension().and_then(|value| value.to_str()).unwrap_or("package");
+        let extension = file
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("package");
         let short_hash = &source_hash[..source_hash.len().min(8)];
 
         let mut attempt = 0usize;
@@ -858,11 +1189,17 @@ fn duplicate_quarantine_destination(
         .ok_or_else(|| format!("Duplicate source has no filename: {}", source.display()))?;
     let hash_key = source_hash.chars().take(16).collect::<String>();
     if hash_key.is_empty() {
-        return Err(format!("Duplicate source has no SHA-256: {}", source.display()));
+        return Err(format!(
+            "Duplicate source has no SHA-256: {}",
+            source.display()
+        ));
     }
     let source_relative = source.strip_prefix(root).unwrap_or(source);
     let parts = if is_mods_root(root) {
-        vec!["Packages".to_string(), language.duplicates_folder().to_string()]
+        vec![
+            "Packages".to_string(),
+            language.duplicates_folder().to_string(),
+        ]
     } else {
         vec![language.duplicates_folder().to_string()]
     };
@@ -882,7 +1219,9 @@ fn duplicate_quarantine_destination(
     }
 
     let mut candidate = PathBuf::new();
-    for part in &parts { candidate.push(part); }
+    for part in &parts {
+        candidate.push(part);
+    }
     candidate.push(file_name);
     let occupied = |relative: &Path| {
         root.join(relative).exists()
@@ -891,8 +1230,14 @@ fn duplicate_quarantine_destination(
 
     if occupied(&candidate) {
         let path = Path::new(file_name);
-        let stem = path.file_stem().and_then(|v| v.to_str()).unwrap_or("package");
-        let extension = path.extension().and_then(|v| v.to_str()).unwrap_or("package");
+        let stem = path
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .unwrap_or("package");
+        let extension = path
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("package");
         for attempt in 0usize..10_000 {
             let name = if attempt == 0 {
                 format!("{stem} [{hash_key}].{extension}")
@@ -900,13 +1245,18 @@ fn duplicate_quarantine_destination(
                 format!("{stem} [{hash_key}-{attempt}].{extension}")
             };
             let mut alternative = PathBuf::new();
-            for part in &parts { alternative.push(part); }
+            for part in &parts {
+                alternative.push(part);
+            }
             alternative.push(name);
             if !occupied(&alternative) {
                 return Ok((alternative, parts));
             }
         }
-        return Err(format!("Could not allocate duplicate quarantine path for {}", source.display()));
+        return Err(format!(
+            "Could not allocate duplicate quarantine path for {}",
+            source.display()
+        ));
     }
     Ok((candidate, parts))
 }
@@ -954,14 +1304,20 @@ fn append_nested_duplicate_quarantine_items(
     nested.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
 
     for source in nested {
-        let source_canonical = source
-            .canonicalize()
-            .map_err(|error| format!("Could not resolve nested duplicate {}: {error}", source.display()))?;
-        let (hash, size) = sha256_file(&source_canonical)
-            .map_err(|error| format!("Could not hash nested duplicate {}: {error}", source.display()))?;
-        let (destination_relative, destination_parts) = duplicate_quarantine_destination(
-            root, language, &source_canonical, &hash, reserved,
-        )?;
+        let source_canonical = source.canonicalize().map_err(|error| {
+            format!(
+                "Could not resolve nested duplicate {}: {error}",
+                source.display()
+            )
+        })?;
+        let (hash, size) = sha256_file(&source_canonical).map_err(|error| {
+            format!(
+                "Could not hash nested duplicate {}: {error}",
+                source.display()
+            )
+        })?;
+        let (destination_relative, destination_parts) =
+            duplicate_quarantine_destination(root, language, &source_canonical, &hash, reserved)?;
         let destination = root.join(&destination_relative);
         if same_path_case_insensitive(&source_canonical, &destination) {
             continue;
@@ -995,9 +1351,14 @@ fn append_nested_duplicate_quarantine_items(
 }
 
 fn preview_extension(path: &Path) -> bool {
-    path.extension().and_then(|value| value.to_str()).is_some_and(|value| {
-        matches!(value.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff")
-    })
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff"
+            )
+        })
 }
 
 /// Legacy creator folders often contain screenshots next to packages. Keep
@@ -1008,6 +1369,7 @@ fn append_preview_image_items(
     root: &Path,
     language: AppLanguage,
     selected: &HashSet<PathBuf>,
+    selected_roots: &[PathBuf],
     scan_by_canonical: &HashMap<PathBuf, &ScanPackageItem>,
     items: &mut Vec<PlanItem>,
     directories: &mut BTreeSet<String>,
@@ -1015,43 +1377,95 @@ fn append_preview_image_items(
 ) -> Result<(), String> {
     let mut legacy_roots = BTreeSet::<String>::new();
     for selected_path in selected {
-        let Some(item) = scan_by_canonical.get(selected_path) else { continue; };
+        let Some(item) = scan_by_canonical.get(selected_path) else {
+            continue;
+        };
         let relative = Path::new(&item.relative_path);
         let Some(first) = relative.components().find_map(|component| match component {
             Component::Normal(value) => Some(value.to_string_lossy().to_string()),
             _ => None,
-        }) else { continue; };
+        }) else {
+            continue;
+        };
         if !first.eq_ignore_ascii_case(language.previews_folder())
             && !first.eq_ignore_ascii_case(language.duplicates_folder())
         {
             legacy_roots.insert(first);
         }
     }
+    for selected_root in selected_roots {
+        let Ok(relative) = selected_root.strip_prefix(root) else {
+            continue;
+        };
+        if let Some(Component::Normal(first)) = relative.components().next() {
+            let first = first.to_string_lossy().to_string();
+            if !first.eq_ignore_ascii_case(language.previews_folder())
+                && !first.eq_ignore_ascii_case(language.duplicates_folder())
+            {
+                legacy_roots.insert(first);
+            }
+        }
+    }
 
     for legacy_root in legacy_roots {
         let directory = root.join(&legacy_root);
-        if !directory.is_dir() { continue; }
+        if !directory.is_dir() {
+            continue;
+        }
+        let explicitly_selected = selected_roots.iter().any(|selected_root| {
+            selected_root
+                .strip_prefix(root)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .and_then(|component| match component {
+                    Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+                    _ => None,
+                })
+                .is_some_and(|first| first.eq_ignore_ascii_case(&legacy_root))
+        });
         let has_package_context = WalkDir::new(&directory)
             .follow_links(false)
             .into_iter()
             .flatten()
-            .any(|entry| entry.file_type().is_file() && {
-                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                name.ends_with(".package") || name.ends_with(".package.disabled") || name.ends_with(".sims3pack")
+            .any(|entry| {
+                entry.file_type().is_file() && {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    name.ends_with(".package")
+                        || name.ends_with(".package.disabled")
+                        || name.ends_with(".sims3pack")
+                }
             });
-        if !has_package_context { continue; }
+        if !has_package_context && !explicitly_selected {
+            continue;
+        }
 
-        for entry in WalkDir::new(&directory).follow_links(false).into_iter().flatten() {
-            if !entry.file_type().is_file() || !preview_extension(entry.path()) { continue; }
-            let source = entry.path().canonicalize()
-                .map_err(|error| format!("Could not resolve preview {}: {error}", entry.path().display()))?;
-            let relative = source.strip_prefix(root)
+        for entry in WalkDir::new(&directory)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
+            if !entry.file_type().is_file() || !preview_extension(entry.path()) {
+                continue;
+            }
+            let source = entry.path().canonicalize().map_err(|error| {
+                format!(
+                    "Could not resolve preview {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            let relative = source
+                .strip_prefix(root)
                 .map_err(|_| format!("Preview escaped selected root: {}", source.display()))?;
-            let mut relative_parts = relative.components().filter_map(|component| match component {
-                Component::Normal(value) => Some(value.to_string_lossy().to_string()),
-                _ => None,
-            }).collect::<Vec<_>>();
-            if relative_parts.is_empty() { continue; }
+            let mut relative_parts = relative
+                .components()
+                .filter_map(|component| match component {
+                    Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if relative_parts.is_empty() {
+                continue;
+            }
             let origin = relative_parts.remove(0);
             // The filename is appended by destination_path; keep only its
             // parent directories in destination_parts.
@@ -1059,36 +1473,74 @@ fn append_preview_image_items(
             let mut destination_parts = vec![language.previews_folder().to_string(), origin];
             destination_parts.extend(relative_parts.iter().cloned());
             destination_parts = ensure_packages_destination(root, &destination_parts);
-            let file_name = source.file_name().ok_or_else(|| "Preview has no filename".to_string())?;
+            let file_name = source
+                .file_name()
+                .ok_or_else(|| "Preview has no filename".to_string())?;
             let destination = destination_path(root, &destination_parts, file_name);
-            let destination_relative = destination.strip_prefix(root).map(relative_key)
+            let destination_relative = destination
+                .strip_prefix(root)
+                .map(relative_key)
                 .map_err(|_| "Preview destination escaped selected root.".to_string())?;
             let (sha256, size) = sha256_file(&source)
                 .map_err(|error| format!("Could not hash preview {}: {error}", source.display()))?;
             if same_path_case_insensitive(&source, &destination) {
                 stats.already_organized += 1;
                 items.push(PlanItem {
-                    id: format!("preview:{}", sha256), name: file_name.to_string_lossy().to_string(),
-                    source_path: source.to_string_lossy().to_string(), source_relative_path: relative_key(relative),
-                    destination_path: Some(destination.to_string_lossy().to_string()), destination_relative_path: Some(destination_relative),
-                    classification_status: "preview".to_string(), classification_reason: Some("Image preview preserved with its legacy origin context.".to_string()),
-                    plan_status: "already_organized_preview".to_string(), sha256: Some(sha256), size,
+                    id: format!("preview:{}", sha256),
+                    name: file_name.to_string_lossy().to_string(),
+                    source_path: source.to_string_lossy().to_string(),
+                    source_relative_path: relative_key(relative),
+                    destination_path: Some(destination.to_string_lossy().to_string()),
+                    destination_relative_path: Some(destination_relative),
+                    classification_status: "preview".to_string(),
+                    classification_reason: Some(
+                        "Image preview preserved with its legacy origin context.".to_string(),
+                    ),
+                    plan_status: "already_organized_preview".to_string(),
+                    sha256: Some(sha256),
+                    size,
                     warnings: Vec::new(),
                 });
                 continue;
             }
             if destination.exists() {
-                let (target_hash, _) = sha256_file(&destination)
-                    .map_err(|error| format!("Could not hash preview collision {}: {error}", destination.display()))?;
+                let (target_hash, _) = sha256_file(&destination).map_err(|error| {
+                    format!(
+                        "Could not hash preview collision {}: {error}",
+                        destination.display()
+                    )
+                })?;
                 let same = target_hash.eq_ignore_ascii_case(&sha256);
-                if same { stats.duplicate_skipped += 1; } else { stats.collision_different_content += 1; }
+                if same {
+                    stats.duplicate_skipped += 1;
+                } else {
+                    stats.collision_different_content += 1;
+                }
                 items.push(PlanItem {
-                    id: format!("preview:{}", sha256), name: file_name.to_string_lossy().to_string(),
-                    source_path: source.to_string_lossy().to_string(), source_relative_path: relative_key(relative),
-                    destination_path: Some(destination.to_string_lossy().to_string()), destination_relative_path: Some(destination_relative),
-                    classification_status: "preview".to_string(), classification_reason: Some("Image preview preserved with its legacy origin context.".to_string()),
-                    plan_status: if same { "duplicate_skipped" } else { "collision_different_content" }.to_string(), sha256: Some(sha256), size,
-                    warnings: vec![if same { "Preview destination already contains identical bytes; no overwrite.".to_string() } else { "Preview destination contains different bytes; no overwrite.".to_string() }],
+                    id: format!("preview:{}", sha256),
+                    name: file_name.to_string_lossy().to_string(),
+                    source_path: source.to_string_lossy().to_string(),
+                    source_relative_path: relative_key(relative),
+                    destination_path: Some(destination.to_string_lossy().to_string()),
+                    destination_relative_path: Some(destination_relative),
+                    classification_status: "preview".to_string(),
+                    classification_reason: Some(
+                        "Image preview preserved with its legacy origin context.".to_string(),
+                    ),
+                    plan_status: if same {
+                        "duplicate_skipped"
+                    } else {
+                        "collision_different_content"
+                    }
+                    .to_string(),
+                    sha256: Some(sha256),
+                    size,
+                    warnings: vec![if same {
+                        "Preview destination already contains identical bytes; no overwrite."
+                            .to_string()
+                    } else {
+                        "Preview destination contains different bytes; no overwrite.".to_string()
+                    }],
                 });
                 continue;
             }
@@ -1101,6 +1553,173 @@ fn append_preview_image_items(
                 classification_status: "preview".to_string(), classification_reason: Some("Image preview moved with its complete legacy origin context; it is not a DBPF package.".to_string()),
                 plan_status: "ready_preview_image".to_string(), sha256: Some(sha256), size,
                 warnings: Vec::new(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Move non-DBPF companions out of explicitly selected legacy roots. They
+/// cannot be classified as packages, but leaving them behind would keep the
+/// obsolete creator/category tree alive forever. The complete relative origin
+/// is retained below #Sem Categoria\Arquivos Auxiliares and collisions are
+/// handled by the same no-overwrite rule as packages.
+fn append_auxiliary_items(
+    root: &Path,
+    language: AppLanguage,
+    selected_roots: &[PathBuf],
+    items: &mut Vec<PlanItem>,
+    directories: &mut BTreeSet<String>,
+    stats: &mut PlanStats,
+) -> Result<(), String> {
+    let roots = selected_roots.iter().cloned().collect::<BTreeSet<_>>();
+    let preview_folder = language.previews_folder();
+    let duplicate_folder = language.duplicates_folder();
+    let uncategorized_folder = language.uncategorized_fallback_folder();
+
+    for legacy_root in roots {
+        if !legacy_root.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&legacy_root)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let source = entry.path().canonicalize().map_err(|error| {
+                format!(
+                    "Could not resolve auxiliary file {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            let relative = source.strip_prefix(root).map_err(|_| {
+                format!("Auxiliary file escaped selected root: {}", source.display())
+            })?;
+            let relative_parts = relative
+                .components()
+                .filter_map(|component| match component {
+                    Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if relative_parts.is_empty() {
+                continue;
+            }
+            let name = relative_parts.last().cloned().unwrap_or_default();
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".package")
+                || lower.ends_with(".package.disabled")
+                || preview_extension(&source)
+            {
+                continue;
+            }
+            if relative_parts.first().is_some_and(|part| {
+                part.eq_ignore_ascii_case(preview_folder)
+                    || part.eq_ignore_ascii_case(duplicate_folder)
+                    || part.eq_ignore_ascii_case(uncategorized_folder)
+            }) {
+                continue;
+            }
+
+            let origin = relative_parts[0].clone();
+            let mut destination_parts = vec![
+                uncategorized_folder.to_string(),
+                "Arquivos Auxiliares".to_string(),
+                origin,
+            ];
+            destination_parts.extend(
+                relative_parts[1..relative_parts.len().saturating_sub(1)]
+                    .iter()
+                    .cloned(),
+            );
+            destination_parts = ensure_packages_destination(root, &destination_parts);
+            let mut destination =
+                destination_path(root, &destination_parts, std::ffi::OsStr::new(&name));
+            let (sha256, size) = sha256_file(&source).map_err(|error| {
+                format!(
+                    "Could not hash auxiliary file {}: {error}",
+                    source.display()
+                )
+            })?;
+            let mut status = "ready_auxiliary".to_string();
+            let mut warning = "Non-package legacy companion moved intact to #Sem Categoria with its source context.".to_string();
+
+            if destination.exists() && !same_path_case_insensitive(&source, &destination) {
+                let (existing_hash, _) = sha256_file(&destination).map_err(|error| {
+                    format!(
+                        "Could not hash auxiliary collision {}: {error}",
+                        destination.display()
+                    )
+                })?;
+                if existing_hash.eq_ignore_ascii_case(&sha256) {
+                    status = "duplicate_skipped".to_string();
+                    warning = "An identical auxiliary file already exists in #Sem Categoria; no overwrite was performed.".to_string();
+                } else {
+                    let file = Path::new(&name);
+                    let stem = file
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("auxiliary");
+                    let extension = file
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("");
+                    for attempt in 0usize..10_000 {
+                        let candidate_name = if extension.is_empty() {
+                            format!("{stem} [{}-{}]", &sha256[..sha256.len().min(8)], attempt)
+                        } else {
+                            format!(
+                                "{stem} [{}-{}].{extension}",
+                                &sha256[..sha256.len().min(8)],
+                                attempt
+                            )
+                        };
+                        let candidate = destination_path(
+                            root,
+                            &destination_parts,
+                            std::ffi::OsStr::new(&candidate_name),
+                        );
+                        if !candidate.exists() {
+                            destination = candidate;
+                            break;
+                        }
+                    }
+                    warning = "A different auxiliary file used a deterministic hash suffix; no overwrite was performed.".to_string();
+                }
+            }
+
+            let destination_relative = destination
+                .strip_prefix(root)
+                .map(relative_key)
+                .map_err(|_| "Auxiliary destination escaped selected root.".to_string())?;
+            let already = same_path_case_insensitive(&source, &destination);
+            if already {
+                status = "already_organized_auxiliary".to_string();
+                stats.already_organized += 1;
+            } else if status == "duplicate_skipped" {
+                stats.duplicate_skipped += 1;
+            } else {
+                add_missing_directories(root, &destination_parts, directories);
+                stats.ready += 1;
+            }
+            items.push(PlanItem {
+                id: format!("auxiliary:{}", sha256),
+                name,
+                source_path: source.to_string_lossy().to_string(),
+                source_relative_path: relative_key(relative),
+                destination_path: Some(destination.to_string_lossy().to_string()),
+                destination_relative_path: Some(destination_relative),
+                classification_status: "auxiliary".to_string(),
+                classification_reason: Some(
+                    "Non-package file preserved without DBPF classification.".to_string(),
+                ),
+                plan_status: status,
+                sha256: Some(sha256),
+                size,
+                warnings: vec![warning],
             });
         }
     }
@@ -1151,8 +1770,11 @@ fn retarget_item_to_not_categorized(
 // Disabled files are a distinct load state and must not be selected as the
 // keeper of an enabled group (or vice versa).
 fn is_disabled_package_path(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name.to_string_lossy()
-        .to_ascii_lowercase().ends_with(".package.disabled"))
+    path.file_name().is_some_and(|name| {
+        name.to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with(".package.disabled")
+    })
 }
 
 fn is_selected_content_keeper(
@@ -1161,9 +1783,11 @@ fn is_selected_content_keeper(
     selected_hashes: &HashMap<PathBuf, String>,
 ) -> bool {
     let inactive = is_disabled_package_path(source);
-    let keeper = selected_hashes.iter()
-        .filter(|(path, hash)| hash.eq_ignore_ascii_case(sha256)
-            && is_disabled_package_path(path) == inactive)
+    let keeper = selected_hashes
+        .iter()
+        .filter(|(path, hash)| {
+            hash.eq_ignore_ascii_case(sha256) && is_disabled_package_path(path) == inactive
+        })
         .map(|(path, _)| path)
         .min_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
     keeper.is_none_or(|path| path == source)
@@ -1182,16 +1806,21 @@ fn canonical_destination_for_keeper(
 ) -> Option<PathBuf> {
     let file_name = Path::new(&item.name).file_name()?;
     if !source_uses_overrides(root, source) {
-        let model_destination = resolve_model_destination(
-            manual_model, root, source, sha256, &item.destination_parts,
-        ).ok()?;
+        let model_destination =
+            resolve_model_destination(manual_model, root, source, sha256, &item.destination_parts)
+                .ok()?;
         return Some(destination_path(root, &model_destination.parts, file_name));
     }
     // Overrides are a separate loading branch: the Packages-only model must
     // never turn an Override into a Packages move.
     let (parts, _) = fit_destination_to_resource_cfg(
-        root, source, file_name, &item.destination_parts, resource_cfg,
-    ).ok()?;
+        root,
+        source,
+        file_name,
+        &item.destination_parts,
+        resource_cfg,
+    )
+    .ok()?;
     Some(destination_path(root, &parts, file_name))
 }
 
@@ -1208,13 +1837,21 @@ fn is_selected_content_keeper_for_scan(
     let mut candidates = selected_hashes
         .iter()
         .filter(|(path, hash)| {
-            hash.eq_ignore_ascii_case(sha256)
-                && is_disabled_package_path(path) == inactive
+            hash.eq_ignore_ascii_case(sha256) && is_disabled_package_path(path) == inactive
         })
         .map(|(path, _)| {
             let canonical = scan_by_canonical
                 .get(path)
-                .and_then(|item| canonical_destination_for_keeper(root, path, sha256, item, manual_model, resource_cfg))
+                .and_then(|item| {
+                    canonical_destination_for_keeper(
+                        root,
+                        path,
+                        sha256,
+                        item,
+                        manual_model,
+                        resource_cfg,
+                    )
+                })
                 .is_some_and(|destination| same_path_case_insensitive(path, &destination));
             let relative = path
                 .strip_prefix(root)
@@ -1232,7 +1869,9 @@ fn is_selected_content_keeper_for_scan(
     }
 
     candidates.sort_by_key(|(_, canonical, relative)| (!*canonical, relative.clone()));
-    candidates.first().is_none_or(|(path, _, _)| *path == source)
+    candidates
+        .first()
+        .is_none_or(|(path, _, _)| *path == source)
 }
 
 fn selected_content_keeper_relative_path(
@@ -1248,13 +1887,21 @@ fn selected_content_keeper_relative_path(
     let mut candidates = selected_hashes
         .iter()
         .filter(|(path, hash)| {
-            hash.eq_ignore_ascii_case(sha256)
-                && is_disabled_package_path(path) == inactive
+            hash.eq_ignore_ascii_case(sha256) && is_disabled_package_path(path) == inactive
         })
         .map(|(path, _)| {
             let canonical = scan_by_canonical
                 .get(path)
-                .and_then(|item| canonical_destination_for_keeper(root, path, sha256, item, manual_model, resource_cfg))
+                .and_then(|item| {
+                    canonical_destination_for_keeper(
+                        root,
+                        path,
+                        sha256,
+                        item,
+                        manual_model,
+                        resource_cfg,
+                    )
+                })
                 .is_some_and(|destination| same_path_case_insensitive(path, &destination));
             let relative = path
                 .strip_prefix(root)
@@ -1267,7 +1914,10 @@ fn selected_content_keeper_relative_path(
         return None;
     }
     candidates.sort_by_key(|(canonical, key, _)| (!*canonical, key.clone()));
-    candidates.into_iter().next().map(|(_, _, relative)| relative)
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, _, relative)| relative)
 }
 
 fn index_exact_duplicates(
@@ -1298,14 +1948,21 @@ fn index_exact_duplicates(
         } else {
             // Reuse the same fingerprints the Duplicates analysis already
             // recorded. Never trust a cached hash if size or mtime changed.
-            let cached_hash = cache.entries.get(path.to_string_lossy().as_ref())
-                .and_then(|cached| {
-                    let metadata = fs::metadata(&path).ok()?;
-                    let modified = metadata.modified().ok()?
-                        .duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-                    (cached.size == metadata.len() && cached.modified_ns == modified)
-                        .then(|| cached.file_sha256.clone())
-                });
+            let cached_hash =
+                cache
+                    .entries
+                    .get(path.to_string_lossy().as_ref())
+                    .and_then(|cached| {
+                        let metadata = fs::metadata(&path).ok()?;
+                        let modified = metadata
+                            .modified()
+                            .ok()?
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()?
+                            .as_nanos();
+                        (cached.size == metadata.len() && cached.modified_ns == modified)
+                            .then(|| cached.file_sha256.clone())
+                    });
             match cached_hash {
                 Some(hash) => hash,
                 None => match sha256_file(&path) {
@@ -1314,7 +1971,8 @@ fn index_exact_duplicates(
                 },
             }
         };
-        by_hash.entry(hash.to_ascii_uppercase())
+        by_hash
+            .entry(hash.to_ascii_uppercase())
             .or_default()
             .push(item.relative_path.clone());
     }
@@ -1322,22 +1980,33 @@ fn index_exact_duplicates(
     // persistent fingerprint cache remains valid evidence when the current
     // size and modification timestamp match the file on disk.
     for (raw_path, cached) in &cache.entries {
-        let Ok(path) = PathBuf::from(raw_path).canonicalize() else { continue; };
+        let Ok(path) = PathBuf::from(raw_path).canonicalize() else {
+            continue;
+        };
         if indexed_paths.contains(&path)
             || !path_is_within_root(root, &path)
             || !selected_sizes.contains(&cached.size)
         {
             continue;
         }
-        let Ok(metadata) = fs::metadata(&path) else { continue; };
-        let Ok(modified) = metadata.modified()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| std::io::Error::other(error.to_string())))
-        else { continue; };
-        if metadata.len() != cached.size || modified.as_nanos() != cached.modified_ns { continue; }
-        let relative = path.strip_prefix(root).map(relative_key)
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified().and_then(|time| {
+            time.duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        }) else {
+            continue;
+        };
+        if metadata.len() != cached.size || modified.as_nanos() != cached.modified_ns {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map(relative_key)
             .unwrap_or_else(|_| relative_key(&path));
-        by_hash.entry(cached.file_sha256.to_ascii_uppercase())
+        by_hash
+            .entry(cached.file_sha256.to_ascii_uppercase())
             .or_default()
             .push(relative);
     }
@@ -1371,8 +2040,10 @@ fn detect_merged_resource_supersets(
                 && loose_resources.len() < merged_resources.len()
                 && loose_resources.is_subset(merged_resources)
             {
-                related.entry(merged_name.to_lowercase())
-                    .or_default().push(loose_name.clone());
+                related
+                    .entry(merged_name.to_lowercase())
+                    .or_default()
+                    .push(loose_name.clone());
             }
         }
     }
@@ -1402,33 +2073,43 @@ fn index_suspected_merged_sliders(
         let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
-        let Ok(modified_ns) = metadata.modified()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| std::io::Error::other(error.to_string())))
+        let Ok(modified_ns) = metadata
+            .modified()
+            .and_then(|time| {
+                time.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| std::io::Error::other(error.to_string()))
+            })
             .map(|duration| duration.as_nanos())
         else {
             continue;
         };
-        if cached.size != metadata.len() || cached.modified_ns != modified_ns
+        if cached.size != metadata.len()
+            || cached.modified_ns != modified_ns
             || cached.parse_error.is_some()
         {
             continue;
         }
-        let substantive = cached.resources.iter()
+        let substantive = cached
+            .resources
+            .iter()
             .filter(|resource| !matches!(resource.type_id, 0x2205_57DA | 0x0166_038C))
             .map(|resource| {
-                format!("{:08X}-{:08X}-{:016X}-{}",
-                    resource.type_id, resource.group, resource.instance, resource.payload_sha256)
+                format!(
+                    "{:08X}-{:08X}-{:016X}-{}",
+                    resource.type_id, resource.group, resource.instance, resource.payload_sha256
+                )
             })
             .collect::<BTreeSet<_>>();
         let direct_slider = item.sub_category.as_deref() == Some("Sliders")
             && cached.resources.iter().any(|r| {
-                matches!(r.type_id, 0x0358_B08A | 0xB52F_5055 | 0x0355_E0A6 | 0x067C_AA11)
+                matches!(
+                    r.type_id,
+                    0x0358_B08A | 0xB52F_5055 | 0x0355_E0A6 | 0x067C_AA11
+                )
             });
         indexed.push((item.relative_path.clone(), substantive, direct_slider));
     }
     detect_merged_resource_supersets(&indexed)
-
 }
 
 fn mark_intra_plan_destination_collisions(items: &mut [PlanItem], stats: &mut PlanStats) {
@@ -1486,17 +2167,48 @@ fn mark_intra_plan_destination_collisions(items: &mut [PlanItem], stats: &mut Pl
     }
 }
 
+fn move_intra_plan_conflicts_to_review(
+    root: &Path,
+    language: AppLanguage,
+    items: &mut [PlanItem],
+    directories: &mut BTreeSet<String>,
+    stats: &mut PlanStats,
+) -> Result<(), String> {
+    for item in items.iter_mut().filter(|item| {
+        item.plan_status == "collision_different_content"
+            && !source_uses_overrides(root, Path::new(&item.source_path))
+    }) {
+        let (relative, parts) = fallback_relative_path(
+            root,
+            language,
+            &item.source_relative_path,
+            item.sha256.as_deref().unwrap_or_default(),
+        )?;
+        let destination = root.join(&relative);
+        add_missing_directories(root, &parts, directories);
+        item.destination_path = Some(destination.to_string_lossy().to_string());
+        item.destination_relative_path = Some(relative_key(&relative));
+        item.plan_status = "ready_conflict_review".to_string();
+        item.classification_reason = Some(format!(
+            "{} | Multiple selected packages had different content at the same canonical filename; moved to review fallback.",
+            item.classification_reason.clone().unwrap_or_default()
+        ));
+        item.warnings.push(
+            "The conflicting source was moved intact to #Sem Categoria; no version was overwritten or discarded.".to_string(),
+        );
+        stats.collision_different_content = stats.collision_different_content.saturating_sub(1);
+        stats.ready += 1;
+    }
+    Ok(())
+}
+
 fn plan_can_execute(stats: &PlanStats, read_only: bool) -> bool {
     // Blocked items are excluded from movement. They must not prevent the
     // independently validated ready items from being organized and restored.
     !read_only && (stats.ready > 0 || stats.empty_folders_to_clean > 0)
 }
 
-fn manifest_preview(
-    root: &Path,
-    language: AppLanguage,
-    ready_items: &[PlanItem],
-) -> String {
+fn manifest_preview(root: &Path, language: AppLanguage, ready_items: &[PlanItem]) -> String {
     let mut out = String::new();
     out.push_str("S3CC MANAGER RESTORE MANIFEST\n");
     out.push_str("version=1\n");
@@ -1505,7 +2217,10 @@ fn manifest_preview(
         Local::now().to_rfc3339_opts(SecondsFormat::Secs, true)
     ));
     out.push_str(&format!("mode=PREVIEW\n"));
-    out.push_str(&format!("organization_language={}\n", language_code(language)));
+    out.push_str(&format!(
+        "organization_language={}\n",
+        language_code(language)
+    ));
     out.push_str(&format!("root={}\n", root.display()));
     out.push_str(&format!("files={}\n\n", ready_items.len()));
 
@@ -1572,8 +2287,11 @@ fn scan_selected_roots(
     let mut stats = ScanStats::default();
     for top in top_level {
         let branch = root.join(&top);
-        if !branch.is_dir() { continue; }
-        let mut branch_scan = scan_packages_core(branch.to_string_lossy().to_string(), language, None)?;
+        if !branch.is_dir() {
+            continue;
+        }
+        let mut branch_scan =
+            scan_packages_core(branch.to_string_lossy().to_string(), language, None)?;
         stats.packages += branch_scan.stats.packages;
         stats.classified += branch_scan.stats.classified;
         stats.mixed += branch_scan.stats.mixed;
@@ -1590,7 +2308,11 @@ fn scan_selected_roots(
         items.append(&mut branch_scan.items);
     }
     items.sort_by_key(|item| item.relative_path.to_ascii_lowercase());
-    Ok(ScanResult { root: root.to_string_lossy().to_string(), items, stats })
+    Ok(ScanResult {
+        root: root.to_string_lossy().to_string(),
+        items,
+        stats,
+    })
 }
 
 #[tauri::command]
@@ -1632,11 +2354,13 @@ pub fn build_organization_plan_with_cfg(
     // A Mods root may also contain Overrides, DCCache and other directories.
     // Never organize those as Packages or create category folders beside Packages.
     let packages_root = if is_mods_root(&root) {
-        let path = root.join("Packages")
-            .canonicalize()
-            .map_err(|_| "The selected Mods folder must contain a Packages directory.".to_string())?;
+        let path = root.join("Packages").canonicalize().map_err(|_| {
+            "The selected Mods folder must contain a Packages directory.".to_string()
+        })?;
         if !path.is_dir() || !path_is_within_root(&root, &path) {
-            return Err("Mods/Packages is not a safe directory inside the selected Mods root.".to_string());
+            return Err(
+                "Mods/Packages is not a safe directory inside the selected Mods root.".to_string(),
+            );
         }
         Some(path)
     } else {
@@ -1644,6 +2368,7 @@ pub fn build_organization_plan_with_cfg(
     };
 
     let mut selected = HashSet::<PathBuf>::new();
+    let mut selected_roots = Vec::<PathBuf>::new();
     for raw in &selected_paths {
         let canonical = PathBuf::from(raw)
             .canonicalize()
@@ -1651,7 +2376,25 @@ pub fn build_organization_plan_with_cfg(
         if !path_is_within_root(&root, &canonical) {
             return Err(format!("Selected file escaped the selected root: {raw}"));
         }
-        selected.insert(canonical);
+        if canonical.is_dir() {
+            selected_roots.push(canonical.clone());
+            for entry in WalkDir::new(&canonical)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+            {
+                if entry.file_type().is_file() && is_package_file(entry.path()) {
+                    selected.insert(entry.path().canonicalize().map_err(|error| {
+                        format!(
+                            "Could not resolve selected package {}: {error}",
+                            entry.path().display()
+                        )
+                    })?);
+                }
+            }
+        } else {
+            selected.insert(canonical);
+        }
     }
 
     let workspace = load_workspace_for_root(&root);
@@ -1686,8 +2429,12 @@ pub fn build_organization_plan_with_cfg(
     let mut selected_hashes = HashMap::<PathBuf, String>::new();
     let mut selected_hash_set = HashSet::<String>::new();
     for path in &selected {
-        let (hash, _) = sha256_file(path)
-            .map_err(|error| format!("Could not hash selected package {}: {error}", path.display()))?;
+        let (hash, _) = sha256_file(path).map_err(|error| {
+            format!(
+                "Could not hash selected package {}: {error}",
+                path.display()
+            )
+        })?;
         selected_hashes.insert(path.clone(), hash.clone());
         selected_hash_set.insert(hash);
     }
@@ -1753,8 +2500,11 @@ pub fn build_organization_plan_with_cfg(
         // or recovery trees, and keep Overrides in Overrides.
         if is_mods_system_source(&root, &source_canonical) {
             stats.blocked += 1;
-            items.push(make_blocked(item,
-                "System/cache/recovery folder is protected: this package will not be moved.".to_string()));
+            items.push(make_blocked(
+                item,
+                "System/cache/recovery folder is protected: this package will not be moved."
+                    .to_string(),
+            ));
             continue;
         }
 
@@ -1791,7 +2541,8 @@ pub fn build_organization_plan_with_cfg(
                 stats.blocked += 1;
                 items.push(make_blocked(
                     item,
-                    "Merged Sim export destination is outside the selected loading root.".to_string(),
+                    "Merged Sim export destination is outside the selected loading root."
+                        .to_string(),
                 ));
                 continue;
             }
@@ -1846,8 +2597,16 @@ pub fn build_organization_plan_with_cfg(
             continue;
         }
         let is_override_source = source_uses_overrides(&root, &source_canonical);
-        let hash_model_destination = if is_override_source { None } else {
-            Some(resolve_model_destination(&manual_model, &root, &source_canonical, &source_hash, &item.destination_parts))
+        let hash_model_destination = if is_override_source {
+            None
+        } else {
+            Some(resolve_model_destination(
+                &manual_model,
+                &root,
+                &source_canonical,
+                &source_hash,
+                &item.destination_parts,
+            ))
         };
         let outside_active_branch = packages_root
             .as_ref()
@@ -1855,8 +2614,8 @@ pub fn build_organization_plan_with_cfg(
             && !source_uses_overrides(&root, &source_canonical);
 
         let duplicates = duplicate_peers.get(&source_hash.to_ascii_uppercase());
-        if let Some(peers) = duplicates.filter(|peers| peers.len() > 1)
-            .filter(|_| !is_selected_content_keeper_for_scan(
+        if let Some(peers) = duplicates.filter(|peers| peers.len() > 1).filter(|_| {
+            !is_selected_content_keeper_for_scan(
                 &root,
                 &source_canonical,
                 &source_hash,
@@ -1864,21 +2623,20 @@ pub fn build_organization_plan_with_cfg(
                 &scan_by_canonical,
                 &manual_model,
                 resource_cfg.as_ref(),
-            ))
-        {
+            )
+        }) {
             // A confirmed byte-identical extra copy is not silently stranded
             // in a legacy folder. Move it to a reversible quarantine bucket;
             // the keeper continues through normal canonical-model handling.
             // Suspected merged packages are handled separately below and are
             // intentionally never auto-quarantined.
-            let (quarantine_relative, quarantine_parts) =
-                duplicate_quarantine_destination(
-                    &root,
-                    language,
-                    &source_canonical,
-                    &source_hash,
-                    &reserved_duplicate_destinations,
-                )?;
+            let (quarantine_relative, quarantine_parts) = duplicate_quarantine_destination(
+                &root,
+                language,
+                &source_canonical,
+                &source_hash,
+                &reserved_duplicate_destinations,
+            )?;
             let quarantine = root.join(&quarantine_relative);
             let already_quarantined = same_path_case_insensitive(&source_canonical, &quarantine);
             if already_quarantined {
@@ -1900,9 +2658,8 @@ pub fn build_organization_plan_with_cfg(
                 continue;
             }
             add_missing_directories(&root, &quarantine_parts, &mut directories);
-            reserved_duplicate_destinations.insert(
-                relative_key(&quarantine_relative).to_ascii_lowercase(),
-            );
+            reserved_duplicate_destinations
+                .insert(relative_key(&quarantine_relative).to_ascii_lowercase());
             stats.ready += 1;
             items.push(PlanItem {
                 id: item.id.clone(),
@@ -1970,17 +2727,10 @@ pub fn build_organization_plan_with_cfg(
         // original folder forever. Move safely selected unknowns to a review
         // area (with their source hierarchy intact). Do not redirect Overrides
         // or invalid/mixed packages without a manual decision.
-        if item.status == "unknown" && !is_override_source {
-            if let Some(Err(reason)) = hash_model_destination.as_ref() {
-                stats.blocked += 1;
-                items.push(make_blocked(item, reason.clone()));
-                continue;
-            }
-            if hash_model_destination.is_some() {
-                // A model hash match continues through the exact destination
-                // path below. Unknown packages without a safe model match are
-                // protected for review instead of falling back by approximation.
-            } else {
+        if item.status != "classified"
+            && !is_override_source
+            && !(item.status == "unknown" && matches!(hash_model_destination.as_ref(), Some(Ok(_))))
+        {
             let (fallback_relative, fallback_parts) =
                 fallback_relative_path(&root, language, &item.relative_path, &source_hash)?;
             // The fallback may choose a unique SHA-named file if its normal
@@ -1991,10 +2741,9 @@ pub fn build_organization_plan_with_cfg(
                 if !same_path_case_insensitive(&original_target, &source_canonical)
                     && original_target.is_file()
                 {
-                    let (existing_hash, _) = sha256_file(&original_target)
-                        .map_err(|error| format!(
-                            "Could not verify existing Not Categorized package: {error}"
-                        ))?;
+                    let (existing_hash, _) = sha256_file(&original_target).map_err(|error| {
+                        format!("Could not verify existing Not Categorized package: {error}")
+                    })?;
                     if existing_hash.eq_ignore_ascii_case(&source_hash) {
                         stats.duplicate_skipped += 1;
                         items.push(PlanItem {
@@ -2018,21 +2767,37 @@ pub fn build_organization_plan_with_cfg(
             }
             if let Err(error) = validate_destination_parts(&fallback_parts) {
                 stats.blocked += 1;
-                items.push(make_blocked(item, error));
+                items.push(make_blocked(
+                    item,
+                    format!(
+                        "{error} (fallback='{}', parts={:?})",
+                        fallback_relative.display(),
+                        fallback_parts
+                    ),
+                ));
                 continue;
             }
-            let target_name = fallback_relative.file_name()
+            let target_name = fallback_relative
+                .file_name()
                 .ok_or_else(|| "Uncategorized fallback has no filename.".to_string())?;
-            let inactive = item.name.to_ascii_lowercase().ends_with(".package.disabled");
+            let inactive = item
+                .name
+                .to_ascii_lowercase()
+                .ends_with(".package.disabled");
             let cfg_opt_in = update_resource_cfg
                 && (is_mods_root(&root) || is_within_packages(&root) || is_within_overrides(&root));
-            let adjusted = if cfg_opt_in || inactive {
-                Ok((ensure_source_loading_branch(
-                    &root, &source_canonical, &fallback_parts), None))
+            let adjusted = if cfg_opt_in || inactive || item.status != "classified" {
+                Ok((
+                    ensure_source_loading_branch(&root, &source_canonical, &fallback_parts),
+                    None,
+                ))
             } else {
                 fit_destination_to_resource_cfg(
-                    &root, &source_canonical, target_name,
-                    &fallback_parts, resource_cfg.as_ref(),
+                    &root,
+                    &source_canonical,
+                    target_name,
+                    &fallback_parts,
+                    resource_cfg.as_ref(),
                 )
             };
             let (destination_parts, note) = match adjusted {
@@ -2047,7 +2812,10 @@ pub fn build_organization_plan_with_cfg(
             };
             if let Err(reason) = validate_destination_parts(&destination_parts) {
                 stats.blocked += 1;
-                items.push(make_blocked(item, reason));
+                items.push(make_blocked(
+                    item,
+                    format!("{reason} (adjusted parts={:?})", destination_parts),
+                ));
                 continue;
             }
             let destination = destination_path(&root, &destination_parts, target_name);
@@ -2055,11 +2823,14 @@ pub fn build_organization_plan_with_cfg(
                 || (is_mods_root(&root) && !destination.starts_with(root.join("Packages")))
             {
                 stats.blocked += 1;
-                items.push(make_blocked(item,
-                    "Not Categorized fallback escaped the Packages loading branch.".to_string()));
+                items.push(make_blocked(
+                    item,
+                    "Not Categorized fallback escaped the Packages loading branch.".to_string(),
+                ));
                 continue;
             }
-            let destination_relative = destination.strip_prefix(&root)
+            let destination_relative = destination
+                .strip_prefix(&root)
                 .map(relative_key)
                 .map_err(|_| "Not Categorized destination escaped selected root.".to_string())?;
             let already = same_path_case_insensitive(&source_canonical, &destination);
@@ -2068,7 +2839,9 @@ pub fn build_organization_plan_with_cfg(
                 let (existing_hash, _) = sha256_file(&destination)
                     .map_err(|error| format!("Cannot inspect fallback collision: {error}"))?;
                 existing_hash.eq_ignore_ascii_case(&source_hash)
-            } else { false };
+            } else {
+                false
+            };
             let destination_status = if already {
                 "already_organized"
             } else if collision_identical {
@@ -2078,9 +2851,14 @@ pub fn build_organization_plan_with_cfg(
             } else {
                 "ready_uncategorized"
             };
-            if already { stats.already_organized += 1; }
-            if collision_identical { stats.duplicate_skipped += 1; }
-            else if collision { stats.collision_different_content += 1; }
+            if already {
+                stats.already_organized += 1;
+            }
+            if collision_identical {
+                stats.duplicate_skipped += 1;
+            } else if collision {
+                stats.collision_different_content += 1;
+            }
             if !already && !collision {
                 add_missing_directories(&root, &destination_parts, &mut directories);
                 stats.ready += 1;
@@ -2111,16 +2889,19 @@ pub fn build_organization_plan_with_cfg(
                 }],
             });
             continue;
-            }
         }
 
         let verified_companion = item.status == "classified"
             && item.classification_confidence == "medium"
-            && item.detected_from.iter().any(|source| source == "ModFolderCompanion");
-        if is_override_source && (item.status != "classified"
-            || item.destination_parts.is_empty()
-            || (!matches!(item.classification_confidence.as_str(), "high" | "manual")
-                && !verified_companion))
+            && item
+                .detected_from
+                .iter()
+                .any(|source| source == "ModFolderCompanion");
+        if is_override_source
+            && (item.status != "classified"
+                || item.destination_parts.is_empty()
+                || (!matches!(item.classification_confidence.as_str(), "high" | "manual")
+                    && !verified_companion))
         {
             let source_size = fs::metadata(&source)
                 .map_err(|error| format!("Could not stat {}: {error}", source.display()))?
@@ -2167,7 +2948,10 @@ pub fn build_organization_plan_with_cfg(
                 destination_parts.join("\\")
             ));
         } else if profile.collapse_to_category
-            && !item.destination_parts.first().is_some_and(|first| first == "Scripts")
+            && !item
+                .destination_parts
+                .first()
+                .is_some_and(|first| first == "Scripts")
         {
             // A compacting profile must not destroy the canonical
             // Scripts > Gameplay > Verified Creator hierarchy.
@@ -2189,25 +2973,51 @@ pub fn build_organization_plan_with_cfg(
             destination_parts = prefixed;
         }
 
-        let model_destination = if is_override_source { None } else if let Some(result) = hash_model_destination.as_ref() {
+        let model_destination = if is_override_source {
+            None
+        } else if let Some(result) = hash_model_destination.as_ref() {
             match result {
                 Ok(destination) => Some(destination.clone()),
                 Err(reason) => {
-                    stats.blocked += 1;
-                    items.push(make_blocked(item, format!("No safe exact destination for '{}': {reason}", item.name)));
-                    continue;
+                    let (_, fallback_parts) =
+                        fallback_relative_path(&root, language, &item.relative_path, &source_hash)?;
+                    destination_parts = fallback_parts;
+                    classification_reason = Some(format!(
+                        "{} | Review fallback: {reason}",
+                        classification_reason.clone().unwrap_or_default()
+                    ));
+                    None
                 }
             }
         } else {
-            match resolve_model_destination(&manual_model, &root, &source_canonical, &source_hash, &destination_parts) {
+            match resolve_model_destination(
+                &manual_model,
+                &root,
+                &source_canonical,
+                &source_hash,
+                &destination_parts,
+            ) {
                 Ok(destination) => Some(destination),
-                Err(reason) => { stats.blocked += 1; items.push(make_blocked(item, reason)); continue; }
+                Err(reason) => {
+                    let (_, fallback_parts) =
+                        fallback_relative_path(&root, language, &item.relative_path, &source_hash)?;
+                    destination_parts = fallback_parts;
+                    classification_reason = Some(format!(
+                        "{} | Review fallback: {reason}",
+                        classification_reason.clone().unwrap_or_default()
+                    ));
+                    None
+                }
             }
         };
         let model_locked = model_destination.is_some();
         if let Some(model_destination) = &model_destination {
             destination_parts = model_destination.parts.clone();
-            classification_reason = Some(format!("{} | Official model destination: {}", classification_reason.unwrap_or_default(), model_destination.evidence));
+            classification_reason = Some(format!(
+                "{} | Official model destination: {}",
+                classification_reason.unwrap_or_default(),
+                model_destination.evidence
+            ));
         }
 
         let file_name = source
@@ -2218,12 +3028,18 @@ pub fn build_organization_plan_with_cfg(
         // the full category tree rather than compacting it to existing depth.
         let cfg_opt_in = update_resource_cfg
             && (is_mods_root(&root) || is_within_packages(&root) || is_within_overrides(&root));
-        let inactive_package = item.name.to_ascii_lowercase().ends_with(".package.disabled");
+        let inactive_package = item
+            .name
+            .to_ascii_lowercase()
+            .ends_with(".package.disabled");
         let cfg_fit = if cfg_opt_in || inactive_package {
             // Disabled packages are never loaded by The Sims 3. Their
             // classification must not be blocked by PackedFile depth rules,
             // and the .disabled suffix must be preserved on relocation.
-            Ok((ensure_source_loading_branch(&root, &source_canonical, &destination_parts), None))
+            Ok((
+                ensure_source_loading_branch(&root, &source_canonical, &destination_parts),
+                None,
+            ))
         } else {
             fit_destination_to_resource_cfg(
                 &root,
@@ -2267,9 +3083,7 @@ pub fn build_organization_plan_with_cfg(
                         plan_status: "keep_uncategorized".to_string(),
                         sha256: Some(source_hash),
                         size: item.file_size,
-                        warnings: vec![format!(
-                            "Override kept at its original location: {reason}"
-                        )],
+                        warnings: vec![format!("Override kept at its original location: {reason}")],
                     });
                 } else {
                     stats.blocked += 1;
@@ -2307,7 +3121,7 @@ pub fn build_organization_plan_with_cfg(
         }
         destination_relative.push(file_name);
 
-        let destination = root.join(&destination_relative);
+        let mut destination = root.join(&destination_relative);
         if is_mods_root(&root) {
             let branch = if source_uses_overrides(&root, &source_canonical) {
                 "Overrides"
@@ -2323,7 +3137,7 @@ pub fn build_organization_plan_with_cfg(
                 continue;
             }
         }
-        let destination_relative_text = relative_key(&destination_relative);
+        let mut destination_relative_text = relative_key(&destination_relative);
 
         if exact_model_relative_path_matches(&item.relative_path, &destination_relative_text) {
             stats.already_organized += 1;
@@ -2349,15 +3163,66 @@ pub fn build_organization_plan_with_cfg(
             .len();
 
         if destination.exists() {
-            let (target_hash, target_size) = sha256_file(&destination)
-                .map_err(|error| format!("Could not hash collision target {}: {error}", destination.display()))?;
+            let (target_hash, target_size) = sha256_file(&destination).map_err(|error| {
+                format!(
+                    "Could not hash collision target {}: {error}",
+                    destination.display()
+                )
+            })?;
 
             let same = source_size == target_size && source_hash.eq_ignore_ascii_case(&target_hash);
             if same {
                 stats.duplicate_skipped += 1;
-            } else {
-                stats.collision_different_content += 1;
+                items.push(PlanItem {
+                    id: item.id.clone(),
+                    name: item.name.clone(),
+                    source_path: source_canonical.to_string_lossy().to_string(),
+                    source_relative_path: item.relative_path.clone(),
+                    destination_path: Some(destination.to_string_lossy().to_string()),
+                    destination_relative_path: Some(destination_relative_text),
+                    classification_status: item.status.clone(),
+                    classification_reason: classification_reason.clone(),
+                    plan_status: "duplicate_skipped".to_string(),
+                    sha256: Some(source_hash),
+                    size: source_size,
+                    warnings: vec![
+                        "The categorized destination already contains byte-identical data; no overwrite was performed. Review it in Duplicates/Quarantine.".to_string(),
+                    ],
+                });
+                continue;
             }
+
+            if !is_override_source {
+                let (review_relative, review_parts) =
+                    fallback_relative_path(&root, language, &item.relative_path, &source_hash)?;
+                destination = root.join(&review_relative);
+                destination_relative_text = relative_key(&review_relative);
+                classification_reason = Some(format!(
+                    "{} | Content conflict with canonical destination; preserved in review fallback.",
+                    classification_reason.unwrap_or_default()
+                ));
+                add_missing_directories(&root, &review_parts, &mut directories);
+                stats.ready += 1;
+                items.push(PlanItem {
+                    id: item.id.clone(),
+                    name: item.name.clone(),
+                    source_path: source_canonical.to_string_lossy().to_string(),
+                    source_relative_path: item.relative_path.clone(),
+                    destination_path: Some(destination.to_string_lossy().to_string()),
+                    destination_relative_path: Some(destination_relative_text),
+                    classification_status: item.status.clone(),
+                    classification_reason,
+                    plan_status: "ready_conflict_review".to_string(),
+                    sha256: Some(source_hash),
+                    size: source_size,
+                    warnings: vec![
+                        "The canonical destination contains different bytes with the same filename. The source was moved intact to #Sem Categoria; neither version was overwritten or discarded.".to_string(),
+                    ],
+                });
+                continue;
+            }
+
+            stats.collision_different_content += 1;
 
             items.push(PlanItem {
                 id: item.id.clone(),
@@ -2413,7 +3278,21 @@ pub fn build_organization_plan_with_cfg(
         &root,
         language,
         &selected,
+        &selected_roots,
         &scan_by_canonical,
+        &mut items,
+        &mut directories,
+        &mut stats,
+    )?;
+
+    // Explicitly selected legacy directories may contain only documentation,
+    // Sims3Pack files, Windows metadata or other companions. Move those
+    // files through the real executor as well, so an old root is not kept
+    // alive merely because it contains a non-DBPF file.
+    append_auxiliary_items(
+        &root,
+        language,
+        &selected_roots,
         &mut items,
         &mut directories,
         &mut stats,
@@ -2434,6 +3313,7 @@ pub fn build_organization_plan_with_cfg(
     // Detect collisions created by the plan itself before any filesystem write occurs.
     // This catches multiple selected packages that resolve to the same final path.
     mark_intra_plan_destination_collisions(&mut items, &mut stats);
+    move_intra_plan_conflicts_to_review(&root, language, &mut items, &mut directories, &mut stats)?;
 
     for group in workspace.groups.iter().filter(|group| group.keep_together) {
         if !group
@@ -2482,7 +3362,10 @@ pub fn build_organization_plan_with_cfg(
         .iter()
         .filter(|item| item.plan_status.starts_with("ready"))
         .count();
-    stats.blocked = items.iter().filter(|item| item.plan_status == "blocked").count();
+    stats.blocked = items
+        .iter()
+        .filter(|item| item.plan_status == "blocked")
+        .count();
 
     let ready_items = items
         .iter()
@@ -2494,18 +3377,23 @@ pub fn build_organization_plan_with_cfg(
     // Enable a confirmed cleanup-only pass after a previous organization,
     // but count only actually empty directories and never loading roots.
     stats.empty_folders_to_clean = walkdir::WalkDir::new(&root)
-        .follow_links(false).min_depth(1).into_iter()
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_dir())
         .filter(|entry| {
             let path = entry.path();
-            let protected = is_mods_root(&root) && path.parent() == Some(root.as_path())
+            let protected = is_mods_root(&root)
+                && path.parent() == Some(root.as_path())
                 && path.file_name().is_some_and(|name| {
                     name.to_string_lossy().eq_ignore_ascii_case("Packages")
                         || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
                 });
-            !protected && fs::read_dir(path)
-                .map(|mut items| items.next().is_none()).unwrap_or(false)
+            !protected
+                && fs::read_dir(path)
+                    .map(|mut items| items.next().is_none())
+                    .unwrap_or(false)
         })
         .count();
 
@@ -2515,16 +3403,27 @@ pub fn build_organization_plan_with_cfg(
     let resource_cfg_update = if cfg_opt_in {
         // Include both new destinations and existing packages in the scanned
         // branch. Partial organization must not cause old CC to stop loading.
-        let mut paths = ready_items.iter()
+        let mut paths = ready_items
+            .iter()
             .filter_map(|item| item.destination_path.as_ref().map(PathBuf::from))
             .collect::<Vec<_>>();
-        paths.extend(scan.items.iter().map(|item| PathBuf::from(&item.path)).filter(|path| {
-            root.ancestors().find(|parent| is_mods_root(parent)).is_some_and(|mods| {
-                path.starts_with(mods.join("Packages")) || path.starts_with(mods.join("Overrides"))
-            })
-        }));
+        paths.extend(
+            scan.items
+                .iter()
+                .map(|item| PathBuf::from(&item.path))
+                .filter(|path| {
+                    root.ancestors()
+                        .find(|parent| is_mods_root(parent))
+                        .is_some_and(|mods| {
+                            path.starts_with(mods.join("Packages"))
+                                || path.starts_with(mods.join("Overrides"))
+                        })
+                }),
+        );
         preview_resource_cfg_update(&root, &paths)?
-    } else { None };
+    } else {
+        None
+    };
 
     Ok(OrganizationPlan {
         root: root.to_string_lossy().to_string(),
@@ -2544,8 +3443,12 @@ mod tests {
     #[test]
     fn copied_mods_root_preserves_packages_overrides_and_safe_destinations() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("s3cc-copied-{}-{nonce}", std::process::id()))
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("s3cc-copied-{}-{nonce}", std::process::id()))
             .join("Mods - Copia");
         std::fs::create_dir_all(root.join("Packages")).unwrap();
         std::fs::create_dir_all(root.join("Overrides")).unwrap();
@@ -2570,37 +3473,59 @@ mod tests {
     #[test]
     fn unknown_fallback_moves_out_of_legacy_folders_without_losing_source_context() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir().join(format!("s3cc-unknown-fallback-{}-{nonce}",std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-unknown-fallback-{}-{nonce}",
+            std::process::id()
+        ));
         let mods = base.join("Mods - Copia");
         std::fs::create_dir_all(mods.join("Packages")).unwrap();
         std::fs::create_dir_all(mods.join("Overrides")).unwrap();
         let (path, parts) = fallback_relative_path(
-            &mods, AppLanguage::Pt,
-            "#+18\\Pns (TS3)\\Rigged\\PenisButtBones.package", "AABBCCDD"
-        ).unwrap();
+            &mods,
+            AppLanguage::Pt,
+            "#+18\\Pns (TS3)\\Rigged\\PenisButtBones.package",
+            "AABBCCDD",
+        )
+        .unwrap();
         assert!(path.starts_with("Packages"));
         assert!(path.to_string_lossy().contains("Pns (TS3)"));
         assert!(path.to_string_lossy().contains("Rigged"));
         assert!(parts.iter().any(|part| part == "#Sem Categoria"));
         let (override_path, override_parts) = fallback_relative_path(
-            &mods, AppLanguage::Pt, "Overrides\\Overhaul\\unknown.package", "AABBCCDD"
-        ).unwrap();
-        assert_eq!(override_path, PathBuf::from("Overrides\\Overhaul\\unknown.package"));
+            &mods,
+            AppLanguage::Pt,
+            "Overrides\\Overhaul\\unknown.package",
+            "AABBCCDD",
+        )
+        .unwrap();
+        assert_eq!(
+            override_path,
+            PathBuf::from("Overrides\\Overhaul\\unknown.package")
+        );
         assert!(override_parts.is_empty());
         std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn duplicate_quarantine_is_reversible_and_never_uses_a_legacy_folder() {
-        let base = std::env::temp_dir().join(format!("s3cc-duplicate-quarantine-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("s3cc-duplicate-quarantine-{}", std::process::id()));
         let packages = base.join("Packages");
         let source = packages.join("#6 Slider").join("same.package");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         let reserved = HashSet::new();
         let (relative, parts) = duplicate_quarantine_destination(
-            &packages, AppLanguage::Pt, &source, &"A".repeat(64), &reserved,
-        ).unwrap();
+            &packages,
+            AppLanguage::Pt,
+            &source,
+            &"A".repeat(64),
+            &reserved,
+        )
+        .unwrap();
         assert_eq!(parts.first().map(String::as_str), Some("#Duplicados"));
         assert_eq!(relative.parent(), Some(Path::new("#Duplicados")));
         assert!(!relative.starts_with(Path::new("#6 Slider")));
@@ -2610,7 +3535,10 @@ mod tests {
 
     #[test]
     fn duplicate_quarantine_collision_uses_flat_deterministic_suffix() {
-        let base = std::env::temp_dir().join(format!("s3cc-duplicate-flat-collision-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-duplicate-flat-collision-{}",
+            std::process::id()
+        ));
         let packages = base.join("Packages");
         let quarantine = packages.join("#Duplicados");
         let source = packages.join("Old").join("same.package");
@@ -2620,19 +3548,33 @@ mod tests {
         let mut reserved = HashSet::new();
         reserved.insert(String::from("#duplicados\\same [aaaaaaaaaaaaaaaa].package"));
         let (relative, parts) = duplicate_quarantine_destination(
-            &packages, AppLanguage::Pt, &source, &"A".repeat(64), &reserved,
-        ).unwrap();
+            &packages,
+            AppLanguage::Pt,
+            &source,
+            &"A".repeat(64),
+            &reserved,
+        )
+        .unwrap();
         assert_eq!(parts, vec!["#Duplicados"]);
         assert_eq!(relative.parent(), Some(Path::new("#Duplicados")));
-        assert_eq!(relative.file_name().unwrap(), "same [AAAAAAAAAAAAAAAA-1].package");
+        assert_eq!(
+            relative.file_name().unwrap(),
+            "same [AAAAAAAAAAAAAAAA-1].package"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn nested_duplicate_quarantine_is_planned_for_flat_migration() {
-        let base = std::env::temp_dir().join(format!("s3cc-duplicate-flat-migration-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-duplicate-flat-migration-{}",
+            std::process::id()
+        ));
         let packages = base.join("Packages");
-        let nested = packages.join("#Duplicados").join("abcdef0123456789").join("Old");
+        let nested = packages
+            .join("#Duplicados")
+            .join("abcdef0123456789")
+            .join("Old");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("same.package"), b"duplicate bytes").unwrap();
         let mut items = Vec::new();
@@ -2641,18 +3583,34 @@ mod tests {
         let mut reserved = HashSet::new();
         let packages = packages.canonicalize().unwrap();
         append_nested_duplicate_quarantine_items(
-            &packages, AppLanguage::Pt, &mut items, &mut directories, &mut stats, &mut reserved,
-        ).unwrap();
+            &packages,
+            AppLanguage::Pt,
+            &mut items,
+            &mut directories,
+            &mut stats,
+            &mut reserved,
+        )
+        .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].plan_status, "ready_duplicate_quarantine_migration");
-        assert_eq!(Path::new(items[0].destination_relative_path.as_deref().unwrap()).parent(), Some(Path::new("#Duplicados")));
-        assert!(!items[0].destination_relative_path.as_deref().unwrap().contains("abcdef"));
+        assert_eq!(
+            Path::new(items[0].destination_relative_path.as_deref().unwrap()).parent(),
+            Some(Path::new("#Duplicados"))
+        );
+        assert!(!items[0]
+            .destination_relative_path
+            .as_deref()
+            .unwrap()
+            .contains("abcdef"));
         std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn flat_duplicate_migration_is_idempotent_after_relocation() {
-        let base = std::env::temp_dir().join(format!("s3cc-duplicate-flat-idempotent-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-duplicate-flat-idempotent-{}",
+            std::process::id()
+        ));
         let packages = base.join("Packages");
         let nested = packages.join("#Duplicados").join("legacy").join("Old");
         std::fs::create_dir_all(&nested).unwrap();
@@ -2666,8 +3624,14 @@ mod tests {
         let mut stats = PlanStats::default();
         let mut reserved = HashSet::new();
         append_nested_duplicate_quarantine_items(
-            &packages, AppLanguage::Pt, &mut items, &mut directories, &mut stats, &mut reserved,
-        ).unwrap();
+            &packages,
+            AppLanguage::Pt,
+            &mut items,
+            &mut directories,
+            &mut stats,
+            &mut reserved,
+        )
+        .unwrap();
         let destination = packages.join(items[0].destination_relative_path.as_deref().unwrap());
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::fs::rename(&source, &destination).unwrap();
@@ -2677,9 +3641,14 @@ mod tests {
         let mut second_stats = PlanStats::default();
         let mut second_reserved = HashSet::new();
         append_nested_duplicate_quarantine_items(
-            &packages, AppLanguage::Pt, &mut second_items, &mut second_directories,
-            &mut second_stats, &mut second_reserved,
-        ).unwrap();
+            &packages,
+            AppLanguage::Pt,
+            &mut second_items,
+            &mut second_directories,
+            &mut second_stats,
+            &mut second_reserved,
+        )
+        .unwrap();
         assert!(second_items.is_empty());
         assert_eq!(second_stats.ready, 0);
         std::fs::remove_dir_all(base).unwrap();
@@ -2696,16 +3665,40 @@ mod tests {
     #[test]
     fn legacy_user_folders_are_migratable_but_sims_caches_are_protected() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir().join(format!("s3cc-migrate-source-{}-{nonce}",std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-migrate-source-{}-{nonce}",
+            std::process::id()
+        ));
         let mods = base.join("Mods - Copia");
         std::fs::create_dir_all(mods.join("Packages")).unwrap();
         std::fs::create_dir_all(mods.join("Overrides")).unwrap();
-        assert!(!is_mods_system_source(&mods,&mods.join("#+18").join("AnimatedWoohoo.package")));
-        assert!(!is_mods_system_source(&mods,&mods.join("Careers").join("Modeling.package")));
-        assert!(is_mods_system_source(&mods,&mods.join("DCCache").join("dcdb0.dbc")));
-        assert!(is_mods_system_source(&mods,&mods.join("Downloads").join("download.package")));
-        assert!(is_mods_system_source(&mods,&mods.join("S3CC Manager").join("Restore Manifests").join("x.package")));
+        assert!(!is_mods_system_source(
+            &mods,
+            &mods.join("#+18").join("AnimatedWoohoo.package")
+        ));
+        assert!(!is_mods_system_source(
+            &mods,
+            &mods.join("Careers").join("Modeling.package")
+        ));
+        assert!(is_mods_system_source(
+            &mods,
+            &mods.join("DCCache").join("dcdb0.dbc")
+        ));
+        assert!(is_mods_system_source(
+            &mods,
+            &mods.join("Downloads").join("download.package")
+        ));
+        assert!(is_mods_system_source(
+            &mods,
+            &mods
+                .join("S3CC Manager")
+                .join("Restore Manifests")
+                .join("x.package")
+        ));
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -2714,14 +3707,35 @@ mod tests {
         let mut hashes = HashMap::new();
         hashes.insert(PathBuf::from("Packages/Old/C.package"), "AAA".to_string());
         hashes.insert(PathBuf::from("Packages/Old/B.package"), "AAA".to_string());
-        hashes.insert(PathBuf::from("Packages/Old/A.package.disabled"), "AAA".to_string());
-        hashes.insert(PathBuf::from("Packages/Old/Z.package.disabled"), "AAA".to_string());
-        assert!(is_selected_content_keeper(Path::new("Packages/Old/B.package"), "AAA", &hashes));
-        assert!(!is_selected_content_keeper(Path::new("Packages/Old/C.package"), "AAA", &hashes));
-        assert!(is_selected_content_keeper(Path::new("Packages/Old/A.package.disabled"), "AAA", &hashes));
-        assert!(!is_selected_content_keeper(Path::new("Packages/Old/Z.package.disabled"), "AAA", &hashes));
+        hashes.insert(
+            PathBuf::from("Packages/Old/A.package.disabled"),
+            "AAA".to_string(),
+        );
+        hashes.insert(
+            PathBuf::from("Packages/Old/Z.package.disabled"),
+            "AAA".to_string(),
+        );
+        assert!(is_selected_content_keeper(
+            Path::new("Packages/Old/B.package"),
+            "AAA",
+            &hashes
+        ));
+        assert!(!is_selected_content_keeper(
+            Path::new("Packages/Old/C.package"),
+            "AAA",
+            &hashes
+        ));
+        assert!(is_selected_content_keeper(
+            Path::new("Packages/Old/A.package.disabled"),
+            "AAA",
+            &hashes
+        ));
+        assert!(!is_selected_content_keeper(
+            Path::new("Packages/Old/Z.package.disabled"),
+            "AAA",
+            &hashes
+        ));
     }
-
 
     use super::*;
 
@@ -2732,7 +3746,10 @@ mod tests {
     ) -> (PathBuf, ScanPackageItem) {
         let path = root.join(relative_path.replace('\\', std::path::MAIN_SEPARATOR_STR));
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let destination_parts = destination_parts.iter().map(|part| (*part).to_string()).collect::<Vec<_>>();
+        let destination_parts = destination_parts
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>();
         (
             path.clone(),
             ScanPackageItem {
@@ -2785,13 +3802,12 @@ mod tests {
         let second_legacy_relative = "Brian Vicente/Brian Vicente/Sliders/shared.package";
         // Simulate stale path-based classification, including the canonical file.
         // The manual model hash must win over these scanner-suggested folders.
-        let (canonical_path, canonical_item) = synthetic_scan_item(&packages_root, canonical_relative, &["#9 Sliders"]);
-        let (legacy_path, legacy_item) = synthetic_scan_item(&packages_root, legacy_relative, &["Danny", "Sliders"]);
-        let (second_legacy_path, second_legacy_item) = synthetic_scan_item(
-            &packages_root,
-            second_legacy_relative,
-            &["Sliders"],
-        );
+        let (canonical_path, canonical_item) =
+            synthetic_scan_item(&packages_root, canonical_relative, &["#9 Sliders"]);
+        let (legacy_path, legacy_item) =
+            synthetic_scan_item(&packages_root, legacy_relative, &["Danny", "Sliders"]);
+        let (second_legacy_path, second_legacy_item) =
+            synthetic_scan_item(&packages_root, second_legacy_relative, &["Sliders"]);
         let mut selected_hashes = HashMap::new();
         selected_hashes.insert(canonical_path.clone(), "SAME".into());
         selected_hashes.insert(legacy_path.clone(), "SAME".into());
@@ -2801,23 +3817,50 @@ mod tests {
         scan.insert(legacy_path.clone(), &legacy_item);
         scan.insert(second_legacy_path.clone(), &second_legacy_item);
         let mut directories = BTreeMap::new();
-        directories.insert(model_key(&["Sliders".to_string()]), vec!["Sliders".to_string()]);
+        directories.insert(
+            model_key(&["Sliders".to_string()]),
+            vec!["Sliders".to_string()],
+        );
         let mut files_by_sha256 = HashMap::new();
-        files_by_sha256.insert("SAME".to_string(), vec![ManualModelFile {
-            relative_path: "Sliders\\shared.package".to_string(),
-            directory_parts: vec!["Sliders".to_string()],
-            file_name: "shared.package".to_string(),
-        }]);
-        let manual_model = ManualModelIndex { directories, files_by_sha256 };
+        files_by_sha256.insert(
+            "SAME".to_string(),
+            vec![ManualModelFile {
+                relative_path: "Sliders\\shared.package".to_string(),
+                directory_parts: vec!["Sliders".to_string()],
+                file_name: "shared.package".to_string(),
+            }],
+        );
+        let manual_model = ManualModelIndex {
+            directories,
+            files_by_sha256,
+        };
 
         assert!(is_selected_content_keeper_for_scan(
-            &packages_root, &canonical_path, "SAME", &selected_hashes, &scan, &manual_model, None
+            &packages_root,
+            &canonical_path,
+            "SAME",
+            &selected_hashes,
+            &scan,
+            &manual_model,
+            None
         ));
         assert!(!is_selected_content_keeper_for_scan(
-            &packages_root, &legacy_path, "SAME", &selected_hashes, &scan, &manual_model, None
+            &packages_root,
+            &legacy_path,
+            "SAME",
+            &selected_hashes,
+            &scan,
+            &manual_model,
+            None
         ));
         assert!(!is_selected_content_keeper_for_scan(
-            &packages_root, &second_legacy_path, "SAME", &selected_hashes, &scan, &manual_model, None
+            &packages_root,
+            &second_legacy_path,
+            "SAME",
+            &selected_hashes,
+            &scan,
+            &manual_model,
+            None
         ));
         assert_eq!(
             selected_content_keeper_relative_path(
@@ -2837,15 +3880,24 @@ mod tests {
     #[test]
     fn planned_sources_use_the_same_canonical_root_as_cleanup() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("s3cc-canonical-root-{}-{nonce}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-canonical-root-{}-{nonce}",
+            std::process::id()
+        ));
         let source = root.join("Packages").join("Legacy").join("a.package");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::write(&source, b"DBPF source identity test").unwrap();
         let canonical_root = root.canonicalize().unwrap();
         let canonical_source = source.canonicalize().unwrap();
         assert!(canonical_source.starts_with(&canonical_root));
-        assert!(canonical_source.parent().unwrap().starts_with(&canonical_root));
+        assert!(canonical_source
+            .parent()
+            .unwrap()
+            .starts_with(&canonical_root));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -2857,11 +3909,15 @@ mod tests {
                 path: root.join("Resource.cfg").to_string_lossy().to_string(),
                 precedence_reliable: true,
                 warnings: Vec::new(),
-                rules: patterns.iter().enumerate().map(|(index, rule)| ResourceCfgRule {
-                    priority: 500,
-                    pattern: (*rule).to_string(),
-                    source_line: index + 1,
-                }).collect(),
+                rules: patterns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rule)| ResourceCfgRule {
+                        priority: 500,
+                        pattern: (*rule).to_string(),
+                        source_line: index + 1,
+                    })
+                    .collect(),
             },
         }
     }
@@ -2870,16 +3926,23 @@ mod tests {
     fn overrides_support_anatomical_folders_when_resource_cfg_matches() {
         let mods = Path::new("The Sims 3").join("Mods");
         let source = mods.join("Overrides").join("patch.package");
-        let context = cfg_with_rules(&mods, &[
-            "Packages/*.package",
-            "Overrides/*.package",
-            "Overrides/*/*/*/*.package",
-        ]);
+        let context = cfg_with_rules(
+            &mods,
+            &[
+                "Packages/*.package",
+                "Overrides/*.package",
+                "Overrides/*/*/*/*.package",
+            ],
+        );
         let category = vec!["Sliders".into(), "Face".into(), "Nose".into()];
         let (destination, _) = fit_destination_to_resource_cfg(
-            &mods, &source, std::ffi::OsStr::new("patch.package"),
-            &category, Some(&context),
-        ).unwrap();
+            &mods,
+            &source,
+            std::ffi::OsStr::new("patch.package"),
+            &category,
+            Some(&context),
+        )
+        .unwrap();
         assert_eq!(destination, vec!["Overrides", "Sliders", "Face", "Nose"]);
 
         let packages_source = mods.join("Packages").join("hair.package");
@@ -2894,16 +3957,24 @@ mod tests {
         let context = cfg_with_rules(&mods, &["Overrides/*.package"]);
         let cat = vec!["Sliders".into(), "Face".into(), "Nose".into()];
         let (destination, note) = fit_destination_to_resource_cfg(
-            &mods, &overrides.join("patch.package"),
-            std::ffi::OsStr::new("patch.package"), &cat, Some(&context),
-        ).unwrap();
+            &mods,
+            &overrides.join("patch.package"),
+            std::ffi::OsStr::new("patch.package"),
+            &cat,
+            Some(&context),
+        )
+        .unwrap();
         assert_eq!(destination, vec!["Overrides"]);
         assert!(note.unwrap().contains("category is retained"));
 
         let (selected_override, note) = fit_destination_to_resource_cfg(
-            &overrides, &overrides.join("patch.package"),
-            std::ffi::OsStr::new("patch.package"), &cat, Some(&context),
-        ).unwrap();
+            &overrides,
+            &overrides.join("patch.package"),
+            std::ffi::OsStr::new("patch.package"),
+            &cat,
+            Some(&context),
+        )
+        .unwrap();
         assert!(selected_override.is_empty());
         assert!(note.unwrap().contains("category is retained"));
     }
@@ -2915,16 +3986,24 @@ mod tests {
         let context = cfg_with_rules(&mods, &["Packages/*.package", "Packages/*/*.package"]);
         let category = vec!["Gameplay".into(), "Tuning".into()];
         assert!(fit_destination_to_resource_cfg(
-            &mods, &override_file, std::ffi::OsStr::new("ui.package"),
-            &category, Some(&context),
-        ).is_err());
+            &mods,
+            &override_file,
+            std::ffi::OsStr::new("ui.package"),
+            &category,
+            Some(&context),
+        )
+        .is_err());
         assert!(fit_destination_to_resource_cfg(
-            &mods, &override_file, std::ffi::OsStr::new("ui.package"),
-            &category, None,
-        ).is_err());
-        let (fallback, dirs) = fallback_relative_path(
-            &mods, AppLanguage::En, "Overrides/UI/ui.package", "ABCD",
-        ).unwrap();
+            &mods,
+            &override_file,
+            std::ffi::OsStr::new("ui.package"),
+            &category,
+            None,
+        )
+        .is_err());
+        let (fallback, dirs) =
+            fallback_relative_path(&mods, AppLanguage::En, "Overrides/UI/ui.package", "ABCD")
+                .unwrap();
         assert_eq!(fallback, Path::new("Overrides/UI/ui.package"));
         assert!(dirs.is_empty());
     }
@@ -2961,13 +4040,22 @@ mod tests {
         assert!(is_within_packages(&deep_packages));
         assert!(!is_within_overrides(&deep_packages));
         assert!(is_within_overrides(&deep_overrides));
-        assert!(source_uses_overrides(&deep_overrides, &deep_overrides.join("ui.package")));
+        assert!(source_uses_overrides(
+            &deep_overrides,
+            &deep_overrides.join("ui.package")
+        ));
         assert_eq!(
             ensure_source_loading_branch(
                 &deep_packages,
                 &deep_packages.join("file.package"),
-                &["Packages".into(), "CAS".into(), "Clothing".into(), "Male".into(),
-                    "YA-A".into(), "Top".into()],
+                &[
+                    "Packages".into(),
+                    "CAS".into(),
+                    "Clothing".into(),
+                    "Male".into(),
+                    "YA-A".into(),
+                    "Top".into()
+                ],
             ),
             vec!["YA-A", "Top"]
         );
@@ -2975,14 +4063,23 @@ mod tests {
             ensure_source_loading_branch(
                 &deep_overrides,
                 &deep_overrides.join("ui.package"),
-                &["Overrides".into(), "Gameplay".into(), "Tuning".into(), "Scripts".into()],
+                &[
+                    "Overrides".into(),
+                    "Gameplay".into(),
+                    "Tuning".into(),
+                    "Scripts".into()
+                ],
             ),
             vec!["Scripts"]
         );
         let staging = Path::new("Downloads").join("CC Incoming");
         assert!(!is_within_overrides(&staging));
         assert_eq!(
-            ensure_source_loading_branch(&staging, &staging.join("file.package"), &["Clothing".into()]),
+            ensure_source_loading_branch(
+                &staging,
+                &staging.join("file.package"),
+                &["Clothing".into()]
+            ),
             vec!["Clothing"]
         );
     }
@@ -2991,15 +4088,25 @@ mod tests {
     fn identifies_only_known_legacy_manager_folders_for_migration() {
         let mods = Path::new("The Sims 3").join("Mods");
         assert!(legacy_manager_source(
-            &mods, &mods.join("CAS").join("Sliders").join("a.package")));
+            &mods,
+            &mods.join("CAS").join("Sliders").join("a.package")
+        ));
         assert!(legacy_manager_source(
-            &mods, &mods.join("Roupas").join("Masculino").join("x.package")));
+            &mods,
+            &mods.join("Roupas").join("Masculino").join("x.package")
+        ));
         assert!(!legacy_manager_source(
-            &mods, &mods.join("Overrides").join("ui.package")));
+            &mods,
+            &mods.join("Overrides").join("ui.package")
+        ));
         assert!(!legacy_manager_source(
-            &mods, &mods.join("DCCache").join("a.package")));
+            &mods,
+            &mods.join("DCCache").join("a.package")
+        ));
         assert!(!legacy_manager_source(
-            &mods, &mods.join("Random Folder").join("x.package")));
+            &mods,
+            &mods.join("Random Folder").join("x.package")
+        ));
     }
 
     #[test]
@@ -3022,9 +4129,15 @@ mod tests {
         let packages_base = Path::new("The Sims 3").join("Mods").join("Packages");
         let packages = packages_base.as_path();
         let categories = vec!["CAS".into(), "Hair".into()];
-        assert_eq!(ensure_packages_destination(packages, &categories), vec!["Hair"]);
         assert_eq!(
-            ensure_packages_destination(packages, &["Packages".into(), "CAS".into(), "Hair".into()]),
+            ensure_packages_destination(packages, &categories),
+            vec!["Hair"]
+        );
+        assert_eq!(
+            ensure_packages_destination(
+                packages,
+                &["Packages".into(), "CAS".into(), "Hair".into()]
+            ),
             vec!["Hair"]
         );
     }
@@ -3040,7 +4153,8 @@ mod tests {
             std::ffi::OsStr::new("Unmatched.package"),
             &parts,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(resolved, vec!["Packages", "Scripts", "Gameplay"]);
     }
 
@@ -3070,12 +4184,19 @@ mod tests {
             },
         };
         let parts = vec![
-            "Clothing".into(), "Female".into(), "YA-A".into(), "Top".into(),
+            "Clothing".into(),
+            "Female".into(),
+            "YA-A".into(),
+            "Top".into(),
         ];
         let (fitted, _) = fit_destination_to_resource_cfg(
-            &root, &root.join("Packages").join("source.package"),
-            std::ffi::OsStr::new("new.package"), &parts, Some(&context),
-        ).unwrap();
+            &root,
+            &root.join("Packages").join("source.package"),
+            std::ffi::OsStr::new("new.package"),
+            &parts,
+            Some(&context),
+        )
+        .unwrap();
         assert_eq!(fitted.len(), 2);
         assert_eq!(fitted[0], "Packages");
         assert!(fitted[1].starts_with("Clothing"));
@@ -3107,13 +4228,23 @@ mod tests {
             },
         };
         let parts = vec![
-            "Clothing".into(), "Female".into(), "YA-A".into(), "Top".into(),
+            "Clothing".into(),
+            "Female".into(),
+            "YA-A".into(),
+            "Top".into(),
         ];
         let (fitted, _) = fit_destination_to_resource_cfg(
-            &root, &root.join("Packages").join("source.package"),
-            std::ffi::OsStr::new("new.package"), &parts, Some(&context),
-        ).unwrap();
-        assert_eq!(fitted, vec!["Packages", "Clothing", "Female", "YA-A", "Top"]);
+            &root,
+            &root.join("Packages").join("source.package"),
+            std::ffi::OsStr::new("new.package"),
+            &parts,
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(
+            fitted,
+            vec!["Packages", "Clothing", "Female", "YA-A", "Top"]
+        );
     }
 
     #[test]
@@ -3129,8 +4260,14 @@ mod tests {
     fn exact_duplicate_index_finds_identical_contents_across_folders() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("s3cc-duplicate-preflight-{}-{nonce}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-duplicate-preflight-{}-{nonce}",
+            std::process::id()
+        ));
         let packages = root.join("Packages");
         std::fs::create_dir_all(packages.join("Sliders")).unwrap();
         let first = packages.join("Jonha_BASE.package");
@@ -3147,7 +4284,11 @@ mod tests {
                 id: path.to_string_lossy().to_string(),
                 name: path.file_name().unwrap().to_string_lossy().to_string(),
                 path: path.to_string_lossy().to_string(),
-                relative_path: path.strip_prefix(&packages).unwrap().to_string_lossy().to_string(),
+                relative_path: path
+                    .strip_prefix(&packages)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
                 file_size: std::fs::metadata(path).unwrap().len(),
                 resource_count: 0,
                 catalog_resource_count: 0,
@@ -3183,16 +4324,39 @@ mod tests {
 
     #[test]
     fn partial_merged_morph_resources_hold_only_the_larger_package() {
-        let keys = |items: &[&str]| items.iter().map(|key| key.to_string())
-            .collect::<BTreeSet<_>>();
+        let keys = |items: &[&str]| {
+            items
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<BTreeSet<_>>()
+        };
         let candidates = vec![
-            ("single-slider.package".into(), keys(&["FACE-a", "BGEO-a"]), true),
-            ("merged-sliders.package".into(), keys(&["FACE-a", "BGEO-a", "FACE-b"]), true),
-            ("related-translation.package".into(), keys(&["STBL-a"]), false),
-            ("unrelated.package".into(), keys(&["FACE-x", "BGEO-x", "FACE-y"]), true),
+            (
+                "single-slider.package".into(),
+                keys(&["FACE-a", "BGEO-a"]),
+                true,
+            ),
+            (
+                "merged-sliders.package".into(),
+                keys(&["FACE-a", "BGEO-a", "FACE-b"]),
+                true,
+            ),
+            (
+                "related-translation.package".into(),
+                keys(&["STBL-a"]),
+                false,
+            ),
+            (
+                "unrelated.package".into(),
+                keys(&["FACE-x", "BGEO-x", "FACE-y"]),
+                true,
+            ),
         ];
         let related = detect_merged_resource_supersets(&candidates);
-        assert_eq!(related["merged-sliders.package"], vec!["single-slider.package"]);
+        assert_eq!(
+            related["merged-sliders.package"],
+            vec!["single-slider.package"]
+        );
         assert!(!related.contains_key("single-slider.package"));
         assert!(!related.contains_key("unrelated.package"));
     }
@@ -3320,10 +4484,37 @@ mod tests {
         };
 
         assert!(plan_can_execute(&stats, false));
-        assert!(!plan_can_execute(&PlanStats { ready: 0, blocked: 1, ..PlanStats::default() }, false));
-        assert!(plan_can_execute(&PlanStats { ready: 0, empty_folders_to_clean: 2, ..PlanStats::default() }, false));
-        assert!(!plan_can_execute(&PlanStats { ready: 0, empty_folders_to_clean: 2, ..PlanStats::default() }, true));
-        assert!(!plan_can_execute(&PlanStats { ready: 1, ..PlanStats::default() }, true));
+        assert!(!plan_can_execute(
+            &PlanStats {
+                ready: 0,
+                blocked: 1,
+                ..PlanStats::default()
+            },
+            false
+        ));
+        assert!(plan_can_execute(
+            &PlanStats {
+                ready: 0,
+                empty_folders_to_clean: 2,
+                ..PlanStats::default()
+            },
+            false
+        ));
+        assert!(!plan_can_execute(
+            &PlanStats {
+                ready: 0,
+                empty_folders_to_clean: 2,
+                ..PlanStats::default()
+            },
+            true
+        ));
+        assert!(!plan_can_execute(
+            &PlanStats {
+                ready: 1,
+                ..PlanStats::default()
+            },
+            true
+        ));
     }
 
     #[test]
@@ -3353,8 +4544,14 @@ mod tests {
     #[test]
     fn manual_model_rejects_partial_category_names_and_resolves_exact_hash_paths() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir().join(format!("s3cc-exact-model-destination-{}-{nonce}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-exact-model-destination-{}-{nonce}",
+            std::process::id()
+        ));
         let model = base.join("Packages");
         let selected = base.join("Copy").join("Packages");
         std::fs::create_dir_all(model.join("Sliders")).unwrap();
@@ -3370,14 +4567,43 @@ mod tests {
         std::fs::copy(&canonical, &misplaced_six).unwrap();
         let index = build_manual_model_index(&model).unwrap();
         let (hash, _) = sha256_file(&misplaced).unwrap();
-        let resolved = resolve_model_destination(&index, &selected, &misplaced, &hash, &["#9 Sliders".to_string()]).unwrap();
+        let resolved = resolve_model_destination(
+            &index,
+            &selected,
+            &misplaced,
+            &hash,
+            &["#9 Sliders".to_string()],
+        )
+        .unwrap();
         assert_eq!(resolved.parts, vec!["Sliders"]);
-        assert_ne!(relative_key(Path::new("#9 Sliders\\slider.package")), format!("{}\\slider.package", resolved.parts.join("\\")));
-        let six_resolved = resolve_model_destination(&index, &selected, &misplaced_six, &hash, &["#6 Slider".to_string()]).unwrap();
+        assert_ne!(
+            relative_key(Path::new("#9 Sliders\\slider.package")),
+            format!("{}\\slider.package", resolved.parts.join("\\"))
+        );
+        let six_resolved = resolve_model_destination(
+            &index,
+            &selected,
+            &misplaced_six,
+            &hash,
+            &["#6 Slider".to_string()],
+        )
+        .unwrap();
         assert_eq!(six_resolved.parts, vec!["Sliders"]);
-        assert!(!exact_model_relative_path_matches("#6 Slider\\slider.package", "Sliders\\slider.package"));
-        assert!(exact_model_relative_path_matches("Sliders\\slider.package", "Sliders\\slider.package"));
-        let wrong = resolve_model_destination(&index, &selected, &selected.join("Criador").join("Sliders").join("new.package"), "NOT-IN-MODEL", &["Criador".to_string(), "Sliders".to_string()]);
+        assert!(!exact_model_relative_path_matches(
+            "#6 Slider\\slider.package",
+            "Sliders\\slider.package"
+        ));
+        assert!(exact_model_relative_path_matches(
+            "Sliders\\slider.package",
+            "Sliders\\slider.package"
+        ));
+        let wrong = resolve_model_destination(
+            &index,
+            &selected,
+            &selected.join("Criador").join("Sliders").join("new.package"),
+            "NOT-IN-MODEL",
+            &["Criador".to_string(), "Sliders".to_string()],
+        );
         assert!(wrong.is_err());
         std::fs::remove_dir_all(base).unwrap();
     }
@@ -3385,21 +4611,98 @@ mod tests {
     #[test]
     fn manual_model_blocks_lookalike_without_matching_hash_or_exact_category() {
         let mut directories = BTreeMap::new();
-        directories.insert(model_key(&["Sliders".to_string()]), vec!["Sliders".to_string()]);
-        let index = ManualModelIndex { directories, files_by_sha256: HashMap::new() };
+        directories.insert(
+            model_key(&["Sliders".to_string()]),
+            vec!["Sliders".to_string()],
+        );
+        let index = ManualModelIndex {
+            directories,
+            files_by_sha256: HashMap::new(),
+        };
         let root = Path::new("Mods").join("Packages");
         let source = root.join("#9 Sliders").join("unrecognized.package");
         let result = resolve_model_destination(
-            &index, &root, &source, "MISSING-HASH", &["#9 Sliders".to_string()],
+            &index,
+            &root,
+            &source,
+            "MISSING-HASH",
+            &["#9 Sliders".to_string()],
         );
-        assert!(result.unwrap_err().contains("No exact directory"));
+        assert!(result
+            .unwrap_err()
+            .contains("No authorized taxonomy directory"));
+    }
+
+    #[test]
+    fn manual_model_resolves_language_and_age_taxonomy_aliases_without_a_matching_file() {
+        let mut directories = BTreeMap::new();
+        directories.insert(
+            model_key(&["Scripts".to_string(), "Gameplay".to_string()]),
+            vec!["Scripts".to_string(), "Gameplay".to_string()],
+        );
+        directories.insert(
+            model_key(&[
+                "Cabelos".to_string(),
+                "Masculino".to_string(),
+                "Adolescente-Jovem Adulto-Adulto-Idoso".to_string(),
+                "Pelos Corporais".to_string(),
+            ]),
+            vec![
+                "Cabelos".to_string(),
+                "Masculino".to_string(),
+                "Adolescente-Jovem Adulto-Adulto-Idoso".to_string(),
+                "Pelos Corporais".to_string(),
+            ],
+        );
+        let index = ManualModelIndex {
+            directories,
+            files_by_sha256: HashMap::new(),
+        };
+        let root = Path::new("Mods").join("Packages");
+        let source = root.join("Legacy").join("script.package");
+        let gameplay = resolve_model_destination(
+            &index,
+            &root,
+            &source,
+            "MISSING-HASH",
+            &["Scripts".into(), "Jogabilidade".into()],
+        )
+        .unwrap();
+        assert_eq!(gameplay.parts, vec!["Scripts", "Gameplay"]);
+        let body = resolve_model_destination(
+            &index,
+            &root,
+            &source,
+            "MISSING-HASH",
+            &[
+                "Cabelos".into(),
+                "Masculino".into(),
+                "Pelos Corporais".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            body.parts,
+            vec![
+                "Cabelos",
+                "Masculino",
+                "Adolescente-Jovem Adulto-Adulto-Idoso",
+                "Pelos Corporais"
+            ]
+        );
     }
 
     #[test]
     fn manual_model_keeps_same_hash_in_distinct_canonical_folders_ambiguous() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir().join(format!("s3cc-ambiguous-model-destination-{}-{nonce}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-ambiguous-model-destination-{}-{nonce}",
+            std::process::id()
+        ));
         let model = base.join("Packages");
         std::fs::create_dir_all(model.join("A")).unwrap();
         std::fs::create_dir_all(model.join("B")).unwrap();
@@ -3412,27 +4715,49 @@ mod tests {
         let index = build_manual_model_index(&model).unwrap();
         let (hash, _) = sha256_file(&source).unwrap();
         let result = resolve_model_destination(&index, &base.join("source"), &source, &hash, &[]);
-        assert!(result.unwrap_err().contains("multiple different canonical model destinations"));
+        assert!(result
+            .unwrap_err()
+            .contains("multiple different canonical model destinations"));
         // Even an apparently matching scanner category must not override a
         // conflicting destination explicitly present in the manual model.
-        let preferred = resolve_model_destination(&index, &base.join("source"), &source, &hash, &["A".to_string()]);
-        assert!(preferred.unwrap_err().contains("multiple different canonical model destinations"));
+        let preferred = resolve_model_destination(
+            &index,
+            &base.join("source"),
+            &source,
+            &hash,
+            &["A".to_string()],
+        );
+        assert!(preferred
+            .unwrap_err()
+            .contains("multiple different canonical model destinations"));
         // A different filename must not conceal that same-content packages
         // exist in two distinct model destinations.
-        std::fs::rename(model.join("B").join("same.package"), model.join("B").join("renamed.package")).unwrap();
+        std::fs::rename(
+            model.join("B").join("same.package"),
+            model.join("B").join("renamed.package"),
+        )
+        .unwrap();
         let differently_named_index = build_manual_model_index(&model).unwrap();
         let differently_named = resolve_model_destination(
-            &differently_named_index, &base.join("source"), &source, &hash, &["A".to_string()],
+            &differently_named_index,
+            &base.join("source"),
+            &source,
+            &hash,
+            &["A".to_string()],
         );
-        assert!(differently_named.unwrap_err().contains("multiple different canonical model destinations"));
+        assert!(differently_named
+            .unwrap_err()
+            .contains("multiple different canonical model destinations"));
         std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn ambiguous_model_duplicate_group_has_no_arbitrary_keeper() {
         let root = Path::new("Mods").join("Packages");
-        let (first_path, first_item) = synthetic_scan_item(&root, "Legacy\\same.package", &["Sliders"]);
-        let (second_path, second_item) = synthetic_scan_item(&root, "Other\\same.package", &["Sliders"]);
+        let (first_path, first_item) =
+            synthetic_scan_item(&root, "Legacy\\same.package", &["Sliders"]);
+        let (second_path, second_item) =
+            synthetic_scan_item(&root, "Other\\same.package", &["Sliders"]);
         let mut selected_hashes = HashMap::new();
         selected_hashes.insert(first_path.clone(), "SAME".to_string());
         selected_hashes.insert(second_path.clone(), "SAME".to_string());
@@ -3443,27 +4768,54 @@ mod tests {
         directories.insert(model_key(&["A".to_string()]), vec!["A".to_string()]);
         directories.insert(model_key(&["B".to_string()]), vec!["B".to_string()]);
         let mut files_by_sha256 = HashMap::new();
-        files_by_sha256.insert("SAME".to_string(), vec![
-            ManualModelFile {
-                relative_path: "A\\same.package".to_string(),
-                directory_parts: vec!["A".to_string()],
-                file_name: "same.package".to_string(),
-            },
-            ManualModelFile {
-                relative_path: "B\\same.package".to_string(),
-                directory_parts: vec!["B".to_string()],
-                file_name: "same.package".to_string(),
-            },
-        ]);
-        let manual_model = ManualModelIndex { directories, files_by_sha256 };
+        files_by_sha256.insert(
+            "SAME".to_string(),
+            vec![
+                ManualModelFile {
+                    relative_path: "A\\same.package".to_string(),
+                    directory_parts: vec!["A".to_string()],
+                    file_name: "same.package".to_string(),
+                },
+                ManualModelFile {
+                    relative_path: "B\\same.package".to_string(),
+                    directory_parts: vec!["B".to_string()],
+                    file_name: "same.package".to_string(),
+                },
+            ],
+        );
+        let manual_model = ManualModelIndex {
+            directories,
+            files_by_sha256,
+        };
         assert!(!is_selected_content_keeper_for_scan(
-            &root, &first_path, "SAME", &selected_hashes, &scan, &manual_model, None
+            &root,
+            &first_path,
+            "SAME",
+            &selected_hashes,
+            &scan,
+            &manual_model,
+            None
         ));
         assert!(!is_selected_content_keeper_for_scan(
-            &root, &second_path, "SAME", &selected_hashes, &scan, &manual_model, None
+            &root,
+            &second_path,
+            "SAME",
+            &selected_hashes,
+            &scan,
+            &manual_model,
+            None
         ));
-        assert_eq!(selected_content_keeper_relative_path(
-            &root, &first_path, "SAME", &selected_hashes, &scan, &manual_model, None
-        ), None);
+        assert_eq!(
+            selected_content_keeper_relative_path(
+                &root,
+                &first_path,
+                "SAME",
+                &selected_hashes,
+                &scan,
+                &manual_model,
+                None
+            ),
+            None
+        );
     }
 }

@@ -4,7 +4,9 @@ use crate::{
     manifest::{
         replace_manifest_atomic, sha256_file, write_manifest_atomic, RestoreEntry, RestoreManifest,
     },
-    planner::{build_organization_plan_with_cfg, OrganizationAnalysisSnapshot, PlanItem},
+    planner::{
+        build_organization_plan_with_cfg, OrganizationAnalysisSnapshot, OrganizationPlan, PlanItem,
+    },
     scanner::{invalidate_latest_scan_for, scan_packages_core},
     operation,
     resource_cfg::{parse_resource_cfg, package_priority},
@@ -510,6 +512,55 @@ fn execute_organization_core(
     expected_cfg_rules: Vec<String>,
 ) -> Result<ExecutionResult, String> {
     let plan = build_organization_plan_with_cfg(folder, language, selected_paths, update_resource_cfg)?;
+    execute_organization_plan_core(
+        plan,
+        language,
+        update_resource_cfg,
+        expected_cfg_hash,
+        expected_cfg_rules,
+    )
+}
+
+/// Execute a plan that was already built by the planner.
+///
+/// The executor still revalidates every source path and SHA-256 while creating
+/// its rollback snapshot, so a plan cannot silently apply to changed files.
+/// Keeping this entry point separate prevents a caller that already has a
+/// preview (for example, a three-image cleanup) from paying for a second full
+/// scan of the entire Packages tree before the move begins.
+#[tauri::command]
+pub async fn execute_organization_plan_with_cfg(
+    plan: OrganizationPlan,
+    language: AppLanguage,
+    update_resource_cfg: bool,
+    expected_cfg_hash: Option<String>,
+    expected_cfg_rules: Vec<String>,
+) -> Result<ExecutionResult, String> {
+    operation::begin("organize", "executing_plan");
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        execute_organization_plan_core(
+            plan, language, update_resource_cfg, expected_cfg_hash, expected_cfg_rules,
+        )
+    })
+    .await
+    .map_err(|error| format!("Organization worker failed: {error}"))
+    .and_then(|output| output);
+    match &result {
+        Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" =>
+            operation::finish("organize", "complete", None),
+        Ok(output) => operation::finish("organize", "failed", Some(output.status.clone())),
+        Err(error) => operation::finish("organize", "failed", Some(error.clone())),
+    }
+    result
+}
+
+fn execute_organization_plan_core(
+    plan: OrganizationPlan,
+    language: AppLanguage,
+    update_resource_cfg: bool,
+    expected_cfg_hash: Option<String>,
+    expected_cfg_rules: Vec<String>,
+) -> Result<ExecutionResult, String> {
 
     // Only explicitly ready items will be moved. Keep every blocked item,
     // duplicate and conflicting destination in place for later manual review.

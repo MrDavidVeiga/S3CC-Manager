@@ -8470,10 +8470,9 @@ async function executeOrganization() {
   void monitorOrganizationProgress();
 
   try {
-    const result = await invoke("execute_organization_with_cfg", {
-      folder: state.folder,
+    const result = await invoke("execute_organization_plan_with_cfg", {
+      plan: completedPlan,
       language: state.language,
-      selectedPaths: [...state.selectedForPlan],
       updateResourceCfg: state.updateResourceCfg,
       expectedCfgHash: completedPlan.resourceCfgUpdate?.originalHash ?? null,
       expectedCfgRules: completedPlan.resourceCfgUpdate?.addedRules ?? [],

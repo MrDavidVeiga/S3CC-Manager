@@ -135,6 +135,7 @@ pub fn run() {
             planner::build_organization_plan_with_cfg,
             executor::execute_organization,
             executor::execute_organization_with_cfg,
+            executor::execute_organization_plan_with_cfg,
             restore::preview_restore,
             restore::execute_restore
         ])
