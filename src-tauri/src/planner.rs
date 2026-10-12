@@ -376,6 +376,12 @@ fn age_set(value: &str) -> Option<BTreeSet<String>> {
         "adulto",
         "idoso",
     ];
+    if ["múltiplas idades", "multiple ages", "múltiples edades"]
+        .iter()
+        .any(|label| normalized.contains(label))
+    {
+        return Some(ages.iter().map(|age| age.to_string()).collect());
+    }
     let mut positions = Vec::new();
     for (index, age) in ages.iter().enumerate() {
         let search = if *age == "adulto" && normalized.contains("jovem adulto") {
@@ -506,6 +512,42 @@ fn semantic_model_directory(index: &ManualModelIndex, candidate: &[String]) -> O
     }
 }
 
+// Some localized/manual taxonomies use a coarser age bucket than the CASP
+// classifier. Allow exactly one age component to be canonicalized only when
+// every other component matches and the model has one unique destination.
+// This never accepts a prefix, a lookalike name, or an invented directory.
+fn unique_model_directory_ignoring_age_bucket(
+    index: &ManualModelIndex,
+    candidate: &[String],
+) -> Option<Vec<String>> {
+    let matches = index
+        .directories
+        .values()
+        .filter(|canonical| canonical.len() == candidate.len())
+        .filter(|canonical| {
+            let mut age_mismatch = false;
+            for (left, right) in candidate.iter().zip(canonical.iter()) {
+                if model_components_match(left, right) {
+                    continue;
+                }
+                if age_set(left).is_some() && age_set(right).is_some() && !age_mismatch {
+                    age_mismatch = true;
+                    continue;
+                }
+                return false;
+            }
+            age_mismatch
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let unique = matches
+        .iter()
+        .map(|parts| model_key(parts))
+        .collect::<BTreeSet<_>>();
+    (unique.len() == 1).then(|| matches.into_iter().next().unwrap())
+}
+
 fn resolve_model_destination(
     index: &ManualModelIndex,
     root: &Path,
@@ -568,6 +610,7 @@ fn resolve_model_destination(
     let candidate = strip_packages_prefix(candidate_parts);
     let canonical_parts = index.directories.get(&model_key(&candidate)).cloned()
         .or_else(|| semantic_model_directory(index, &candidate))
+        .or_else(|| unique_model_directory_ignoring_age_bucket(index, &candidate))
         .ok_or_else(|| format!("No authorized taxonomy directory in the manual model matches the classified destination '{}'.", candidate_parts.join("\\")))?;
     let parts = model_parts_for_selected_root(root, source, &canonical_parts)?;
     let evidence = if model_key(&canonical_parts) == model_key(&candidate) {
@@ -4817,6 +4860,79 @@ mod tests {
                 "Adolescente-Jovem Adulto-Adulto-Idoso",
                 "Pelos Corporais"
             ]
+        );
+    }
+
+    #[test]
+    fn manual_model_canonicalizes_unique_makeup_age_bucket_without_inventing_a_folder() {
+        let mut directories = BTreeMap::new();
+        directories.insert(
+            model_key(&[
+                "Maquiagem".into(),
+                "Unissex".into(),
+                "Jovem Adulto-Adulto".into(),
+                "Blush".into(),
+            ]),
+            vec![
+                "Maquiagem".into(),
+                "Unissex".into(),
+                "Jovem Adulto-Adulto".into(),
+                "Blush".into(),
+            ],
+        );
+        directories.insert(
+            model_key(&[
+                "Maquiagem".into(),
+                "Unissex".into(),
+                "Múltiplas Idades".into(),
+                "Sombra".into(),
+            ]),
+            vec![
+                "Maquiagem".into(),
+                "Unissex".into(),
+                "Múltiplas Idades".into(),
+                "Sombra".into(),
+            ],
+        );
+        let index = ManualModelIndex {
+            directories,
+            files_by_sha256: HashMap::new(),
+        };
+        let root = Path::new("Mods").join("Packages");
+        let source = root.join("Jonas").join("makeup.package");
+        let blush = resolve_model_destination(
+            &index,
+            &root,
+            &source,
+            "MISSING-BLUSH",
+            &[
+                "Maquiagem".into(),
+                "Unissex".into(),
+                "Adolescente a Idoso".into(),
+                "Blush".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            blush.parts,
+            vec!["Maquiagem", "Unissex", "Jovem Adulto-Adulto", "Blush"]
+        );
+        let shadow = resolve_model_destination(
+            &index,
+            &root,
+            &source,
+            "MISSING-SHADOW",
+            &[
+                "Maquiagem".into(),
+                "Unissex".into(),
+                "Adolescente a Idoso".into(),
+                "Sombra".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            shadow.parts,
+            vec!["Maquiagem", "Unissex", "Múltiplas Idades", "Sombra"]
         );
     }
 

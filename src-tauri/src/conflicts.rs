@@ -1,5 +1,5 @@
 use crate::{
-    cache::{get_or_build_with_metrics, load_cache, retain_existing, save_cache},
+    cache::{get_or_build_with_metrics, load_cache, retain_existing, save_cache, CachedResource},
     catalog::{TYPE_CASP, TYPE_OBJD},
     operation::{self, CANCELLED_ERROR},
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, relative_package_path, ResourceCfgInfo},
@@ -68,6 +68,8 @@ struct PackageInfo {
     relative_path: PathBuf,
     file_sha256: String,
     readable: bool,
+    resource_count: usize,
+    resource_set_sha256: Option<String>,
     load_priority: Option<i32>,
     load_rule: Option<String>,
 }
@@ -115,12 +117,39 @@ pub struct ConflictFinding {
     pub shared_resource_count: usize,
     pub identical_payload_count: usize,
     pub different_payload_count: usize,
+    pub full_resource_set_comparable: bool,
+    pub full_resource_set_same: bool,
+    pub left_resource_count: usize,
+    pub right_resource_count: usize,
+    pub left_resource_set_sha256: Option<String>,
+    pub right_resource_set_sha256: Option<String>,
     pub evidence: Vec<ConflictEvidence>,
     pub evidence_truncated: bool,
     pub explanation_key: String,
     pub load_order_status: String,
     pub higher_priority_path: Option<String>,
     pub load_order_explanation_key: String,
+}
+
+fn resource_set_sha256(resources: &[CachedResource]) -> String {
+    // Compare the complete logical resource set: TGI plus decoded payload.
+    // Container compression metadata is intentionally excluded because it
+    // does not change the resource exposed to the game.
+    let mut entries = resources
+        .iter()
+        .map(|resource| {
+            format!(
+                "{:08X}|{:08X}|{:016X}|{}|{}",
+                resource.type_id,
+                resource.group,
+                resource.instance,
+                resource.payload_sha256.to_ascii_uppercase(),
+                resource.payload_size
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    format!("{:X}", Sha256::digest(entries.join("\n").as_bytes()))
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -621,6 +650,8 @@ pub fn analyze_conflicts_core(
                     relative_path,
                     file_sha256: String::new(),
                     readable: false,
+                    resource_count: 0,
+                    resource_set_sha256: None,
                     load_priority,
                     load_rule,
                 });
@@ -649,6 +680,8 @@ pub fn analyze_conflicts_core(
             relative_path,
             file_sha256: cached.file_sha256.clone(),
             readable,
+            resource_count: cached.resources.len(),
+            resource_set_sha256: readable.then(|| resource_set_sha256(&cached.resources)),
             load_priority,
             load_rule,
         });
@@ -887,6 +920,14 @@ pub fn analyze_conflicts_core(
             shared_resource_count: accumulator.shared_resource_count,
             identical_payload_count: accumulator.identical_payload_count,
             different_payload_count: accumulator.different_payload_count,
+            full_resource_set_comparable: left.resource_set_sha256.is_some()
+                && right.resource_set_sha256.is_some(),
+            full_resource_set_same: left.resource_set_sha256.is_some()
+                && left.resource_set_sha256 == right.resource_set_sha256,
+            left_resource_count: left.resource_count,
+            right_resource_count: right.resource_count,
+            left_resource_set_sha256: left.resource_set_sha256.clone(),
+            right_resource_set_sha256: right.resource_set_sha256.clone(),
             evidence,
             evidence_truncated: accumulator.evidence_truncated,
             load_order_status,
@@ -982,6 +1023,8 @@ mod tests {
             relative_path: PathBuf::from(name),
             file_sha256: format!("test-{name}"),
             readable: true,
+            resource_count: 0,
+            resource_set_sha256: None,
             load_priority: Some(priority),
             load_rule: Some("Packages/*.package".to_string()),
         };
@@ -1009,6 +1052,8 @@ mod tests {
             relative_path: PathBuf::from(name),
             file_sha256: sha.to_string(),
             readable: true,
+            resource_count: 0,
+            resource_set_sha256: None,
             load_priority: None,
             load_rule: None,
         };
