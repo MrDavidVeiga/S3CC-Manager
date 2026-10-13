@@ -25,7 +25,10 @@ for (const category of [
   assert.ok(health.includes('"' + category + '"'), 'Missing Health category: ' + category);
 }
 assert.ok(health.includes("HashSet"), "Repeated TGIs must be checked against a set");
-assert.ok(health.includes("get_or_build_with_metrics"), "Health must reuse the validated DBPF cache");
+assert.ok(
+  health.includes("get_or_build_analysis_with_metrics") || health.includes("get_or_build_with_metrics"),
+  "Health must reuse the validated DBPF cache",
+);
 assert.ok(health.includes("coverage_known"), "Resource.cfg coverage must distinguish unknown from uncovered");
 assert.ok(health.includes('"resource_cfg_error"'), "Resource.cfg read failures must remain visible");
 assert.ok(health.includes("follow_links(false)"), "Health traversal must not follow links");

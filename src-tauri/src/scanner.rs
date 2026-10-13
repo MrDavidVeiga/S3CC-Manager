@@ -4010,31 +4010,13 @@ pub fn scan_selected_package_paths(
 #[tauri::command]
 pub async fn scan_packages(folder: String, language: AppLanguage) -> Result<ScanResult, String> {
     const KIND: &str = "scan";
-    operation::begin(KIND, "starting");
-
-    let joined = tauri::async_runtime::spawn_blocking(move || {
+    let result = operation::run_blocking(KIND, "starting", move || {
         scan_packages_core(folder, language, Some(KIND))
     })
     .await;
-
-    let result = match joined {
-        Ok(result) => result,
-        Err(error) => {
-            let message = format!("Scanner worker failed: {error}");
-            operation::finish(KIND, "error", Some(message.clone()));
-            return Err(message);
-        }
-    };
-
-    match &result {
-        Ok(scan) => {
-            remember_latest_scan(scan, language);
-            operation::finish(KIND, "complete", None);
-        }
-        Err(error) if error == CANCELLED_ERROR => operation::mark_cancelled(KIND),
-        Err(error) => operation::finish(KIND, "error", Some(error.clone())),
+    if let Ok(scan) = &result {
+        remember_latest_scan(scan, language);
     }
-
     result
 }
 

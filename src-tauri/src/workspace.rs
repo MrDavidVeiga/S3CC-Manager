@@ -1,4 +1,4 @@
-use crate::manifest::sha256_file;
+use crate::{manifest::sha256_file, operation};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -341,7 +341,7 @@ pub fn load_workspace(folder: String) -> Result<WorkspaceStore, String> {
 }
 
 #[tauri::command]
-pub fn save_workspace(folder: String, store: WorkspaceStore) -> Result<WorkspaceStore, String> {
+fn save_workspace_core(folder: String, store: WorkspaceStore) -> Result<WorkspaceStore, String> {
     let root = canonical_root(&folder)?;
     let mut normalized = store;
     normalized.version = STORE_VERSION;
@@ -359,8 +359,16 @@ pub fn save_workspace(folder: String, store: WorkspaceStore) -> Result<Workspace
     Ok(normalized)
 }
 
+#[tauri::command(rename = "save_workspace")]
+pub async fn save_workspace(folder: String, store: WorkspaceStore) -> Result<WorkspaceStore, String> {
+    let scope = folder.clone();
+    operation::run_mutating_blocking_scoped("workspace_write", "saving", &[scope.as_str()], move || {
+        save_workspace_core(folder, store)
+    }).await
+}
+
 #[tauri::command]
-pub fn set_read_only(folder: String, read_only: bool) -> Result<WorkspaceStore, String> {
+fn set_read_only_core(folder: String, read_only: bool) -> Result<WorkspaceStore, String> {
     let root = canonical_root(&folder)?;
     let mut store = load_from_root(&root);
     store.read_only = read_only;
@@ -368,8 +376,16 @@ pub fn set_read_only(folder: String, read_only: bool) -> Result<WorkspaceStore, 
     Ok(store)
 }
 
+#[tauri::command(rename = "set_read_only")]
+pub async fn set_read_only(folder: String, read_only: bool) -> Result<WorkspaceStore, String> {
+    let scope = folder.clone();
+    operation::run_mutating_blocking_scoped("workspace_write", "updating_read_only", &[scope.as_str()], move || {
+        set_read_only_core(folder, read_only)
+    }).await
+}
+
 #[tauri::command]
-pub fn set_package_metadata(
+fn set_package_metadata_core(
     folder: String,
     package_path: String,
     tags: Vec<String>,
@@ -412,8 +428,22 @@ pub fn set_package_metadata(
     Ok(store)
 }
 
+#[tauri::command(rename = "set_package_metadata")]
+pub async fn set_package_metadata(
+    folder: String,
+    package_path: String,
+    tags: Vec<String>,
+    test_status: String,
+    favorite: bool,
+) -> Result<WorkspaceStore, String> {
+    let scope = folder.clone();
+    operation::run_mutating_blocking_scoped("workspace_write", "saving_metadata", &[scope.as_str()], move || {
+        set_package_metadata_core(folder, package_path, tags, test_status, favorite)
+    }).await
+}
+
 #[tauri::command]
-pub fn set_manual_classification(
+fn set_manual_classification_core(
     folder: String,
     package_path: String,
     destination: String,
@@ -453,8 +483,20 @@ pub fn set_manual_classification(
     Ok(store)
 }
 
+#[tauri::command(rename = "set_manual_classification")]
+pub async fn set_manual_classification(
+    folder: String,
+    package_path: String,
+    destination: String,
+) -> Result<WorkspaceStore, String> {
+    let scope = folder.clone();
+    operation::run_mutating_blocking_scoped("workspace_write", "saving_classification", &[scope.as_str()], move || {
+        set_manual_classification_core(folder, package_path, destination)
+    }).await
+}
+
 #[tauri::command]
-pub fn save_package_group(
+fn save_package_group_core(
     folder: String,
     id: String,
     name: String,
@@ -502,13 +544,35 @@ pub fn save_package_group(
     Ok(store)
 }
 
+#[tauri::command(rename = "save_package_group")]
+pub async fn save_package_group(
+    folder: String,
+    id: String,
+    name: String,
+    keep_together: bool,
+    package_paths: Vec<String>,
+) -> Result<WorkspaceStore, String> {
+    let scope = folder.clone();
+    operation::run_mutating_blocking_scoped("workspace_write", "saving_group", &[scope.as_str()], move || {
+        save_package_group_core(folder, id, name, keep_together, package_paths)
+    }).await
+}
+
 #[tauri::command]
-pub fn delete_package_group(folder: String, id: String) -> Result<WorkspaceStore, String> {
+fn delete_package_group_core(folder: String, id: String) -> Result<WorkspaceStore, String> {
     let root = canonical_root(&folder)?;
     let mut store = load_from_root(&root);
     store.groups.retain(|group| group.id != id);
     save_to_root(&root, &store)?;
     Ok(store)
+}
+
+#[tauri::command(rename = "delete_package_group")]
+pub async fn delete_package_group(folder: String, id: String) -> Result<WorkspaceStore, String> {
+    let scope = folder.clone();
+    operation::run_mutating_blocking_scoped("workspace_write", "deleting_group", &[scope.as_str()], move || {
+        delete_package_group_core(folder, id)
+    }).await
 }
 
 #[cfg(test)]

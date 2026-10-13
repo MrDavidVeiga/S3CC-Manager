@@ -665,6 +665,10 @@ fn write_catalog(path: &Path, language: AppLanguage, entries: &[CatalogEntry]) -
 
 #[tauri::command]
 pub fn open_cc_catalog(path: String) -> Result<CatalogDocument, String> {
+    open_cc_catalog_core(path)
+}
+
+fn open_cc_catalog_core(path: String) -> Result<CatalogDocument, String> {
     let path_buf = PathBuf::from(path.trim());
     let (mut entries, columns, schema, language_hint) = read_catalog_core(&path_buf)?;
     if path_buf.extension().and_then(|v| v.to_str()).map(|v| v.eq_ignore_ascii_case("xlsx")).unwrap_or(false) {
@@ -683,17 +687,16 @@ pub fn open_cc_catalog(path: String) -> Result<CatalogDocument, String> {
 }
 
 #[tauri::command]
-pub fn create_cc_catalog(path: String, language: AppLanguage) -> Result<CatalogDocument, String> {
+fn create_cc_catalog_core(path: String, language: AppLanguage) -> Result<CatalogDocument, String> {
     let path_buf = PathBuf::from(path.trim());
     if path_buf.as_os_str().is_empty() { return Err("No catalog path was provided.".to_string()); }
     if let Some(parent) = path_buf.parent() { fs::create_dir_all(parent).map_err(|e| format!("Could not create catalog folder: {e}"))?; }
     if path_buf.exists() { return Err("A file already exists at the selected catalog path.".to_string()); }
     write_catalog(&path_buf, language, &[])?;
-    open_cc_catalog(path_buf.to_string_lossy().to_string())
+    open_cc_catalog_core(path_buf.to_string_lossy().to_string())
 }
 
-#[tauri::command]
-pub fn save_cc_catalog(path: String, language: AppLanguage, mut entries: Vec<CatalogEntry>, backup_limit: usize) -> Result<CatalogSaveResult, String> {
+fn save_cc_catalog_core(path: String, language: AppLanguage, mut entries: Vec<CatalogEntry>, backup_limit: usize) -> Result<CatalogSaveResult, String> {
     let path_buf = PathBuf::from(path.trim());
     if path_buf.as_os_str().is_empty() { return Err("No catalog path was provided.".to_string()); }
     let validation = validate_entries(&entries);
@@ -708,6 +711,38 @@ pub fn save_cc_catalog(path: String, language: AppLanguage, mut entries: Vec<Cat
         path: path_buf.to_string_lossy().to_string(), backup_path: backup.map(|p| p.to_string_lossy().to_string()),
         schema_version: SCHEMA_VERSION, entries: entries.len(), validation,
     })
+}
+
+#[tauri::command(rename = "create_cc_catalog")]
+pub async fn create_cc_catalog(
+    path: String,
+    language: AppLanguage,
+) -> Result<CatalogDocument, String> {
+    let scope = path.clone();
+    operation::run_mutating_blocking_scoped(
+        "catalog_write",
+        "creating",
+        &[scope.as_str()],
+        move || create_cc_catalog_core(path, language),
+    )
+    .await
+}
+
+#[tauri::command(rename = "save_cc_catalog")]
+pub async fn save_cc_catalog(
+    path: String,
+    language: AppLanguage,
+    entries: Vec<CatalogEntry>,
+    backup_limit: usize,
+) -> Result<CatalogSaveResult, String> {
+    let scope = path.clone();
+    operation::run_mutating_blocking_scoped(
+        "catalog_write",
+        "saving",
+        &[scope.as_str()],
+        move || save_cc_catalog_core(path, language, entries, backup_limit),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -943,6 +978,8 @@ pub fn export_catalog_issues(
         issue_rows.push((row.entry, row.status));
     }
     let path_buf = PathBuf::from(path.trim());
+    let scope = path_buf.to_string_lossy().to_string();
+    operation::run_mutating_sync("catalog_write", "exporting", &[scope.as_str()], || {
     match path_buf.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
         "csv" => {
             let mut writer = WriterBuilder::new().from_path(&path_buf).map_err(|e| e.to_string())?;
@@ -969,6 +1006,7 @@ pub fn export_catalog_issues(
         _ => return Err("Issue export must be CSV or XLSX.".to_string()),
     }
     Ok(path_buf.to_string_lossy().to_string())
+    })
 }
 
 #[cfg(test)]

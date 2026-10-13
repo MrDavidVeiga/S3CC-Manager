@@ -153,7 +153,7 @@ fn compare_mods_roots_core(left_folder:String,right_folder:String)->Result<Snaps
 
 #[tauri::command]
 pub async fn create_snapshot(folder:String)->Result<ModsSnapshot,String>{
-    crate::operation::run_blocking("snapshot", "capturing", move || create_snapshot_core(folder)).await
+    crate::operation::run_mutating_blocking("snapshot", "capturing", move || create_snapshot_core(folder)).await
 }
 
 #[tauri::command]

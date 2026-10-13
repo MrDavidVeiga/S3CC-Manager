@@ -1,4 +1,4 @@
-use crate::{cache::{get_or_build,load_cache,save_cache}, operation::{self, CANCELLED_ERROR}};
+use crate::{cache::{load_cache,save_cache}, operation::{self, CANCELLED_ERROR}};
 use serde::Serialize;
 use std::path::{Path,PathBuf};
 
@@ -50,7 +50,7 @@ fn technical_search_core(folder:String,query:String)->Result<Vec<TechnicalSearch
         if operation::is_cancelled("technical_search"){return Err(CANCELLED_ERROR.to_string());}
         let rel=path.strip_prefix(&root).unwrap_or(path).to_string_lossy().replace('/',"\\");
         operation::update("technical_search",processed,Some(rel.clone()),"searching");
-        let (cached,_)=get_or_build(path,&mut cache)?;
+        let (cached,_)=crate::cache::get_or_build_analysis(path,&mut cache)?;
         let generic=type_filter.is_none()&&group_filter.is_none()&&instance_filter.is_none()&&sha_filter.is_none();
         if generic && (rel.to_ascii_lowercase().contains(&lower)||cached.file_sha256.to_ascii_lowercase().contains(&lower)){
             hits.push(TechnicalSearchHit{package_path:path.to_string_lossy().to_string(),relative_path:rel.clone(),file_sha256:cached.file_sha256.clone(),type_hex:None,group_hex:None,instance_hex:None,tgi:None,payload_sha256:None});

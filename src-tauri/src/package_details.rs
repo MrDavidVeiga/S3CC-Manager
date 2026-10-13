@@ -1,5 +1,5 @@
 use crate::{
-    cache::{get_or_build, load_cache, save_cache},
+    cache::{get_or_build_analysis, load_cache, save_cache},
     catalog::{TYPE_CASP, TYPE_OBJD},
     manifest::sha256_file,
     mesh_info::{analyze_package_meshes, PackageMeshInfo},
@@ -316,7 +316,7 @@ fn get_package_technical_details_core(
     }
 
     let mut cache = load_cache(&root);
-    let (cached, cache_hit) = get_or_build(&path, &mut cache)?;
+    let (cached, cache_hit) = get_or_build_analysis(&path, &mut cache)?;
     let _ = save_cache(&root, &cache);
 
     let resources = cached

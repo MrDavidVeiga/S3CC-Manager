@@ -1,3 +1,4 @@
+use crate::operation;
 use chrono::Local;
 use serde::Serialize;
 use std::{
@@ -85,21 +86,25 @@ pub fn save_audit_report(
     }
 
     let directory = reports_dir(&root);
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("Could not create reports directory {}: {error}", directory.display()))?;
+    let scope = directory.to_string_lossy().to_string();
+    operation::run_mutating_sync("report_write", "saving", &[scope.as_str()], move || {
+        fs::create_dir_all(&directory).map_err(|error| {
+            format!("Could not create reports directory {}: {error}", directory.display())
+        })?;
 
-    let (markdown_path, json_path) = unique_paths(&directory, &kind);
-    write_new(&markdown_path, markdown.as_bytes())?;
+        let (markdown_path, json_path) = unique_paths(&directory, &kind);
+        write_new(&markdown_path, markdown.as_bytes())?;
 
-    if let Err(error) = write_new(&json_path, json_content.as_bytes()) {
-        let _ = fs::remove_file(&markdown_path);
-        return Err(error);
-    }
+        if let Err(error) = write_new(&json_path, json_content.as_bytes()) {
+            let _ = fs::remove_file(&markdown_path);
+            return Err(error);
+        }
 
-    Ok(AuditReportResult {
-        directory: directory.to_string_lossy().to_string(),
-        markdown_path: markdown_path.to_string_lossy().to_string(),
-        json_path: json_path.to_string_lossy().to_string(),
+        Ok(AuditReportResult {
+            directory: directory.to_string_lossy().to_string(),
+            markdown_path: markdown_path.to_string_lossy().to_string(),
+            json_path: json_path.to_string_lossy().to_string(),
+        })
     })
 }
 

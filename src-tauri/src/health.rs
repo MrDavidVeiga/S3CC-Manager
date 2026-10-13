@@ -1,5 +1,5 @@
 use crate::{
-    cache::{get_or_build_with_metrics, load_cache, retain_existing, save_cache},
+    cache::{get_or_build_analysis_with_metrics, load_cache, retain_existing, save_cache},
     operation,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     structure_manager::{append_log, ManualOperationRecord},
@@ -119,7 +119,7 @@ fn outside_packages(root:&Path)->Vec<String>{
     out.sort_by_key(|v|v.to_ascii_lowercase());out
 }
 #[tauri::command]
-pub fn remove_empty_folder(folder:String,relative_path:String)->Result<bool,String>{
+fn remove_empty_folder_core(folder:String,relative_path:String)->Result<bool,String>{
     let root=canonical_root(&folder)?;
     ensure_writable(&root)?;
     let normalized=relative_path.replace('\\',"/");
@@ -161,6 +161,18 @@ pub fn remove_empty_folder(folder:String,relative_path:String)->Result<bool,Stri
         },
     );
     Ok(true)
+}
+
+#[tauri::command(rename = "remove_empty_folder")]
+pub async fn remove_empty_folder(folder: String, relative_path: String) -> Result<bool, String> {
+    let scope = format!("{}\\{}", folder, relative_path);
+    operation::run_mutating_blocking_scoped(
+        "folder_write",
+        "removing_empty_folder",
+        &[scope.as_str()],
+        move || remove_empty_folder_core(folder, relative_path),
+    )
+    .await
 }
 
 // Error classification is intentionally conservative. A failed read is not
@@ -265,7 +277,7 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
         stats.packages+=1;
         package_paths.push(e.path().to_path_buf());
 
-        match get_or_build_with_metrics(e.path(),&mut cache) {
+        match get_or_build_analysis_with_metrics(e.path(),&mut cache) {
             Ok((cached,metrics))=>{
                 if metrics.cache_hit {stats.cache_hits+=1;} else {stats.cache_misses+=1;}
                 if let Some(error)=cached.parse_error {

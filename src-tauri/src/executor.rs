@@ -697,7 +697,7 @@ pub async fn execute_organization_with_cfg(
     // The extensive snapshot/hash work MUST run off the WebView/main
     // thread. Otherwise progress polling cannot update the UI.
     // Keep the file-move/rollback sequence unchanged and uninterruptible.
-    operation::begin_mutating("organize", "planning")?;
+    let operation_run = operation::begin_mutating("organize", "planning")?;
     let result = tauri::async_runtime::spawn_blocking(move || {
         execute_organization_core(
             folder, language, selected_paths, update_resource_cfg,
@@ -709,9 +709,9 @@ pub async fn execute_organization_with_cfg(
     .and_then(|output| output);
     match &result {
         Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" =>
-            operation::finish("organize", "complete", None),
-        Ok(output) => operation::finish("organize", "failed", Some(output.status.clone())),
-        Err(error) => operation::finish("organize", "failed", Some(error.clone())),
+            operation::finish(&operation_run, "complete", None),
+        Ok(output) => operation::finish(&operation_run, "failed", Some(output.status.clone())),
+        Err(error) => operation::finish(&operation_run, "failed", Some(error.clone())),
     }
     result
 }
@@ -749,7 +749,7 @@ pub async fn execute_organization_plan_with_cfg(
     expected_cfg_hash: Option<String>,
     expected_cfg_rules: Vec<String>,
 ) -> Result<ExecutionResult, String> {
-    operation::begin_mutating("organize", "executing_plan")?;
+    let operation_run = operation::begin_mutating("organize", "executing_plan")?;
     let result = tauri::async_runtime::spawn_blocking(move || {
         execute_organization_plan_core(
             plan, language, update_resource_cfg, expected_cfg_hash, expected_cfg_rules,
@@ -760,9 +760,9 @@ pub async fn execute_organization_plan_with_cfg(
     .and_then(|output| output);
     match &result {
         Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" =>
-            operation::finish("organize", "complete", None),
-        Ok(output) => operation::finish("organize", "failed", Some(output.status.clone())),
-        Err(error) => operation::finish("organize", "failed", Some(error.clone())),
+            operation::finish(&operation_run, "complete", None),
+        Ok(output) => operation::finish(&operation_run, "failed", Some(output.status.clone())),
+        Err(error) => operation::finish(&operation_run, "failed", Some(error.clone())),
     }
     result
 }

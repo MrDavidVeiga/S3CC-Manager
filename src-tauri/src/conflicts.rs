@@ -951,29 +951,10 @@ pub fn analyze_conflicts_core(
 #[tauri::command]
 pub async fn analyze_conflicts(folder: String, selected_paths: Option<Vec<String>>) -> Result<ConflictAnalysis, String> {
     const KIND: &str = "conflicts";
-    operation::begin(KIND, "starting");
-
-    let joined = tauri::async_runtime::spawn_blocking(move || {
+    operation::run_blocking(KIND, "starting", move || {
         analyze_conflicts_core(folder, selected_paths, Some(KIND))
     })
-    .await;
-
-    let result = match joined {
-        Ok(result) => result,
-        Err(error) => {
-            let message = format!("Conflicts worker failed: {error}");
-            operation::finish(KIND, "error", Some(message.clone()));
-            return Err(message);
-        }
-    };
-
-    match &result {
-        Ok(_) => operation::finish(KIND, "complete", None),
-        Err(error) if error == CANCELLED_ERROR => operation::mark_cancelled(KIND),
-        Err(error) => operation::finish(KIND, "error", Some(error.clone())),
-    }
-
-    result
+    .await
 }
 
 #[cfg(test)]

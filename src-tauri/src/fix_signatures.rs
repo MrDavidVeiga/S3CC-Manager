@@ -570,7 +570,7 @@ fn rebuild_persistent_fix_signature_index_core(
 pub async fn build_persistent_fix_signature_index(
     reference_root: String,
 ) -> Result<FixSignatureIndex, String> {
-    crate::operation::run_blocking("fix_index", "building", move || {
+    crate::operation::run_mutating_blocking("fix_index", "building", move || {
         build_persistent_fix_signature_index_core(reference_root)
     })
     .await
@@ -580,7 +580,7 @@ pub async fn build_persistent_fix_signature_index(
 pub async fn rebuild_persistent_fix_signature_index(
     reference_root: String,
 ) -> Result<FixSignatureIndex, String> {
-    crate::operation::run_blocking("fix_index", "rebuilding", move || {
+    crate::operation::run_mutating_blocking("fix_index", "rebuilding", move || {
         rebuild_persistent_fix_signature_index_core(reference_root)
     })
     .await
@@ -680,6 +680,7 @@ mod tests {
             size: 12,
             modified_ns: 0,
             file_sha256: "FILE".to_string(),
+            quick_fingerprint: "".to_string(),
             dbpf_major: Some(2),
             dbpf_minor: Some(0),
             resources: vec![CachedResource {

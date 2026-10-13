@@ -3,20 +3,32 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::{Instant, UNIX_EPOCH},
 };
 
 const CACHE_VERSION: u32 = 1;
 
+fn cache_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CacheBuildMetrics {
     pub cache_hit: bool,
     pub total_ms: u128,
+    pub total_us: u128,
     pub hash_ms: u128,
+    pub hash_us: u128,
+    pub quick_fingerprint_ms: u128,
+    pub quick_fingerprint_us: u128,
     pub dbpf_load_ms: u128,
     pub resource_decode_ms: u128,
+    pub integrity_verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +49,8 @@ pub struct CachedPackage {
     pub size: u64,
     pub modified_ns: u128,
     pub file_sha256: String,
+    #[serde(default)]
+    pub quick_fingerprint: String,
     pub dbpf_major: Option<u32>,
     pub dbpf_minor: Option<u32>,
     pub resources: Vec<CachedResource>,
@@ -69,6 +83,38 @@ fn metadata_signature(path: &Path) -> Result<(u64, u128), String> {
         .map_err(|_| format!("Modified time is before UNIX epoch: {}", path.display()))?
         .as_nanos();
     Ok((metadata.len(), modified_ns))
+}
+
+fn quick_fingerprint(path: &Path, size: u64) -> Result<String, String> {
+    const SAMPLE_BYTES: u64 = 16 * 1024;
+    let mut file = File::open(path)
+        .map_err(|error| format!("Could not open {} for cache validation: {error}", path.display()))?;
+    let mut offsets = vec![0u64];
+    if size > SAMPLE_BYTES {
+        offsets.extend([size / 4, size / 2, size.saturating_sub(SAMPLE_BYTES)]);
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+
+    let mut digest = Sha256::new();
+    digest.update(size.to_le_bytes());
+    let mut buffer = vec![0u8; SAMPLE_BYTES as usize];
+    for offset in offsets {
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| format!("Could not seek {} for cache validation: {error}", path.display()))?;
+        let requested = (size.saturating_sub(offset)).min(SAMPLE_BYTES) as usize;
+        let mut read = 0usize;
+        while read < requested {
+            let count = file
+                .read(&mut buffer[read..requested])
+                .map_err(|error| format!("Could not read {} for cache validation: {error}", path.display()))?;
+            if count == 0 { break; }
+            read += count;
+        }
+        digest.update(offset.to_le_bytes());
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:X}", digest.finalize()))
 }
 
 fn canonical_key(path: &Path) -> Result<String, String> {
@@ -124,6 +170,9 @@ pub fn load_cache(root: &Path) -> FingerprintCache {
 }
 
 pub fn save_cache(root: &Path, cache: &FingerprintCache) -> Result<(), String> {
+    let _guard = cache_write_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = cache_path(root);
     let parent = path
         .parent()
@@ -153,37 +202,107 @@ pub fn get_or_build_with_metrics(
     path: &Path,
     cache: &mut FingerprintCache,
 ) -> Result<(CachedPackage, CacheBuildMetrics), String> {
+    get_or_build_with_validation(path, cache, true)
+}
+
+/// Read-only UI/health consumers can use a bounded content probe. It avoids
+/// reopening and decoding an unchanged DBPF, but it is deliberately not an
+/// integrity proof; protected operations continue through the full SHA-256
+/// path above.
+pub fn get_or_build_analysis_with_metrics(
+    path: &Path,
+    cache: &mut FingerprintCache,
+) -> Result<(CachedPackage, CacheBuildMetrics), String> {
+    get_or_build_with_validation(path, cache, false)
+}
+
+fn get_or_build_with_validation(
+    path: &Path,
+    cache: &mut FingerprintCache,
+    require_integrity: bool,
+) -> Result<(CachedPackage, CacheBuildMetrics), String> {
     let total_started = Instant::now();
     let key = canonical_key(path)?;
     let (size, modified_ns) = metadata_signature(path)?;
 
-    // Metadata is a useful fast identity hint, but it is not sufficient to
-    // prevent stale analysis when an external process restores bytes while
-    // preserving size and mtime. Validate the persisted fingerprint before
-    // reusing any structural result. This still avoids Package::load and
-    // resource decompression on a valid cache hit.
+    if let Some(existing) = cache.entries.get(&key) {
+        if existing.size == size && existing.modified_ns == modified_ns {
+            if require_integrity {
+                let hash_started = Instant::now();
+                let (file_sha256, _) = sha256_file(path).map_err(|error| {
+                    format!("Could not hash {}: {error}", path.display())
+                })?;
+                let hash_ms = hash_started.elapsed().as_millis();
+                let hash_us = hash_started.elapsed().as_micros();
+                if existing.file_sha256.eq_ignore_ascii_case(&file_sha256) {
+                    return Ok((
+                        existing.clone(),
+                        CacheBuildMetrics {
+                            cache_hit: true,
+                            total_ms: total_started.elapsed().as_millis(),
+                            total_us: total_started.elapsed().as_micros(),
+                            hash_ms,
+                            hash_us,
+                            integrity_verified: true,
+                            ..CacheBuildMetrics::default()
+                        },
+                    ));
+                }
+            } else if !existing.quick_fingerprint.is_empty() {
+                let quick_started = Instant::now();
+                let fingerprint = quick_fingerprint(path, size)?;
+                let quick_fingerprint_ms = quick_started.elapsed().as_millis();
+                let quick_fingerprint_us = quick_started.elapsed().as_micros();
+                if existing.quick_fingerprint == fingerprint {
+                    return Ok((
+                        existing.clone(),
+                        CacheBuildMetrics {
+                            cache_hit: true,
+                            total_ms: total_started.elapsed().as_millis(),
+                            total_us: total_started.elapsed().as_micros(),
+                            quick_fingerprint_ms,
+                            quick_fingerprint_us,
+                            integrity_verified: false,
+                            ..CacheBuildMetrics::default()
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
     let hash_started = Instant::now();
     let (file_sha256, _) =
         sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
     let hash_ms = hash_started.elapsed().as_millis();
-
+    let hash_us = hash_started.elapsed().as_micros();
     if let Some(existing) = cache.entries.get(&key) {
         if existing.size == size
             && existing.modified_ns == modified_ns
             && existing.file_sha256.eq_ignore_ascii_case(&file_sha256)
         {
+            let mut refreshed = existing.clone();
+            refreshed.quick_fingerprint = quick_fingerprint(path, size)?;
+            cache.entries.insert(key, refreshed.clone());
             return Ok((
-                existing.clone(),
+                refreshed,
                 CacheBuildMetrics {
                     cache_hit: true,
                     total_ms: total_started.elapsed().as_millis(),
+                    total_us: total_started.elapsed().as_micros(),
                     hash_ms,
+                    hash_us,
+                    integrity_verified: true,
                     ..CacheBuildMetrics::default()
                 },
             ));
         }
     }
 
+    let quick_started = Instant::now();
+    let quick_fingerprint_value = quick_fingerprint(path, size)?;
+    let quick_fingerprint_ms = quick_started.elapsed().as_millis();
+    let quick_fingerprint_us = quick_started.elapsed().as_micros();
     let load_started = Instant::now();
     let loaded = Package::load(path);
     let dbpf_load_ms = load_started.elapsed().as_millis();
@@ -218,6 +337,7 @@ pub fn get_or_build_with_metrics(
                 size,
                 modified_ns,
                 file_sha256,
+                quick_fingerprint: quick_fingerprint_value.clone(),
                 dbpf_major: Some(package.major),
                 dbpf_minor: Some(package.minor),
                 resources,
@@ -229,6 +349,7 @@ pub fn get_or_build_with_metrics(
             size,
             modified_ns,
             file_sha256,
+            quick_fingerprint: quick_fingerprint_value,
             dbpf_major: None,
             dbpf_minor: None,
             resources: Vec::new(),
@@ -243,9 +364,14 @@ pub fn get_or_build_with_metrics(
         CacheBuildMetrics {
             cache_hit: false,
             total_ms: total_started.elapsed().as_millis(),
+            total_us: total_started.elapsed().as_micros(),
             hash_ms,
+            hash_us,
+            quick_fingerprint_ms,
+            quick_fingerprint_us,
             dbpf_load_ms,
             resource_decode_ms,
+            integrity_verified: true,
         },
     ))
 }
@@ -255,6 +381,14 @@ pub fn get_or_build(
     cache: &mut FingerprintCache,
 ) -> Result<(CachedPackage, bool), String> {
     let (package, metrics) = get_or_build_with_metrics(path, cache)?;
+    Ok((package, metrics.cache_hit))
+}
+
+pub fn get_or_build_analysis(
+    path: &Path,
+    cache: &mut FingerprintCache,
+) -> Result<(CachedPackage, bool), String> {
+    let (package, metrics) = get_or_build_analysis_with_metrics(path, cache)?;
     Ok((package, metrics.cache_hit))
 }
 
@@ -295,19 +429,22 @@ pub fn clear_cache(folder: String) -> Result<bool, String> {
         .canonicalize()
         .map_err(|error| format!("Could not resolve cache root: {error}"))?;
 
-    // The learned Fix/Override model is a separate persistent evidence store.
-    // Clearing transient DBPF fingerprints must never remove or invalidate it;
-    // it is independently rebuilt through fix_signatures commands.
-    let mut removed = false;
-    for path in [cache_path(&root), legacy_cache_path(&root)] {
-        if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|error| format!("Could not remove cache {}: {error}", path.display()))?;
-            removed = true;
+    let scope = cache_path(&root).to_string_lossy().to_string();
+    crate::operation::run_mutating_sync("cache_write", "clearing", &[scope.as_str()], move || {
+        // The learned Fix/Override model is a separate persistent evidence store.
+        // Clearing transient DBPF fingerprints must never remove or invalidate it;
+        // it is independently rebuilt through fix_signatures commands.
+        let mut removed = false;
+        for path in [cache_path(&root), legacy_cache_path(&root)] {
+            if path.exists() {
+                fs::remove_file(&path).map_err(|error| {
+                    format!("Could not remove cache {}: {error}", path.display())
+                })?;
+                removed = true;
+            }
         }
-    }
-
-    Ok(removed)
+        Ok(removed)
+    })
 }
 
 #[cfg(test)]
@@ -356,8 +493,46 @@ mod tests {
         assert!(!third.cache_hit);
         assert_eq!(changed.dbpf_minor, Some(1));
         println!(
-            "cache_benchmark first_ms={} hit_ms={} invalidated_ms={} hit_dbpf_load_ms={} hit_decode_ms={}",
-            first.total_ms, second.total_ms, third.total_ms, second.dbpf_load_ms, second.resource_decode_ms
+            "cache_benchmark first_ms={} hit_ms={} invalidated_ms={} hit_hash_ms={} hit_hash_us={} hit_dbpf_load_ms={} hit_decode_ms={}",
+            first.total_ms, second.total_ms, third.total_ms, second.hash_ms, second.hash_us, second.dbpf_load_ms, second.resource_decode_ms
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn analysis_probe_invalidates_same_size_change_even_when_mtime_is_reused() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("s3cc-analysis-cache-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("same-size.package");
+        write_empty_dbpf(&package, 0);
+        let mut cache = FingerprintCache::default();
+        let (_, first) = get_or_build_analysis_with_metrics(&package, &mut cache).unwrap();
+        assert!(!first.cache_hit);
+        let (_, hit) = get_or_build_analysis_with_metrics(&package, &mut cache).unwrap();
+        assert!(hit.cache_hit);
+        println!(
+            "analysis_cache_hit quick_fingerprint_ms={} quick_fingerprint_us={} total_us={}",
+            hit.quick_fingerprint_ms, hit.quick_fingerprint_us, hit.total_us
+        );
+
+        write_empty_dbpf(&package, 1);
+        let key = canonical_key(&package).unwrap();
+        let current_metadata = metadata_signature(&package).unwrap();
+        let entry = cache.entries.get_mut(&key).unwrap();
+        entry.size = current_metadata.0;
+        entry.modified_ns = current_metadata.1;
+
+        let (changed, second) = get_or_build_analysis_with_metrics(&package, &mut cache).unwrap();
+        assert!(!second.cache_hit);
+        assert_eq!(changed.dbpf_minor, Some(1));
+        assert!(second.integrity_verified);
+        println!(
+            "analysis_cache_changed hash_ms={} hash_us={} quick_fingerprint_ms={} quick_fingerprint_us={} total_ms={} total_us={}",
+            second.hash_ms, second.hash_us, second.quick_fingerprint_ms, second.quick_fingerprint_us, second.total_ms, second.total_us
         );
         std::fs::remove_dir_all(root).unwrap();
     }

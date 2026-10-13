@@ -1,3 +1,4 @@
+use crate::operation;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -196,7 +197,10 @@ pub fn set_conflict_decision(
         }
     }
 
-    save_store(&root, &store)?;
+    let scope = root.to_string_lossy().to_string();
+    operation::run_mutating_sync("review_write", "saving", &[scope.as_str()], || {
+        save_store(&root, &store)
+    })?;
     Ok(store.decisions.into_values().collect())
 }
 
@@ -267,7 +271,12 @@ pub async fn set_conflict_decisions_bulk(
     folder: String,
     changes: Vec<ConflictDecisionChange>,
 ) -> Result<Vec<ConflictDecisionRecord>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let scope = folder.clone();
+    operation::run_mutating_blocking_scoped(
+        "review_write",
+        "saving",
+        &[scope.as_str()],
+        move || {
         let root = canonical_root(&folder)?;
         if changes.is_empty() {
             return Ok(load_store(&root).decisions.into_values().collect());
@@ -277,7 +286,8 @@ pub async fn set_conflict_decisions_bulk(
         // One persistence operation rather than N reads and writes.
         save_store(&root, &store)?;
         Ok(store.decisions.into_values().collect())
-    }).await.map_err(|error| format!("Conflict review worker failed: {error}"))?
+        },
+    ).await
 }
 
 #[cfg(test)]

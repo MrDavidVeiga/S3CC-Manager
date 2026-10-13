@@ -16,7 +16,12 @@ assert(operation.includes("spawn_blocking"), "Heavy commands must use a blocking
 assert(operation.includes("begin_mutating"), "Mutating operations need a backend serialization lock.");
 assert(operation.includes("run_blocking"), "Read-only worker helper is missing.");
 assert(operation.includes("run_mutating_blocking"), "Mutating worker helper is missing.");
+assert(operation.includes("OperationRun") && operation.includes("generation"), "Operation generations must isolate stale completions.");
+assert(operation.includes("begin_mutating_scoped"), "Mutating writes need destination scopes.");
 assert(cache.includes("file_sha256") && cache.includes("sha256_file"), "Cache invalidation must verify file content.");
+assert(cache.includes("quick_fingerprint") && cache.includes("integrity_verified"), "Analysis and integrity cache paths must remain distinct.");
+assert(read("src-tauri/src/cc_catalog.rs").includes('rename = "save_cc_catalog"'), "Catalog writes need mutation coordination.");
+assert(read("src-tauri/src/health.rs").includes('rename = "remove_empty_folder"'), "Empty-folder removal needs mutation coordination.");
 assert(scanner.includes("file_signatures") && scanner.includes("latest_scan_is_current"), "In-memory scans must validate external changes.");
 assert(planner.includes("pub async fn build_organization_plan_with_cfg"), "Planner command must be asynchronous.");
 assert(app.includes("beginToolsOperation") && app.includes("cancelToolsOperation"), "Tools operations need progress and cancellation wiring.");

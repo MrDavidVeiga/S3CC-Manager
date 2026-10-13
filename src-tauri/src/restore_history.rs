@@ -182,8 +182,11 @@ pub fn remove_restore_history(
     }
 
     crate::workspace::ensure_writable(&root)?;
-    fs::remove_file(&canonical)
-        .map_err(|error| format!("Could not remove restore manifest: {error}"))?;
-    Ok(())
+    let scope = canonical.to_string_lossy().to_string();
+    operation::run_mutating_sync("restore_history_write", "removing", &[scope.as_str()], || {
+        fs::remove_file(&canonical)
+            .map_err(|error| format!("Could not remove restore manifest: {error}"))
+    })
 }
 
+use crate::operation;

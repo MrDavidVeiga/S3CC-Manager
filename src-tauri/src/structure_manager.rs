@@ -1,4 +1,4 @@
-use crate::workspace::ensure_writable;
+use crate::{operation, workspace::ensure_writable};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -291,7 +291,7 @@ pub fn list_structure_directories(folder: String) -> Result<Vec<StructureDirecto
 }
 
 #[tauri::command]
-pub fn create_structure_folder(
+fn create_structure_folder_core(
     folder: String,
     parent_relative_path: String,
     nested_path: String,
@@ -361,8 +361,23 @@ pub fn create_structure_folder(
     })
 }
 
+#[tauri::command(rename = "create_structure_folder")]
+pub fn create_structure_folder(
+    folder: String,
+    parent_relative_path: String,
+    nested_path: String,
+) -> Result<StructureActionResult, String> {
+    let scope = folder.clone();
+    operation::run_mutating_sync(
+        "structure_write",
+        "creating_folder",
+        &[scope.as_str()],
+        move || create_structure_folder_core(folder, parent_relative_path, nested_path),
+    )
+}
+
 #[tauri::command]
-pub fn move_structure_path(
+fn move_structure_path_core(
     folder: String,
     source_relative_path: String,
     target_parent_relative_path: String,
@@ -414,8 +429,23 @@ pub fn move_structure_path(
     })
 }
 
+#[tauri::command(rename = "move_structure_path")]
+pub fn move_structure_path(
+    folder: String,
+    source_relative_path: String,
+    target_parent_relative_path: String,
+) -> Result<StructureActionResult, String> {
+    let scope = folder.clone();
+    operation::run_mutating_sync(
+        "structure_write",
+        "moving_path",
+        &[scope.as_str()],
+        move || move_structure_path_core(folder, source_relative_path, target_parent_relative_path),
+    )
+}
+
 #[tauri::command]
-pub fn rename_structure_folder(
+fn rename_structure_folder_core(
     folder: String,
     source_relative_path: String,
     new_name: String,
@@ -461,6 +491,21 @@ pub fn rename_structure_folder(
     })
 }
 
+#[tauri::command(rename = "rename_structure_folder")]
+pub fn rename_structure_folder(
+    folder: String,
+    source_relative_path: String,
+    new_name: String,
+) -> Result<StructureActionResult, String> {
+    let scope = folder.clone();
+    operation::run_mutating_sync(
+        "structure_write",
+        "renaming_folder",
+        &[scope.as_str()],
+        move || rename_structure_folder_core(folder, source_relative_path, new_name),
+    )
+}
+
 #[tauri::command]
 pub fn list_manual_operations(folder: String) -> Result<Vec<ManualOperationRecord>, String> {
     let root = canonical_root(&folder)?;
@@ -482,7 +527,7 @@ pub fn list_manual_operations(folder: String) -> Result<Vec<ManualOperationRecor
 }
 
 #[tauri::command]
-pub fn undo_last_manual_operation(folder: String) -> Result<StructureActionResult, String> {
+fn undo_last_manual_operation_core(folder: String) -> Result<StructureActionResult, String> {
     let root = canonical_root(&folder)?;
     ensure_writable(&root)?;
     let records = list_manual_operations(folder.clone())?;
@@ -581,6 +626,17 @@ pub fn undo_last_manual_operation(folder: String) -> Result<StructureActionResul
         source_relative_path: source_relative,
         destination_relative_path: destination_relative,
     })
+}
+
+#[tauri::command(rename = "undo_last_manual_operation")]
+pub fn undo_last_manual_operation(folder: String) -> Result<StructureActionResult, String> {
+    let scope = folder.clone();
+    operation::run_mutating_sync(
+        "structure_write",
+        "undoing_operation",
+        &[scope.as_str()],
+        move || undo_last_manual_operation_core(folder),
+    )
 }
 
 #[cfg(test)]
