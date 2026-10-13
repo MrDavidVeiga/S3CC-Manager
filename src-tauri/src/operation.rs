@@ -46,6 +46,11 @@ fn registry() -> &'static Mutex<HashMap<String, OperationStatus>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn lifecycle_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn mutation_owner() -> &'static Mutex<Vec<ActiveMutation>> {
     static OWNER: OnceLock<Mutex<Vec<ActiveMutation>>> = OnceLock::new();
     OWNER.get_or_init(|| Mutex::new(Vec::new()))
@@ -78,7 +83,7 @@ where
     f(status);
 }
 
-pub fn begin(kind: &str, phase: &str) -> Result<OperationRun, String> {
+fn begin_locked(kind: &str, phase: &str) -> Result<OperationRun, String> {
     let generation = next_generation();
     let mut runs = active_runs()
         .lock()
@@ -108,6 +113,13 @@ pub fn begin(kind: &str, phase: &str) -> Result<OperationRun, String> {
     })
 }
 
+pub fn begin(kind: &str, phase: &str) -> Result<OperationRun, String> {
+    let _lifecycle = lifecycle_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    begin_locked(kind, phase)
+}
+
 /// Start an operation that can mutate files.  The UI normally serializes
 /// these actions, but the backend must also reject concurrent callers so a
 /// stale second invocation cannot interleave with a transaction or rollback.
@@ -120,6 +132,9 @@ pub fn begin_mutating_scoped(
     phase: &str,
     scopes: &[&str],
 ) -> Result<OperationRun, String> {
+    let _lifecycle = lifecycle_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let normalized_scopes = scopes
         .iter()
         .map(|scope| normalize_scope(scope))
@@ -136,9 +151,9 @@ pub fn begin_mutating_scoped(
             current.run.kind
         ));
     }
-    // Holding the mutation registry lock while reserving the per-kind run
-    // prevents two mutating commands from passing their checks together.
-    let run = begin(kind, phase)?;
+    // Holding the lifecycle and mutation locks while reserving the per-kind
+    // run prevents two mutating commands from passing their checks together.
+    let run = begin_locked(kind, phase)?;
     mutations.push(ActiveMutation {
         run: run.clone(),
         scopes: normalized_scopes,
@@ -170,16 +185,59 @@ fn release_mutation(run: &OperationRun) {
     mutations.retain(|active| active.run != *run);
 }
 
-fn release_run(run: &OperationRun) -> bool {
-    release_mutation(run);
-    let mut runs = active_runs()
+fn release_run(
+    run: &OperationRun,
+    phase: &str,
+    message: Option<String>,
+    cancelled: bool,
+) -> bool {
+    let _lifecycle = lifecycle_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if runs.get(&run.kind) != Some(&run.generation) {
-        return false;
+    {
+        let mut runs = active_runs()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if runs.get(&run.kind) != Some(&run.generation) {
+            return false;
+        }
+        runs.remove(&run.kind);
     }
-    runs.remove(&run.kind);
+    #[cfg(test)]
+    pause_after_active_release(&run.kind);
+    release_mutation(run);
+    with_status(&run.kind, |status| {
+        status.running = false;
+        status.cancel_requested = cancelled;
+        status.current = None;
+        status.phase = phase.to_string();
+        status.message = message.clone();
+        status.elapsed_ms = now_ms().saturating_sub(status.started_unix_ms);
+    });
     true
+}
+
+#[cfg(test)]
+fn completion_pause() -> &'static Mutex<Option<(String, std::sync::Arc<std::sync::Barrier>)>> {
+    static PAUSE: OnceLock<Mutex<Option<(
+        String,
+        std::sync::Arc<std::sync::Barrier>,
+    )>>> = OnceLock::new();
+    PAUSE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn pause_after_active_release(kind: &str) {
+    let barrier = completion_pause()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|(paused_kind, _)| paused_kind == kind)
+        .map(|(_, barrier)| barrier.clone());
+    if let Some(barrier) = barrier {
+        barrier.wait();
+        barrier.wait();
+    }
 }
 
 pub fn set_total(kind: &str, total: usize) {
@@ -206,30 +264,16 @@ pub fn is_cancelled(kind: &str) -> bool {
 }
 
 pub fn finish(run: &OperationRun, phase: &str, message: Option<String>) {
-    if !release_run(run) {
-        return;
-    }
-    with_status(&run.kind, |status| {
-        status.running = false;
-        status.current = None;
-        status.phase = phase.to_string();
-        status.message = message.clone();
-        status.elapsed_ms = now_ms().saturating_sub(status.started_unix_ms);
-    });
+    let _ = release_run(run, phase, message, false);
 }
 
 pub fn mark_cancelled(run: &OperationRun) {
-    if !release_run(run) {
-        return;
-    }
-    with_status(&run.kind, |status| {
-        status.running = false;
-        status.cancel_requested = true;
-        status.current = None;
-        status.phase = "cancelled".to_string();
-        status.message = Some("Cancelled by user.".to_string());
-        status.elapsed_ms = now_ms().saturating_sub(status.started_unix_ms);
-    });
+    let _ = release_run(
+        run,
+        "cancelled",
+        Some("Cancelled by user.".to_string()),
+        true,
+    );
 }
 
 /// Run CPU/I/O-heavy read-only work on Tauri's blocking pool and keep the
@@ -371,6 +415,57 @@ mod tests {
         assert!(status.running);
         finish(&second, "complete", None);
         assert!(!get_operation_status("same-kind".into()).running);
+    }
+
+    #[test]
+    fn finalization_and_new_begin_are_atomic_under_interleaving() {
+        use std::sync::{mpsc, Arc, Barrier};
+        use std::thread;
+        use std::time::Duration;
+
+        let kind = "atomic-finalization-race";
+        let first = begin(kind, "starting").unwrap();
+        let pause = Arc::new(Barrier::new(2));
+        *completion_pause()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((kind.to_string(), pause.clone()));
+
+        let finish_thread = thread::spawn(move || {
+            finish(&first, "complete", None);
+        });
+
+        // release_run has removed the active generation but has not yet
+        // published the terminal status.  A new begin must remain blocked by
+        // the lifecycle lock during this interval.
+        pause.wait();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let begin_thread = thread::spawn(move || {
+            let result = begin(kind, "starting");
+            started_tx.send(result.is_ok()).unwrap();
+            if let Ok(run) = result {
+                finish(&run, "complete", None);
+            }
+        });
+
+        let blocked_until_completion = started_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err();
+
+        // Publish the first terminal state and release the lifecycle lock.
+        pause.wait();
+        *completion_pause()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        finish_thread.join().unwrap();
+        begin_thread.join().unwrap();
+
+        let second_started = started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        assert!(blocked_until_completion);
+        assert!(second_started);
+        assert!(!get_operation_status(kind.to_string()).running);
     }
 
     #[test]
