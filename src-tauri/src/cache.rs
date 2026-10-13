@@ -157,23 +157,32 @@ pub fn get_or_build_with_metrics(
     let key = canonical_key(path)?;
     let (size, modified_ns) = metadata_signature(path)?;
 
+    // Metadata is a useful fast identity hint, but it is not sufficient to
+    // prevent stale analysis when an external process restores bytes while
+    // preserving size and mtime. Validate the persisted fingerprint before
+    // reusing any structural result. This still avoids Package::load and
+    // resource decompression on a valid cache hit.
+    let hash_started = Instant::now();
+    let (file_sha256, _) =
+        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let hash_ms = hash_started.elapsed().as_millis();
+
     if let Some(existing) = cache.entries.get(&key) {
-        if existing.size == size && existing.modified_ns == modified_ns {
+        if existing.size == size
+            && existing.modified_ns == modified_ns
+            && existing.file_sha256.eq_ignore_ascii_case(&file_sha256)
+        {
             return Ok((
                 existing.clone(),
                 CacheBuildMetrics {
                     cache_hit: true,
                     total_ms: total_started.elapsed().as_millis(),
+                    hash_ms,
                     ..CacheBuildMetrics::default()
                 },
             ));
         }
     }
-
-    let hash_started = Instant::now();
-    let (file_sha256, _) =
-        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
-    let hash_ms = hash_started.elapsed().as_millis();
 
     let load_started = Instant::now();
     let loaded = Package::load(path);
@@ -305,11 +314,45 @@ pub fn clear_cache(folder: String) -> Result<bool, String> {
 mod tests {
     use super::*;
 
+    fn write_empty_dbpf(path: &Path, minor: u32) {
+        let mut bytes = vec![0u8; 96];
+        bytes[0..4].copy_from_slice(b"DBPF");
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&minor.to_le_bytes());
+        bytes[36..40].copy_from_slice(&0u32.to_le_bytes());
+        bytes[60..64].copy_from_slice(&3u32.to_le_bytes());
+        std::fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn cache_uses_manager_user_cache_location() {
         let root = Path::new(r"C:\Mods\Packages");
         let path = cache_path(root).to_string_lossy().to_string();
         assert!(path.contains("Veiga's S3CC Manager"));
         assert!(path.ends_with("fingerprints-v1.json"));
+    }
+
+    #[test]
+    fn cache_hit_requires_matching_file_fingerprint() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("s3cc-health-cache-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("empty.package");
+        write_empty_dbpf(&package, 0);
+        let mut cache = FingerprintCache::default();
+
+        let (_, first) = get_or_build_with_metrics(&package, &mut cache).unwrap();
+        assert!(!first.cache_hit);
+        let (_, second) = get_or_build_with_metrics(&package, &mut cache).unwrap();
+        assert!(second.cache_hit);
+
+        write_empty_dbpf(&package, 1);
+        let (changed, third) = get_or_build_with_metrics(&package, &mut cache).unwrap();
+        assert!(!third.cache_hit);
+        assert_eq!(changed.dbpf_minor, Some(1));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

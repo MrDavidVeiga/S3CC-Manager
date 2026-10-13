@@ -10,6 +10,8 @@ const ids = [
 ];
 for (const id of ids) {
   assert.match(html, new RegExp('id="' + id + '"'), 'Missing HTML control: ' + id);
+  assert.equal((html.match(new RegExp('id="' + id + '"', 'g')) || []).length, 1,
+    'Health control ID must be unique: ' + id);
   assert.ok(app.includes('#' + id), 'Unbound JS control: ' + id);
 }
 for (const fn of ["visibleHealthFindings", "renderHealthTools", "exportSelectedHealth"]) {
@@ -23,6 +25,10 @@ for (const category of [
   assert.ok(health.includes('"' + category + '"'), 'Missing Health category: ' + category);
 }
 assert.ok(health.includes("HashSet"), "Repeated TGIs must be checked against a set");
+assert.ok(health.includes("get_or_build_with_metrics"), "Health must reuse the validated DBPF cache");
+assert.ok(health.includes("coverage_known"), "Resource.cfg coverage must distinguish unknown from uncovered");
+assert.ok(health.includes('"resource_cfg_error"'), "Resource.cfg read failures must remain visible");
+assert.ok(health.includes("follow_links(false)"), "Health traversal must not follow links");
 assert.ok(health.includes("#[cfg(test)]"), "Rust regression coverage required");
 assert.ok(reports.includes('"health" => "Health"'), "Health report type is missing");
 assert.ok(app.includes('reportKind: "health"'), "Export payload needs scoped reportKind");

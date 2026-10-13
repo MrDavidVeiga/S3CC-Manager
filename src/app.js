@@ -4,6 +4,13 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 const I18N = {
   en: {
+    moreActions: "More Actions",
+    selectExactDuplicatesMain: "Select Exact Duplicates",
+    viewQuarantine: "View Quarantine",
+    selectForReview: "Select for Review",
+    reviewSelected: "Review Selected",
+    previousConflict: "Previous",
+    nextConflict: "Next",
     moreConflictActions: "More review and quarantine actions",
     openOrganizedFolder: "Open Organized Folder",
     analysisNeedsRefresh: "Files moved; analyze again to refresh duplicates and conflicts.",
@@ -328,6 +335,7 @@ const I18N = {
     healthSelectedCount: "selected",
     healthAll: "All",
     healthNoFindings: "No findings for this filter.",
+    coverageUnknown: "Coverage not verified",
     healthExported: "Health report saved",
     healthSelectVisible: "Select visible", healthClearSelection: "Clear selection", healthExport: "Export selected (JSON)", healthAll: "All findings", healthErrors: "Errors", healthWarnings: "Warnings", healthInformation: "Information", healthSelectedCount: "selected",
     createSnapshot: "Create Snapshot",
@@ -575,6 +583,13 @@ const I18N = {
     conflictsNext: "Resource-level conflict analysis is implemented in read-only mode.",
   },
   pt: {
+    moreActions: "Mais Ações",
+    selectExactDuplicatesMain: "Selecionar Duplicados Exatos",
+    viewQuarantine: "Visualizar Quarentena",
+    selectForReview: "Selecionar para Revisão",
+    reviewSelected: "Revisar Selecionados",
+    previousConflict: "Anterior",
+    nextConflict: "Próximo",
     moreConflictActions: "Mais ações de revisão e quarentena",
     openOrganizedFolder: "Abrir Pasta Organizada",
     analysisNeedsRefresh: "Arquivos organizados. Analise novamente para atualizar duplicatas e conflitos.",
@@ -899,6 +914,7 @@ const I18N = {
     healthSelectedCount: "selecionados",
     healthAll: "Todos",
     healthNoFindings: "Nenhum resultado neste filtro.",
+    coverageUnknown: "Cobertura não verificada",
     healthExported: "Relatório de saúde salvo",
     healthSelectVisible: "Selecionar visíveis", healthClearSelection: "Limpar seleção", healthExport: "Exportar selecionados (JSON)", healthAll: "Todos os resultados", healthErrors: "Erros", healthWarnings: "Avisos", healthInformation: "Informações", healthSelectedCount: "selecionados",
     createSnapshot: "Criar Snapshot",
@@ -1145,6 +1161,13 @@ const I18N = {
     conflictsNext: "A análise de conflitos por resource está implementada em modo somente leitura.",
   },
   es: {
+    moreActions: "Más acciones",
+    selectExactDuplicatesMain: "Seleccionar Duplicados Exactos",
+    viewQuarantine: "Ver Cuarentena",
+    selectForReview: "Seleccionar para Revisión",
+    reviewSelected: "Revisar Seleccionados",
+    previousConflict: "Anterior",
+    nextConflict: "Siguiente",
     moreConflictActions: "Más acciones de revisión y cuarentena",
     openOrganizedFolder: "Abrir Carpeta Organizada",
     analysisNeedsRefresh: "Archivos organizados. Analiza de nuevo para actualizar duplicados y conflictos.",
@@ -1469,6 +1492,7 @@ const I18N = {
     healthSelectedCount: "seleccionados",
     healthAll: "Todos",
     healthNoFindings: "No hay resultados para este filtro.",
+    coverageUnknown: "Cobertura no verificada",
     healthExported: "Informe de salud guardado",
     healthSelectVisible: "Seleccionar visibles", healthClearSelection: "Limpiar selección", healthExport: "Exportar seleccionados (JSON)", healthAll: "Todos los resultados", healthErrors: "Errores", healthWarnings: "Avisos", healthInformation: "Información", healthSelectedCount: "seleccionados",
     createSnapshot: "Crear Snapshot",
@@ -2088,6 +2112,8 @@ const el = {
   conflictDetailsModal: document.querySelector("#conflict-details-modal"),
   conflictDetailsCloseBtn: document.querySelector("#conflict-details-close-btn"),
   conflictDetailsCloseFooterBtn: document.querySelector("#conflict-details-close-footer-btn"),
+  conflictPreviousBtn: document.querySelector("#conflict-previous-btn"),
+  conflictNextBtn: document.querySelector("#conflict-next-btn"),
   confStatPairs: document.querySelector("#conf-stat-pairs"),
   confStatReal: document.querySelector("#conf-stat-real"),
   confStatScript: document.querySelector("#conf-stat-script"),
@@ -2143,6 +2169,7 @@ const el = {
   conflictsClearListBtn: document.querySelector("#conflicts-clear-list-btn"),
   conflictsSelectAllBtn: document.querySelector("#conflicts-select-all-btn"),
   conflictsSelectDetectedBtn: document.querySelector("#conflicts-select-detected-btn"),
+  conflictsReviewSelectedBtn: document.querySelector("#conflicts-review-selected-btn"),
   conflictsClearReviewBtn: document.querySelector("#conflicts-clear-review-btn"),
   conflictsPrioritizeSelectedBtn: document.querySelector("#conflicts-prioritize-selected-btn"),
   conflictsMarkIntentionalBtn: document.querySelector("#conflicts-mark-intentional-btn"),
@@ -2205,11 +2232,6 @@ const el = {
   toolsHealthClearSelection: document.querySelector("#tools-health-clear-selection"),
   toolsHealthExport: document.querySelector("#tools-health-export"),
   toolsHealthSelectionCount: document.querySelector("#tools-health-selection-count"),
-  healthFilter: document.querySelector("#tools-health-filter"),
-  healthSelectVisible: document.querySelector("#tools-health-select-visible"),
-  healthClearSelection: document.querySelector("#tools-health-clear-selection"),
-  healthExport: document.querySelector("#tools-health-export"),
-  healthSelectionStatus: document.querySelector("#tools-health-selection-status"),
   toolsHealthSummary: document.querySelector("#tools-health-summary"),
   toolsResourcecfg: document.querySelector("#tools-resourcecfg"),
   toolsHealthFindings: document.querySelector("#tools-health-findings"),
@@ -4292,6 +4314,40 @@ function prioritizeSelectedConflicts() {
   renderConflictVirtualRows(visibleConflictFindings(), true);
 }
 
+function reviewSelectedConflicts() {
+  if (!state.conflictsAnalysis || !state.conflictReviewSelected.size ||
+      state.reviewBusy || state.conflictsBusy) return;
+  prioritizeSelectedConflicts();
+  const findings = visibleConflictFindings();
+  const selected = findings.find((finding) =>
+    state.conflictReviewSelected.has(finding.id)
+  ) || findings[0];
+  if (!selected) return;
+  state.conflictSelectedId = selected.id;
+  openConflictDetails();
+}
+
+function renderConflictNavigation() {
+  if (!el.conflictPreviousBtn || !el.conflictNextBtn) return;
+  const findings = visibleConflictFindings();
+  const index = findings.findIndex((finding) => finding.id === state.conflictSelectedId);
+  const hasCurrent = index >= 0;
+  el.conflictPreviousBtn.disabled = !hasCurrent || index <= 0;
+  el.conflictNextBtn.disabled = !hasCurrent || index >= findings.length - 1;
+}
+
+function navigateConflictDetails(direction) {
+  const findings = visibleConflictFindings();
+  const index = findings.findIndex((finding) => finding.id === state.conflictSelectedId);
+  if (index < 0) return;
+  const target = findings[index + direction];
+  if (!target) return;
+  state.conflictSelectedId = target.id;
+  renderConflictVirtualRows(findings, true);
+  renderConflictsPreview();
+  renderConflictNavigation();
+}
+
 async function applySelectedConflictReviewMark(mark) {
   if (!state.folder || !state.conflictsAnalysis || !state.conflictReviewSelected.size ||
       state.reviewBusy || state.quarantineBusy || state.scanning) return;
@@ -4568,6 +4624,7 @@ function closeConflictDetails() {
 }
 
 function renderConflictsPreview() {
+  renderConflictNavigation();
   if (!el.conflictsPreview || el.conflictDetailsModal?.classList.contains("hidden")) return;
   const finding = (state.conflictsAnalysis?.findings || []).find(
     (item) => item.id === state.conflictSelectedId
@@ -4997,7 +5054,7 @@ function scheduleConflictVirtualRows() {
 }
 
 function renderConflictBatchControls() {
-  if (!el.conflictsPrioritizeBtn) return;
+  if (!el.conflictsReviewSelectedBtn) return;
   const busy = state.quarantineBusy || state.analysisPipelineBusy ||
     state.scanning || state.conflictsBusy || state.duplicatesBusy ||
     state.auditBusy || state.reviewBusy || state.structureBusy;
@@ -5007,6 +5064,7 @@ function renderConflictBatchControls() {
   el.conflictsSelectDetectedBtn.disabled = !state.conflictsAnalysis || busy ||
     !(state.conflictsAnalysis.findings || []).some(finding =>
       finding.kind !== "shared_identical" && finding.differentPayloadCount > 0);
+  el.conflictsReviewSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
   el.conflictsClearReviewBtn.disabled = busy || !state.conflictReviewSelected.size;
   el.conflictsPrioritizeSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
   for (const button of [el.conflictsMarkIntentionalBtn, el.conflictsMarkReviewedBtn,
@@ -5021,6 +5079,7 @@ function renderConflictBatchControls() {
     !conflictSelectionSafe() || busy || workspaceReadOnly();
   el.conflictsClearQuarantineBtn.disabled =
     !state.conflictQuarantineSelected.size || busy;
+  renderConflictNavigation();
 }
 
 function renderConflicts() {
@@ -6190,7 +6249,9 @@ function renderHealthTools() {
       [t("exactGroups"), state.duplicatesAnalysis?.stats?.exactGroups ?? 0],
       [t("packagePairs"), state.conflictsAnalysis?.stats?.packagePairs ?? 0],
       [t("cacheReused"), (() => {
-        const source = state.conflictsAnalysis?.stats || state.duplicatesAnalysis?.stats;
+        const source = stats.cacheHits != null
+          ? stats
+          : state.conflictsAnalysis?.stats || state.duplicatesAnalysis?.stats;
         const hits = source?.cacheHits ?? 0;
         const misses = source?.cacheMisses ?? 0;
         return hits + misses > 0 ? `${Math.round((hits / (hits + misses)) * 100)}%` : "—";
@@ -6221,12 +6282,16 @@ function renderHealthTools() {
     for (const item of coverage.slice(0, 500)) {
       el.toolsResourcecfg.appendChild(toolListItem(
         item.relativePath,
-        item.covered
-          ? `${t("loadOrderViewer")}: ${item.priority ?? "—"} · ${item.rule || "—"}`
-          : t("uncoveredPackages"),
-        item.covered ? "" : "tools-health-bad"
+        !item.coverageKnown
+          ? t("coverageUnknown")
+          : item.covered
+            ? `${t("loadOrderViewer")}: ${item.priority ?? "—"} · ${item.rule || "—"}`
+            : t("uncoveredPackages"),
+        !item.coverageKnown ? "tools-health-unknown" : item.covered ? "" : "tools-health-bad"
       ));
     }
+  } else if (report?.resourceCfgError) {
+    el.toolsResourcecfg.appendChild(toolListItem("Resource.cfg", report.resourceCfgError, "tools-health-bad"));
   } else if (report) {
     el.toolsResourcecfg.appendChild(toolListItem("Resource.cfg", t("missingResourceCfg"), "tools-health-bad"));
   }
@@ -6834,7 +6899,6 @@ async function analyzeHealth() {
   renderTools();
   try {
     state.healthReport = await invoke("analyze_mods_health", { folder: state.folder });
-    state.healthSelected.clear();
     state.healthSelected.clear();
   } catch (error) { state.toolsError = String(error); }
   finally { state.toolsBusy = false; renderTools(); }
@@ -8898,6 +8962,7 @@ el.duplicatesClearSelectionBtn.addEventListener("click", () => {
 el.conflictsClearListBtn.addEventListener("click", clearConflictList);
 el.conflictsSelectAllBtn.addEventListener("click", selectAllVisibleConflicts);
 el.conflictsSelectDetectedBtn.addEventListener("click", selectAllDetectedConflicts);
+el.conflictsReviewSelectedBtn.addEventListener("click", reviewSelectedConflicts);
 el.conflictsClearReviewBtn.addEventListener("click", clearConflictReviewSelection);
 el.conflictsPrioritizeSelectedBtn.addEventListener("click", prioritizeSelectedConflicts);
 el.conflictsMarkIntentionalBtn.addEventListener("click", () => applySelectedConflictReviewMark("intentional"));
@@ -8924,6 +8989,8 @@ el.conflictsClearQuarantineBtn.addEventListener("click", () => {
   state.conflictQuarantinePlan = null;
   renderConflicts();
 });
+el.conflictPreviousBtn.addEventListener("click", () => navigateConflictDetails(-1));
+el.conflictNextBtn.addEventListener("click", () => navigateConflictDetails(1));
 el.structureUpBtn.addEventListener("click", () => {
   const parent = state.structureListing?.parentRelativePath;
   if (parent != null) loadStructure(parent);
@@ -8967,30 +9034,6 @@ el.toolsHealthSelectVisible.addEventListener("click", () => {
 });
 el.toolsHealthClearSelection.addEventListener("click", () => { state.healthSelected.clear(); renderHealthTools(); });
 el.toolsHealthExport.addEventListener("click", exportSelectedHealth);
-el.healthFilter.addEventListener("change", () => { state.healthFilter = el.healthFilter.value; renderHealthTools(); });
-el.healthSelectVisible.addEventListener("click", () => {
-  for (const f of state.healthReport?.findings || []) if (state.healthFilter === "all" || f.severity === state.healthFilter) state.healthSelected.add(f.id);
-  renderHealthTools();
-});
-el.healthClearSelection.addEventListener("click", () => { state.healthSelected.clear(); renderHealthTools(); });
-el.healthExport.addEventListener("click", async () => {
-  if (!state.healthReport || state.toolsBusy || !state.folder) return;
-  const selected = state.healthReport.findings.filter(f => state.healthSelected.has(f.id));
-  if (!selected.length) return;
-  state.toolsBusy = true; state.toolsError = ""; renderTools();
-  try {
-    const snapshot = { reportKind:"health", root:state.healthReport.root,
-      generatedAt:new Date().toISOString(), filter:state.healthFilter,
-      totalFindings:state.healthReport.findings.length, selectedCount:selected.length,
-      stats:state.healthReport.stats, findings:selected };
-    const markdown = ["# Health review", "", ...selected.map(f =>
-      `- [${f.severity}] ${f.category}: ${f.relativePath} — ${f.detail}`)].join("\n");
-    const saved = await invoke("save_audit_report", {folder:state.folder, kind:"health",
-      markdown, jsonContent:JSON.stringify(snapshot,null,2)});
-    state.toolsNotice = saved.jsonPath;
-  } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
-});
 el.toolsCreateSnapshot.addEventListener("click", createSnapshotTool);
 el.toolsRefreshSnapshots.addEventListener("click", refreshSnapshots);
 el.toolsChooseCompareRoot.addEventListener("click", chooseCompareRoot);
@@ -9028,14 +9071,41 @@ el.planCloseBtn.addEventListener("click", closePlanModal);
 el.planCloseFooterBtn.addEventListener("click", closePlanModal);
 el.planExecuteBtn.addEventListener("click", () => openConfirm("organize"));
 el.planCfgCheckbox.addEventListener("change", async event => {
-  state.updateResourceCfg = event.currentTarget.checked && supportsResourceCfgUpdate(state.folder);
-  state.plan = null;
-  el.planModal.__renderedPlan = null;
-  el.planExecuteBtn.disabled = true;
-  await buildPlan();
-  if (state.planError) {
-    el.planCfgSummary.textContent = state.planError;
-    el.planCfgRow.classList.remove("hidden");
+  if (!state.plan || state.planning || state.executing) return;
+
+  const enabled = event.currentTarget.checked && supportsResourceCfgUpdate(state.folder);
+  state.updateResourceCfg = enabled;
+  state.planError = "";
+
+  // The organization plan already contains the exact, integrity-checked
+  // package destinations. Toggling Resource.cfg must only preview rules for
+  // those destinations; rebuilding here used to repeat DBPF/CASP/OBJD,
+  // duplicate and path analysis for the whole selection.
+  if (!enabled) {
+    state.plan = { ...state.plan, resourceCfgUpdate: null };
+    el.planModal.__renderedPlan = null;
+    render();
+    return;
+  }
+
+  const existingPlan = state.plan;
+  state.planning = true;
+  render();
+  try {
+    const resourceCfgUpdate = await invoke("preview_resource_cfg_for_plan", {
+      plan: existingPlan,
+    });
+    state.plan = { ...existingPlan, resourceCfgUpdate };
+    el.planModal.__renderedPlan = null;
+  } catch (error) {
+    state.updateResourceCfg = false;
+    state.planError = String(error);
+    state.plan = { ...existingPlan, resourceCfgUpdate: null };
+    el.planModal.__renderedPlan = null;
+    event.currentTarget.checked = false;
+  } finally {
+    state.planning = false;
+    render();
   }
 });
 el.reviewDuplicatesBtn.addEventListener("click", async () => {

@@ -135,6 +135,7 @@ pub fn run() {
             quarantine::remove_quarantine_history,
             planner::build_organization_plan,
             planner::build_organization_plan_with_cfg,
+            planner::preview_resource_cfg_for_plan,
             executor::execute_organization,
             executor::execute_organization_with_cfg,
             executor::execute_organization_plan_with_cfg,

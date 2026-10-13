@@ -162,20 +162,25 @@ pub fn parse_resource_cfg(path: &Path) -> Result<ResourceCfgInfo, String> {
 
         if command.eq_ignore_ascii_case("Priority") {
             let Some(value) = parts.next() else {
-                warnings.push(format!("Line {line_number}: Priority has no value."));
+                precedence_reliable = false;
+                warnings.push(format!("Line {line_number}: Priority has no value; precedence is not considered reliable."));
                 continue;
             };
             match value.parse::<i32>() {
                 Ok(value) => priority = value,
-                Err(_) => warnings.push(format!(
-                    "Line {line_number}: invalid Priority value '{value}'."
-                )),
+                Err(_) => {
+                    precedence_reliable = false;
+                    warnings.push(format!(
+                        "Line {line_number}: invalid Priority value '{value}'; precedence is not considered reliable."
+                    ));
+                }
             }
             continue;
         }
 
         if command.eq_ignore_ascii_case("PackedFile") {
             let Some(pattern) = parts.next() else {
+                precedence_reliable = false;
                 warnings.push(format!("Line {line_number}: PackedFile has no path."));
                 continue;
             };
@@ -184,7 +189,17 @@ pub fn parse_resource_cfg(path: &Path) -> Result<ResourceCfgInfo, String> {
                 pattern: pattern.replace('\\', "/"),
                 source_line: line_number,
             });
+            continue;
         }
+
+        // Do not silently ignore directives that can alter traversal or
+        // loading. The analyzer only models the simple Priority/PackedFile
+        // subset; an unknown command makes coverage/preference conclusions
+        // unsafe and must remain visible to the user.
+        precedence_reliable = false;
+        warnings.push(format!(
+            "Line {line_number}: unsupported Resource.cfg directive '{command}'; precedence is not inferred from this file."
+        ));
     }
 
     Ok(ResourceCfgInfo {
@@ -327,6 +342,26 @@ mod tests {
 
         assert!(!parsed.precedence_reliable);
         assert!(parsed.warnings.iter().any(|warning| warning.contains("Scan")));
+    }
+
+    #[test]
+    fn unsupported_directives_are_reported_without_inventing_precedence() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("s3cc-organizer-resource-unsupported-test.cfg");
+        std::fs::write(
+            &path,
+            "Priority 500\nPackedFile Packages/*.package\nUnknownTraversalRule Packages/*\n",
+        )
+        .unwrap();
+
+        let parsed = parse_resource_cfg(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(!parsed.precedence_reliable);
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unsupported Resource.cfg directive 'UnknownTraversalRule'")));
+        assert_eq!(parsed.rules.len(), 1);
     }
 
     #[test]

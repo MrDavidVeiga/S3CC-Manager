@@ -1059,6 +1059,10 @@ pub struct OrganizationPlan {
     pub items: Vec<PlanItem>,
     pub stats: PlanStats,
     pub directories_to_create: Vec<String>,
+    /// Existing canonical taxonomy directories are protected from empty-tree
+    /// cleanup. They may be intentionally empty in the manual model.
+    #[serde(default)]
+    pub protected_empty_directories: Vec<String>,
     pub manifest_preview: String,
     pub resource_cfg_update: Option<ResourceCfgUpdate>,
     pub can_execute: bool,
@@ -1130,6 +1134,78 @@ fn relative_key(path: &Path) -> String {
         .join("\\")
 }
 
+/// Normalize a planned filesystem path without requiring the destination to
+/// exist. Windows may represent the same path with `/`, a `\\?\` prefix,
+/// different casing, or `.`/`..` components. Both absolute and relative plan
+/// paths are resolved against the selected root before comparison.
+pub(crate) fn normalized_path_key(root: &Path, path: &Path) -> String {
+    fn strip_verbatim_prefix(value: String) -> String {
+        if let Some(rest) = value.strip_prefix("\\\\?\\UNC\\") {
+            return format!("\\\\{rest}");
+        }
+        value
+            .strip_prefix("\\\\?\\")
+            .unwrap_or(&value)
+            .to_string()
+    }
+
+    let raw = strip_verbatim_prefix(path.to_string_lossy().replace('/', "\\"));
+    let root_raw = strip_verbatim_prefix(root.to_string_lossy().replace('/', "\\"));
+    let is_absolute = Path::new(&raw).is_absolute()
+        || raw.starts_with('\\')
+        || (raw.as_bytes().get(1) == Some(&b':'));
+    let combined = if is_absolute || root_raw.is_empty() {
+        raw
+    } else {
+        format!("{}\\{}", root_raw.trim_end_matches('\\'), raw)
+    };
+
+    let mut components = Vec::<String>::new();
+    for component in combined.split('\\') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." {
+            if let Some(previous) = components.last() {
+                if previous != ":" {
+                    components.pop();
+                }
+            }
+            continue;
+        }
+        components.push(component.to_string());
+    }
+    components.join("\\").to_ascii_lowercase()
+}
+
+fn canonical_model_directories_for_root(
+    root: &Path,
+    manual_model: &ManualModelIndex,
+) -> Vec<String> {
+    if !(is_mods_root(root)
+        || is_packages_root(root)
+        || is_within_packages(root))
+    {
+        return Vec::new();
+    }
+
+    manual_model
+        .directories
+        .values()
+        .filter_map(|parts| {
+            let mapped = model_parts_for_selected_root(root, root, parts).ok()?;
+            let mut relative = PathBuf::new();
+            for part in mapped {
+                relative.push(part);
+            }
+            let text = relative_key(&relative);
+            (!text.is_empty()).then_some(text)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn same_relative_path(left: &str, right: &str) -> bool {
     left.replace('/', "\\")
         .trim_matches('\\')
@@ -1151,21 +1227,6 @@ fn add_missing_directories(root: &Path, parts: &[String], output: &mut BTreeSet<
             output.insert(relative_key(&relative));
         }
     }
-}
-
-fn is_not_categorized_root(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "not categorized"
-            | "#not categorized"
-            | "uncategorized"
-            | "sem categoria"
-            | "#sem categoria"
-            | "não categorizado"
-            | "nao categorizado"
-            | "sin categorizar"
-            | "#sin categorizar"
-    )
 }
 
 fn fallback_relative_path(
@@ -1196,23 +1257,12 @@ fn fallback_relative_path(
         .cloned()
         .ok_or_else(|| "Source relative path has no filename.".to_string())?;
 
-    let mut parent_parts = components[..components.len().saturating_sub(1)].to_vec();
-    if is_mods_root(root)
-        && parent_parts
-            .first()
-            .is_some_and(|part| part.eq_ignore_ascii_case("packages"))
-    {
-        parent_parts.remove(0);
-    }
-    if parent_parts
-        .first()
-        .map(|value| is_not_categorized_root(value))
-        .unwrap_or(false)
-    {
-        parent_parts.remove(0);
-    }
+    // Review fallbacks are intentionally flat. The original relative path is
+    // already persisted in the manifest/history, so reproducing creator,
+    // legacy category, or intermediate folder names below #Sem Categoria
+    // would only recreate the obsolete hierarchy the planner is supposed to
+    // retire.
     let mut destination_parts = vec![language.uncategorized_fallback_folder().to_string()];
-    destination_parts.extend(parent_parts);
     destination_parts = ensure_packages_destination(root, &destination_parts);
 
     let mut destination_relative = PathBuf::new();
@@ -1819,7 +1869,8 @@ fn append_auxiliary_items(
 }
 
 fn same_path_case_insensitive(left: &Path, right: &Path) -> bool {
-    relative_key(left).eq_ignore_ascii_case(&relative_key(right))
+    normalized_path_key(Path::new(""), left)
+        == normalized_path_key(Path::new(""), right)
 }
 
 fn retarget_item_to_not_categorized(
@@ -2333,7 +2384,11 @@ fn index_suspected_merged_sliders(
     detect_merged_resource_supersets(&indexed)
 }
 
-fn mark_intra_plan_destination_collisions(items: &mut [PlanItem], stats: &mut PlanStats) {
+fn mark_intra_plan_destination_collisions(
+    root: &Path,
+    items: &mut [PlanItem],
+    stats: &mut PlanStats,
+) {
     let mut destinations = HashMap::<String, Vec<usize>>::new();
 
     for (index, item) in items.iter().enumerate() {
@@ -2343,7 +2398,7 @@ fn mark_intra_plan_destination_collisions(items: &mut [PlanItem], stats: &mut Pl
         let Some(destination) = item.destination_relative_path.as_ref() else {
             continue;
         };
-        let key = destination.replace('/', "\\").to_ascii_lowercase();
+        let key = normalized_path_key(root, Path::new(destination));
         destinations.entry(key).or_default().push(index);
     }
 
@@ -2385,6 +2440,53 @@ fn mark_intra_plan_destination_collisions(items: &mut [PlanItem], stats: &mut Pl
                 );
             }
         }
+    }
+}
+
+/// A frozen plan must not contain a move whose destination is another ready
+/// item's source. The executor intentionally uses non-overwriting renames and
+/// cannot safely perform swaps or chains in arbitrary order. Detect the
+/// overlap before any filesystem write so the old
+/// `Destination appeared after preflight` protection remains meaningful for
+/// external changes, not for a flaw already present in the plan.
+fn mark_intra_plan_source_destination_collisions(
+    root: &Path,
+    items: &mut [PlanItem],
+) {
+    let mut sources = HashMap::<String, Vec<usize>>::new();
+    for (index, item) in items.iter().enumerate() {
+        if !item.plan_status.starts_with("ready") {
+            continue;
+        }
+        sources
+            .entry(normalized_path_key(root, Path::new(&item.source_path)))
+            .or_default()
+            .push(index);
+    }
+
+    let mut blocked = BTreeSet::<usize>::new();
+    for (index, item) in items.iter().enumerate() {
+        if !item.plan_status.starts_with("ready") {
+            continue;
+        }
+        let Some(destination) = item.destination_path.as_ref() else {
+            continue;
+        };
+        let key = normalized_path_key(root, Path::new(destination));
+        if let Some(peers) = sources.get(&key) {
+            if peers.iter().any(|peer| *peer != index) {
+                blocked.insert(index);
+                blocked.extend(peers.iter().copied());
+            }
+        }
+    }
+
+    for index in blocked {
+        let item = &mut items[index];
+        item.plan_status = "blocked_intra_plan_path_collision".to_string();
+        item.warnings.push(
+            "This plan contains a source/destination overlap with another selected move. No operation in the overlap will run; review the plan order or destination before retrying.".to_string(),
+        );
     }
 }
 
@@ -2511,6 +2613,7 @@ fn projected_empty_folders_to_clean(
     root: &Path,
     selected_roots: &[PathBuf],
     items: &[PlanItem],
+    protected_relative_directories: &[String],
 ) -> usize {
     let mut candidates = BTreeSet::<PathBuf>::new();
     for selected_root in selected_roots {
@@ -2540,6 +2643,12 @@ fn projected_empty_folders_to_clean(
     candidates
         .into_iter()
         .filter(|folder| {
+            if protected_relative_directories.iter().any(|relative| {
+                normalized_path_key(root, folder)
+                    == normalized_path_key(root, Path::new(relative))
+            }) {
+                return false;
+            }
             if !folder.is_dir() {
                 return false;
             }
@@ -2650,6 +2759,59 @@ fn scan_selected_roots(
     scan_selected_package_paths(root, &paths, language)
 }
 
+fn resource_cfg_destinations_for_plan(plan: &OrganizationPlan) -> Vec<PathBuf> {
+    let root = PathBuf::from(&plan.root);
+    let Some(mods) = root
+        .ancestors()
+        .find(|ancestor| is_mods_root(ancestor))
+    else {
+        return Vec::new();
+    };
+
+    plan.items
+        .iter()
+        .filter(|item| item.plan_status.starts_with("ready"))
+        .filter_map(|item| item.destination_path.as_ref().map(PathBuf::from))
+        .filter(|path| {
+            let Some(name) = path.file_name().map(|value| value.to_string_lossy()) else {
+                return false;
+            };
+            if !name.to_ascii_lowercase().ends_with(".package") {
+                return false;
+            }
+            let Ok(relative) = path.strip_prefix(mods) else {
+                return false;
+            };
+            let mut components = relative.components();
+            matches!(
+                components.next(),
+                Some(Component::Normal(branch))
+                    if branch.to_string_lossy().eq_ignore_ascii_case("Packages")
+                        || branch.to_string_lossy().eq_ignore_ascii_case("Overrides")
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Refresh only the Resource.cfg preview for an already built plan. Package
+/// parsing, hashing, duplicate detection and destination resolution have
+/// already been completed and are intentionally not repeated here.
+#[tauri::command]
+pub fn preview_resource_cfg_for_plan(
+    plan: OrganizationPlan,
+) -> Result<Option<ResourceCfgUpdate>, String> {
+    let root = PathBuf::from(&plan.root)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve organization-plan root: {error}"))?;
+    let destinations = resource_cfg_destinations_for_plan(&plan);
+    if destinations.is_empty() {
+        return Ok(None);
+    }
+    preview_resource_cfg_update(&root, &destinations)
+}
+
 #[tauri::command]
 pub fn build_organization_plan(
     folder: String,
@@ -2682,6 +2844,8 @@ pub fn build_organization_plan_with_cfg(
     // like categories are never enough to mark a package organized.
     let manual_model_root = manual_model_packages_root()?;
     let manual_model = load_or_build_manual_model_index(&manual_model_root)?;
+    let protected_empty_directories =
+        canonical_model_directories_for_root(&root, &manual_model);
     // The selected root can be Mods, any Packages/Overrides subfolder, or a
     // self-contained CC staging library elsewhere. All moves remain inside
     // this canonical root. Never invent an out-of-root destination.
@@ -3135,9 +3299,10 @@ pub fn build_organization_plan_with_cfg(
         }
 
         // Unknown is a classification result, not an instruction to leave the
-        // original folder forever. Move safely selected unknowns to a review
-        // area (with their source hierarchy intact). Do not redirect Overrides
-        // or invalid/mixed packages without a manual decision.
+        // original folder forever. Move safely selected unknowns to the flat
+        // review area; their complete source path remains in the manifest and
+        // history. Do not redirect Overrides or invalid/mixed packages without
+        // a manual decision.
         if item.status != "classified"
             && !is_override_source
             && !(item.status == "unknown" && matches!(hash_model_destination.as_ref(), Some(Ok(_))))
@@ -3816,8 +3981,9 @@ pub fn build_organization_plan_with_cfg(
 
     // Detect collisions created by the plan itself before any filesystem write occurs.
     // This catches multiple selected packages that resolve to the same final path.
-    mark_intra_plan_destination_collisions(&mut items, &mut stats);
+    mark_intra_plan_destination_collisions(&root, &mut items, &mut stats);
     move_intra_plan_conflicts_to_review(&root, language, &mut items, &mut directories, &mut stats)?;
+    mark_intra_plan_source_destination_collisions(&root, &mut items);
 
     for group in workspace.groups.iter().filter(|group| group.keep_together) {
         if !group
@@ -3884,7 +4050,12 @@ pub fn build_organization_plan_with_cfg(
     stats.remaining_legacy_files =
         projected_remaining_legacy_files(&selected, &selected_roots, &items);
     stats.empty_folders_to_clean =
-        projected_empty_folders_to_clean(&root, &selected_roots, &items);
+        projected_empty_folders_to_clean(
+            &root,
+            &selected_roots,
+            &items,
+            &protected_empty_directories,
+        );
 
     let can_execute = plan_can_execute(&stats, workspace.read_only);
     let cfg_opt_in = update_resource_cfg
@@ -3918,6 +4089,7 @@ pub fn build_organization_plan_with_cfg(
         root: root.to_string_lossy().to_string(),
         manifest_preview: manifest_preview(&root, language, &ready_items),
         directories_to_create: directories.into_iter().collect(),
+        protected_empty_directories,
         resource_cfg_update,
         stats: stats.clone(),
         items,
@@ -3960,7 +4132,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fallback_moves_out_of_legacy_folders_without_losing_source_context() {
+    fn unknown_fallback_is_flat_without_losing_manifest_source_context() {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3981,8 +4153,12 @@ mod tests {
         )
         .unwrap();
         assert!(path.starts_with("Packages"));
-        assert!(path.to_string_lossy().contains("Pns (TS3)"));
-        assert!(path.to_string_lossy().contains("Rigged"));
+        assert_eq!(
+            path,
+            PathBuf::from("Packages\\#Sem Categoria\\PenisButtBones.package")
+        );
+        assert!(!path.to_string_lossy().contains("Pns (TS3)"));
+        assert!(!path.to_string_lossy().contains("Rigged"));
         assert!(parts.iter().any(|part| part == "#Sem Categoria"));
         let (override_path, override_parts) = fallback_relative_path(
             &mods,
@@ -4888,7 +5064,7 @@ mod tests {
         ];
         let mut stats = PlanStats::default();
 
-        mark_intra_plan_destination_collisions(&mut items, &mut stats);
+        mark_intra_plan_destination_collisions(Path::new(r"C:\\Mods"), &mut items, &mut stats);
 
         assert_eq!(stats.collision_different_content, 2);
         assert!(items
@@ -4931,13 +5107,165 @@ mod tests {
         ];
         let mut stats = PlanStats::default();
 
-        mark_intra_plan_destination_collisions(&mut items, &mut stats);
+        mark_intra_plan_destination_collisions(Path::new(r"C:\\Mods"), &mut items, &mut stats);
 
         assert_eq!(items[0].plan_status, "ready");
         assert_eq!(items[1].plan_status, "duplicate_skipped");
         assert_eq!(stats.duplicate_skipped, 1);
         assert_eq!(stats.collision_same_content, 0);
         assert_eq!(stats.collision_different_content, 0);
+    }
+
+    #[test]
+    fn normalized_plan_paths_match_verbatim_case_and_relative_variants() {
+        let root = Path::new(r"C:\Mods");
+        let canonical = normalized_path_key(root, Path::new(r"Packages\#Sem Categoria\item.package"));
+        let verbatim = normalized_path_key(
+            root,
+            Path::new(r"\\?\c:\mods\.\Packages\#SEM CATEGORIA\item.package"),
+        );
+        assert_eq!(canonical, verbatim);
+    }
+
+    #[test]
+    fn planned_source_destination_overlap_is_blocked_before_execution() {
+        let root = Path::new(r"C:\Mods");
+        let mut items = vec![
+            PlanItem {
+                id: "a".into(),
+                name: "a.package".into(),
+                source_path: r"C:\Mods\Legacy\a.package".into(),
+                source_relative_path: r"Legacy\a.package".into(),
+                destination_path: Some(r"C:\Mods\Packages\a.package".into()),
+                destination_relative_path: Some(r"Packages\a.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("A".repeat(64)),
+                size: 1,
+                warnings: vec![],
+            },
+            PlanItem {
+                id: "b".into(),
+                name: "b.package".into(),
+                source_path: r"C:\Mods\Packages\a.package".into(),
+                source_relative_path: r"Packages\a.package".into(),
+                destination_path: Some(r"C:\Mods\Canonical\b.package".into()),
+                destination_relative_path: Some(r"Canonical\b.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("B".repeat(64)),
+                size: 1,
+                warnings: vec![],
+            },
+        ];
+
+        mark_intra_plan_source_destination_collisions(root, &mut items);
+        assert!(items
+            .iter()
+            .all(|item| item.plan_status == "blocked_intra_plan_path_collision"));
+    }
+
+    #[test]
+    fn resource_cfg_preview_uses_only_active_loading_branch_packages() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-resource-cfg-plan-filter-{}-{nonce}",
+            std::process::id()
+        ));
+        let mods = base.join("Mods");
+        let packages = mods.join("Packages");
+        fs::create_dir_all(&packages).unwrap();
+        fs::create_dir_all(mods.join("Overrides")).unwrap();
+
+        let item = |name: &str, destination: &Path, status: &str| PlanItem {
+            id: name.to_string(),
+            name: name.to_string(),
+            source_path: packages.join(name).display().to_string(),
+            source_relative_path: name.to_string(),
+            destination_path: Some(destination.display().to_string()),
+            destination_relative_path: Some(
+                destination
+                    .strip_prefix(&mods)
+                    .map(|relative| relative.display().to_string())
+                    .unwrap_or_else(|_| destination.display().to_string()),
+            ),
+            classification_status: "classified".to_string(),
+            classification_reason: None,
+            plan_status: status.to_string(),
+            sha256: None,
+            size: 1,
+            warnings: Vec::new(),
+        };
+
+        let plan = OrganizationPlan {
+            root: packages.display().to_string(),
+            items: vec![
+                item(
+                    "active.package",
+                    &packages.join("Sliders").join("active.package"),
+                    "ready",
+                ),
+                item(
+                    "override.package",
+                    &mods
+                        .join("Overrides")
+                        .join("Fixes")
+                        .join("override.package"),
+                    "ready",
+                ),
+                item(
+                    "disabled.package.disabled",
+                    &packages.join("disabled.package.disabled"),
+                    "ready",
+                ),
+                item(
+                    "preview.png",
+                    &packages.join("Previews de CCs").join("preview.png"),
+                    "ready",
+                ),
+                item(
+                    "external.package",
+                    &base.join("Other").join("external.package"),
+                    "ready",
+                ),
+                item(
+                    "blocked.package",
+                    &packages.join("blocked.package"),
+                    "blocked_collision",
+                ),
+            ],
+            stats: PlanStats::default(),
+            directories_to_create: Vec::new(),
+            protected_empty_directories: Vec::new(),
+            manifest_preview: String::new(),
+            resource_cfg_update: None,
+            can_execute: true,
+            analysis_before: OrganizationAnalysisSnapshot::from_scan("test", &ScanStats::default()),
+        };
+
+        let destinations = resource_cfg_destinations_for_plan(&plan);
+        assert_eq!(destinations.len(), 2);
+        assert!(destinations
+            .iter()
+            .any(|path| path.ends_with(Path::new("Sliders").join("active.package"))));
+        assert!(destinations
+            .iter()
+            .any(|path| path.ends_with(Path::new("Fixes").join("override.package"))));
+        assert!(!destinations
+            .iter()
+            .any(|path| path.to_string_lossy().contains("disabled")));
+        assert!(!destinations
+            .iter()
+            .any(|path| path.to_string_lossy().contains("preview")));
+
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

@@ -5,7 +5,8 @@ use crate::{
         replace_manifest_atomic, sha256_file, write_manifest_atomic, RestoreEntry, RestoreManifest,
     },
     planner::{
-        build_organization_plan_with_cfg, OrganizationAnalysisSnapshot, OrganizationPlan, PlanItem,
+        build_organization_plan_with_cfg, normalized_path_key, OrganizationAnalysisSnapshot,
+        OrganizationPlan, PlanItem,
     },
     scanner::{invalidate_latest_scan_for, scan_packages_core},
     operation,
@@ -109,6 +110,73 @@ fn ready_items(plan_items: &[PlanItem]) -> Vec<&PlanItem> {
         .iter()
         .filter(|item| item.plan_status.starts_with("ready"))
         .collect()
+}
+
+/// Validate the complete ready set before creating directories, editing
+/// Resource.cfg, or moving the first file. The planner normally catches these
+/// conditions, but execution also receives frozen plans from the UI/history,
+/// so this second gate is required for stale or externally altered plans.
+fn validate_ready_execution_paths(root: &Path, ready: &[&PlanItem]) -> Result<(), String> {
+    let mut destinations = HashMap::<String, &PlanItem>::new();
+    let mut sources = HashMap::<String, Vec<&PlanItem>>::new();
+
+    for item in ready {
+        let source = Path::new(&item.source_path);
+        let destination = item
+            .destination_path
+            .as_deref()
+            .map(Path::new)
+            .ok_or_else(|| format!("Planner item {} has no destination.", item.name))?;
+        let source_key = normalized_path_key(root, source);
+        let destination_key = normalized_path_key(root, destination);
+
+        sources
+            .entry(source_key)
+            .or_default()
+            .push(*item);
+
+        if let Some(other) = destinations.get(&destination_key) {
+            return Err(format!(
+                "Plan contains multiple ready operations for the same destination: '{}' and '{}' -> {}. No files were moved.",
+                other.name,
+                item.name,
+                destination.display()
+            ));
+        }
+        destinations.insert(destination_key, *item);
+    }
+
+    for item in ready {
+        let destination = Path::new(item.destination_path.as_deref().unwrap());
+        let destination_key = normalized_path_key(root, destination);
+        if let Some(peers) = sources.get(&destination_key) {
+            if peers
+                .iter()
+                .any(|peer| normalized_path_key(root, Path::new(&peer.source_path)) != destination_key)
+            {
+                let names = peers
+                    .iter()
+                    .map(|peer| peer.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                return Err(format!(
+                    "Plan destination overlaps another ready source: {} -> {} (source peer(s): {}). No files were moved.",
+                    item.name,
+                    destination.display(),
+                    names
+                ));
+            }
+        }
+
+        if destination.exists() {
+            return Err(format!(
+                "Destination already exists before execution; refusing overwrite: {}",
+                destination.display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn requires_post_execution_package_scan(plan: &OrganizationPlan) -> bool {
@@ -298,7 +366,12 @@ pub(crate) fn cleanup_empty_directories_after_organization(
     root: &Path,
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
 ) -> (usize, usize, Vec<String>) {
-    cleanup_empty_directories_after_organization_scoped(root, moved_pairs, None)
+    cleanup_empty_directories_after_organization_with_protected(
+        root,
+        moved_pairs,
+        None,
+        &[],
+    )
 }
 
 fn cleanup_empty_directories_after_organization_scoped(
@@ -306,7 +379,27 @@ fn cleanup_empty_directories_after_organization_scoped(
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
     scope_roots: Option<&[PathBuf]>,
 ) -> (usize, usize, Vec<String>) {
+    cleanup_empty_directories_after_organization_with_protected(
+        root,
+        moved_pairs,
+        scope_roots,
+        &[],
+    )
+}
+
+fn cleanup_empty_directories_after_organization_with_protected(
+    root: &Path,
+    moved_pairs: &[(PathBuf, PathBuf, String, u64)],
+    scope_roots: Option<&[PathBuf]>,
+    protected_relative_directories: &[String],
+) -> (usize, usize, Vec<String>) {
     let mods_root = crate::resource_cfg::is_mods_layout_root(root);
+    let is_protected_empty_directory = |path: &Path| {
+        protected_relative_directories.iter().any(|relative| {
+            normalized_path_key(root, path)
+                == normalized_path_key(root, Path::new(relative))
+        })
+    };
     let mut candidates = Vec::<PathBuf>::new();
     let mut warnings = Vec::<String>::new();
 
@@ -328,6 +421,9 @@ fn cleanup_empty_directories_after_organization_scoped(
                 match entry {
                     Ok(entry) if entry.file_type().is_dir() => {
                         let path = entry.path();
+                        if is_protected_empty_directory(path) {
+                            continue;
+                        }
                         // These are the two loading branch roots. They must survive
                         // even if they contain zero packages after organization.
                         if mods_root && path.parent() == Some(root) && path.file_name()
@@ -350,7 +446,9 @@ fn cleanup_empty_directories_after_organization_scoped(
             // A focused plan only needs the old source directory and its
             // ancestors. Recursing from a source parent such as `Jonas`
             // would inspect unrelated siblings and defeat incremental mode.
-            candidates.push(walk_root.to_path_buf());
+            if !is_protected_empty_directory(&walk_root) {
+                candidates.push(walk_root.to_path_buf());
+            }
         }
 
         // The recursive walk is intentionally limited to the selected old
@@ -363,7 +461,9 @@ fn cleanup_empty_directories_after_organization_scoped(
                 if folder == root || !folder.starts_with(root) {
                     break;
                 }
-                candidates.push(folder.to_path_buf());
+                if !is_protected_empty_directory(folder) {
+                    candidates.push(folder.to_path_buf());
+                }
                 ancestor = folder.parent();
             }
         }
@@ -374,6 +474,9 @@ fn cleanup_empty_directories_after_organization_scoped(
     candidates.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     let mut removed = 0;
     for folder in candidates {
+        if is_protected_empty_directory(&folder) {
+            continue;
+        }
         match fs::remove_dir(&folder) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -425,7 +528,10 @@ fn cleanup_empty_directories_after_organization_scoped(
             current = folder.parent();
         }
     }
-    let retained = old_folders.into_iter().filter(|path| path.is_dir()).count();
+    let retained = old_folders
+        .into_iter()
+        .filter(|path| path.is_dir() && !is_protected_empty_directory(path))
+        .count();
     (removed, retained, warnings)
 }
 
@@ -676,6 +782,7 @@ fn execute_organization_plan_core(
     let root = PathBuf::from(&plan.root);
     ensure_writable(&root)?;
     let ready = ready_items(&plan.items);
+    validate_ready_execution_paths(&root, &ready)?;
     let move_total = ready.len();
     operation::update("organize", 0, None, "preparing");
 
@@ -685,12 +792,18 @@ fn execute_organization_plan_core(
         // was necessary. Never remove files or the Packages/Overrides roots.
         let focused_cleanup_roots = cleanup_scope_roots(&root, &plan);
         let (removed, retained, cleanup_warnings) = if requires_post_execution_package_scan(&plan) {
-            cleanup_empty_directories_after_organization(&root, &[])
+            cleanup_empty_directories_after_organization_with_protected(
+                &root,
+                &[],
+                None,
+                &plan.protected_empty_directories,
+            )
         } else {
-            cleanup_empty_directories_after_organization_scoped(
+            cleanup_empty_directories_after_organization_with_protected(
                 &root,
                 &[],
                 Some(&focused_cleanup_roots),
+                &plan.protected_empty_directories,
             )
         };
         let remaining_legacy_details = remaining_legacy_details(&root, &[], &plan.items);
@@ -970,12 +1083,18 @@ fn execute_organization_plan_core(
     let focused_cleanup_roots = cleanup_scope_roots(&root, &plan);
     let (old_folders_removed, old_folders_retained, cleanup_warnings) =
         if requires_post_execution_package_scan(&plan) {
-            cleanup_empty_directories_after_organization(&root, &moved_pairs)
+            cleanup_empty_directories_after_organization_with_protected(
+                &root,
+                &moved_pairs,
+                None,
+                &plan.protected_empty_directories,
+            )
         } else {
-            cleanup_empty_directories_after_organization_scoped(
+            cleanup_empty_directories_after_organization_with_protected(
                 &root,
                 &moved_pairs,
                 Some(&focused_cleanup_roots),
+                &plan.protected_empty_directories,
             )
         };
 
@@ -1066,6 +1185,115 @@ mod tests {
         let json = serde_json::to_value(item).unwrap();
         assert!(json["sourcePath"].as_str().unwrap().ends_with("a.package"));
         assert_eq!(json["destinationRelativePath"], "Packages/CAS/a.package");
+    }
+
+    #[test]
+    fn preflight_rejects_duplicate_ready_destinations_before_any_move() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-preflight-same-destination-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let first = root.join("Legacy").join("first.package");
+        let second = root.join("Other").join("second.package");
+        let destination = root.join("Packages").join("same.package");
+        fs::create_dir_all(first.parent().unwrap()).unwrap();
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+
+        let items = vec![
+            PlanItem {
+                id: "first".into(),
+                name: "first.package".into(),
+                source_path: first.to_string_lossy().into_owned(),
+                source_relative_path: "Legacy\\first.package".into(),
+                destination_path: Some(destination.to_string_lossy().into_owned()),
+                destination_relative_path: Some("Packages\\same.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("A".repeat(64)),
+                size: 5,
+                warnings: vec![],
+            },
+            PlanItem {
+                id: "second".into(),
+                name: "second.package".into(),
+                source_path: second.to_string_lossy().into_owned(),
+                source_relative_path: "Other\\second.package".into(),
+                destination_path: Some(
+                    destination
+                        .to_string_lossy()
+                        .replace("same.package", "SAME.PACKAGE"),
+                ),
+                destination_relative_path: Some("packages\\SAME.PACKAGE".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("B".repeat(64)),
+                size: 6,
+                warnings: vec![],
+            },
+        ];
+        let ready = ready_items(&items);
+        let error = validate_ready_execution_paths(&root, &ready).unwrap_err();
+        assert!(error.contains("same destination"));
+        assert!(first.is_file() && second.is_file());
+        assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_verbatim_source_destination_overlap() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-preflight-source-overlap-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let source_a = root.join("Legacy").join("a.package");
+        let source_b = root.join("Packages").join("b.package");
+        fs::create_dir_all(source_a.parent().unwrap()).unwrap();
+        fs::create_dir_all(source_b.parent().unwrap()).unwrap();
+        fs::write(&source_a, b"a").unwrap();
+        fs::write(&source_b, b"b").unwrap();
+        let verbatim_source_b = format!(r"\\?\{}", source_b.display());
+        let destination_b = root.join("Canonical").join("b.package");
+        let items = vec![
+            PlanItem {
+                id: "a".into(),
+                name: "a.package".into(),
+                source_path: source_a.to_string_lossy().into_owned(),
+                source_relative_path: "Legacy\\a.package".into(),
+                destination_path: Some(source_b.to_string_lossy().into_owned()),
+                destination_relative_path: Some("Packages\\b.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("A".repeat(64)),
+                size: 1,
+                warnings: vec![],
+            },
+            PlanItem {
+                id: "b".into(),
+                name: "b.package".into(),
+                source_path: verbatim_source_b,
+                source_relative_path: "Packages\\b.package".into(),
+                destination_path: Some(destination_b.to_string_lossy().into_owned()),
+                destination_relative_path: Some("Canonical\\b.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("B".repeat(64)),
+                size: 1,
+                warnings: vec![],
+            },
+        ];
+        let ready = ready_items(&items);
+        let error = validate_ready_execution_paths(&root, &ready).unwrap_err();
+        assert!(error.contains("source"));
+        assert!(source_a.is_file() && source_b.is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1175,6 +1403,33 @@ mod tests {
         assert!(root.is_dir() && packages.is_dir() && overrides.is_dir());
         assert!(!legacy.exists() && !old.exists());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cleanup_preserves_empty_manual_model_directories() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let base = std::env::temp_dir()
+            .join(format!("s3cc-protected-empty-{}-{nonce}", std::process::id()));
+        let root = base.join("Mods - Copia");
+        let canonical = root.join("Packages").join("Cabelos e Pêlos");
+        let legacy = root.join("Packages").join("#6 Hair").join("Old");
+        fs::create_dir_all(&canonical).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+
+        let (removed, retained, warnings) =
+            cleanup_empty_directories_after_organization_with_protected(
+                &root,
+                &[],
+                None,
+                &["Packages\\Cabelos e Pêlos".into()],
+            );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(removed >= 2);
+        assert_eq!(retained, 0);
+        assert!(canonical.is_dir());
+        assert!(!legacy.exists());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

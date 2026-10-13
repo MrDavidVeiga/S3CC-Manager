@@ -1,8 +1,8 @@
 use crate::{
-    dbpf::Package,
+    cache::{get_or_build_with_metrics, load_cache, retain_existing, save_cache},
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     structure_manager::{append_log, ManualOperationRecord},
-    workspace::ensure_writable,
+    workspace::{active_profile, ensure_writable, is_protected, load_workspace_for_root},
 };
 use serde::Serialize;
 use std::{collections::HashSet, fs, path::{Path, PathBuf}};
@@ -13,6 +13,7 @@ pub struct CoverageEntry {
     pub path:String,
     pub relative_path:String,
     pub covered:bool,
+    pub coverage_known:bool,
     pub priority:Option<i32>,
     pub rule:Option<String>,
     pub depth:usize,
@@ -56,6 +57,9 @@ pub struct HealthStats {
     pub disabled_files:usize,
     pub dbc_not_analyzed:usize,
     pub scan_errors:usize,
+    pub resource_cfg_errors:usize,
+    pub cache_hits:usize,
+    pub cache_misses:usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +72,7 @@ pub struct ModsHealthReport {
     pub outside_packages:Vec<String>,
     pub coverage:Vec<CoverageEntry>,
     pub resource_cfg:Option<ResourceCfgInfo>,
+    pub resource_cfg_error:Option<String>,
     pub findings:Vec<HealthFinding>,
 }
 
@@ -92,13 +97,23 @@ fn empty_dirs(root:&Path)->Vec<String>{
     out.sort_by_key(|v|v.to_ascii_lowercase());out
 }
 fn outside_packages(root:&Path)->Vec<String>{
-    let Some(parent)=root.parent() else{return Vec::new();};
+    let Some(mods_root)=root
+        .ancestors()
+        .find(|candidate| crate::resource_cfg::is_mods_layout_root(candidate))
+    else{return Vec::new();};
+
     let mut out=Vec::new();
-    for e in walkdir::WalkDir::new(parent).follow_links(false).max_depth(6).into_iter().filter_map(Result::ok){
-        if !e.file_type().is_file() || !is_package(e.path()) || e.path().starts_with(root){continue;}
-        let text=e.path().to_string_lossy();
-        if text.contains("S3CC Organizer"){continue;}
-        out.push(e.path().to_string_lossy().to_string());
+    let mut visited=std::collections::HashSet::new();
+    for branch in [mods_root.join("Packages"), mods_root.join("Overrides")] {
+        if !branch.is_dir(){continue;}
+        for item in walkdir::WalkDir::new(&branch).follow_links(false).into_iter() {
+            let Ok(entry)=item else { continue };
+            if !entry.file_type().is_file() || !is_package(entry.path()) || entry.path().starts_with(root){continue;}
+            let Ok(path)=entry.path().canonicalize() else { continue };
+            if visited.insert(path.clone()) {
+                out.push(path.to_string_lossy().to_string());
+            }
+        }
     }
     out.sort_by_key(|v|v.to_ascii_lowercase());out
 }
@@ -111,13 +126,30 @@ pub fn remove_empty_folder(folder:String,relative_path:String)->Result<bool,Stri
     if relative.is_absolute() || relative.components().any(|c|matches!(c,std::path::Component::ParentDir|std::path::Component::RootDir|std::path::Component::Prefix(_))){
         return Err("Unsafe empty-folder path.".into());
     }
+    let profile=active_profile(&load_workspace_for_root(&root));
+    if is_protected(&relative_path,&profile){
+        return Err("The selected folder is protected by the active workspace profile.".into());
+    }
     let candidate=root.join(relative);
-    let meta=fs::symlink_metadata(&candidate).map_err(|e|format!("Could not inspect folder: {e}"))?;
+    let meta=match fs::symlink_metadata(&candidate){
+        Ok(meta)=>meta,
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(false),
+        Err(error)=>return Err(format!("Could not inspect folder: {error}")),
+    };
     if meta.file_type().is_symlink() || !meta.is_dir(){return Err("Target is not a regular directory.".into());}
     let canonical=candidate.canonicalize().map_err(|e|e.to_string())?;
     if !canonical.starts_with(&root)||canonical==root{return Err("Target is outside the selected root.".into());}
-    if fs::read_dir(&canonical).map_err(|e|e.to_string())?.next().is_some(){return Err("Folder is not empty.".into());}
-    fs::remove_dir(&canonical).map_err(|e|format!("Could not remove empty folder: {e}"))?;
+    let mut entries=match fs::read_dir(&canonical){
+        Ok(entries)=>entries,
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(false),
+        Err(error)=>return Err(format!("Could not inspect folder contents: {error}")),
+    };
+    if entries.next().is_some(){return Err("Folder is not empty.".into());}
+    match fs::remove_dir(&canonical){
+        Ok(())=>{}
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(false),
+        Err(error)=>return Err(format!("Could not remove empty folder: {error}")),
+    }
     let _ = append_log(
         &root,
         &ManualOperationRecord {
@@ -167,24 +199,36 @@ fn is_unanalyzed_cache(name: &str) -> bool {
 pub fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
     let root=canonical_root(&folder)?;
     let cfg_path=find_resource_cfg(&root);
-    let resource_cfg=cfg_path.as_ref().map(|p|parse_resource_cfg(p)).transpose()?;
-    let cfg_dir=cfg_path.as_ref().and_then(|p|p.parent()).map(PathBuf::from);
-
-    let mut coverage=Vec::new();
-    let mut unreadable=Vec::new();
     let mut findings=Vec::new();
     let mut stats=HealthStats::default();
-
+    let (resource_cfg,resource_cfg_error)=match cfg_path.as_ref(){
+        Some(path)=>match parse_resource_cfg(path){
+            Ok(cfg)=>(Some(cfg),None),
+            Err(error)=>{
+                stats.resource_cfg_errors+=1;
+                findings.push(finding("resource_cfg_error","error","Resource.cfg",error.clone()));
+                (None,Some(error))
+            }
+        },
+        None=>{
+            findings.push(finding(
+                "missing_resource_cfg","warning","Resource.cfg",
+                "No Resource.cfg found; package load coverage cannot be verified.",
+            ));
+            (None,None)
+        }
+    };
     if let Some(cfg)=resource_cfg.as_ref() {
         for warning in &cfg.warnings {
             findings.push(finding("resource_cfg_warning","warning","Resource.cfg",warning.clone()));
         }
-    } else {
-        findings.push(finding(
-            "missing_resource_cfg","warning","Resource.cfg",
-            "No Resource.cfg found; package load coverage cannot be verified.",
-        ));
     }
+    let cfg_dir=cfg_path.as_ref().and_then(|p|p.parent()).map(PathBuf::from);
+
+    let mut coverage=Vec::new();
+    let mut unreadable=Vec::new();
+    let mut package_paths=Vec::new();
+    let mut cache=load_cache(&root);
 
     for item in walkdir::WalkDir::new(&root).follow_links(false).into_iter() {
         let e=match item {
@@ -213,44 +257,52 @@ pub fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
         }
         if !is_package(e.path()){continue;}
         stats.packages+=1;
-        match Package::load(e.path()) {
-            Ok(package)=>{
-                stats.readable+=1;
-                if package.entries.is_empty() {
-                    stats.empty_packages+=1;
-                    findings.push(finding("empty_package","info",&relative,
-                        "Valid DBPF package with zero indexed resources."));
-                }
-                let mut seen=HashSet::new();
-                for entry in &package.entries {
-                    if !seen.insert((entry.type_id,entry.group,entry.instance)) {
-                        stats.repeated_tgis+=1;
-                        findings.push(finding("repeated_tgi","warning",&relative,
-                            format!("Repeated TGI within this package: {}",entry.key_string())));
+        package_paths.push(e.path().to_path_buf());
+
+        match get_or_build_with_metrics(e.path(),&mut cache) {
+            Ok((cached,metrics))=>{
+                if metrics.cache_hit {stats.cache_hits+=1;} else {stats.cache_misses+=1;}
+                if let Some(error)=cached.parse_error {
+                    stats.unreadable+=1;
+                    unreadable.push(relative.clone());
+                    let category=dbpf_error_category(&error);
+                    match category {
+                        "invalid_header"=>stats.invalid_headers+=1,
+                        "unsupported_version"=>stats.unsupported_versions+=1,
+                        "damaged_index"=>stats.damaged_indices+=1,
+                        _=>{},
+                    }
+                    findings.push(finding(category,"error",&relative,error));
+                } else {
+                    stats.readable+=1;
+                    if cached.resources.is_empty() {
+                        stats.empty_packages+=1;
+                        findings.push(finding("empty_package","info",&relative,
+                            "Valid DBPF package with zero indexed resources."));
+                    }
+                    let mut seen=HashSet::new();
+                    for resource in &cached.resources {
+                        if !seen.insert((resource.type_id,resource.group,resource.instance)) {
+                            stats.repeated_tgis+=1;
+                            findings.push(finding("repeated_tgi","warning",&relative,
+                                format!("Repeated TGI within this package: 0x{:08X}-0x{:08X}-0x{:016X}",resource.type_id,resource.group,resource.instance)));
+                        }
                     }
                 }
             }
             Err(error)=>{
-                stats.unreadable+=1;
-                unreadable.push(relative.clone());
-                let message=error.to_string();
-                let category=dbpf_error_category(&message);
-                match category {
-                    "invalid_header"=>stats.invalid_headers+=1,
-                    "unsupported_version"=>stats.unsupported_versions+=1,
-                    "damaged_index"=>stats.damaged_indices+=1,
-                    _=>{},
-                }
-                findings.push(finding(category,"error",&relative,message));
+                stats.scan_errors+=1;
+                findings.push(finding("scan_error","warning",&relative,error));
             }
         }
+
         let priority=match (&resource_cfg,&cfg_dir){
             (Some(cfg),Some(dir))=>package_priority(cfg,dir,e.path()),
             _=>None
         };
-        // Missing Resource.cfg is a separate warning; unknown != uncovered.
-        let covered=resource_cfg.is_none() || priority.is_some();
-        if !covered {
+        let coverage_known=resource_cfg.is_some() && resource_cfg_error.is_none();
+        let covered=coverage_known && priority.is_some();
+        if coverage_known && !covered {
             stats.resource_cfg_uncovered+=1;
             findings.push(finding("uncovered_resource_cfg","warning",&relative,
                 "No PackedFile rule covers this package."));
@@ -260,9 +312,14 @@ pub fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
             depth:Path::new(&relative).components().count().saturating_sub(1),
             relative_path:relative,
             covered,
+            coverage_known,
             priority:priority.as_ref().map(|p|p.priority),
             rule:priority.map(|p|p.rule),
         });
+    }
+    retain_existing(&mut cache,&package_paths);
+    if let Err(error)=save_cache(&root,&cache){
+        findings.push(finding("cache_warning","warning","Health cache",error));
     }
     coverage.sort_by_key(|e|e.relative_path.to_ascii_lowercase());
     let empty=empty_dirs(&root);
@@ -284,7 +341,7 @@ pub fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
     Ok(ModsHealthReport{
         root:root.to_string_lossy().to_string(),stats,empty_folders:empty,
         unreadable_packages:unreadable,outside_packages:outside,coverage,resource_cfg,
-        findings,
+        resource_cfg_error,findings,
     })
 }
 
@@ -319,5 +376,28 @@ mod health_diagnostic_tests {
         let a=finding("repeated_tgi","warning","a.package","0x0001");
         let b=finding("repeated_tgi","warning","a.package","0x0002");
         assert_ne!(a.id,b.id);
+    }
+
+    #[test]
+    fn outside_packages_ignores_unrelated_mods_siblings() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mods = std::env::temp_dir().join(format!("s3cc-health-outside-{}-{unique}", std::process::id())).join("Mods");
+        let packages = mods.join("Packages");
+        let overrides = mods.join("Overrides");
+        let unrelated = mods.join("Unrelated");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(overrides.join("outside.package"), b"not a DBPF fixture").unwrap();
+        std::fs::write(unrelated.join("ignored.package"), b"not a DBPF fixture").unwrap();
+
+        let result = outside_packages(&packages);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].ends_with("outside.package"));
+        assert!(!result.iter().any(|path| path.ends_with("ignored.package")));
+        std::fs::remove_dir_all(mods.parent().unwrap()).unwrap();
     }
 }

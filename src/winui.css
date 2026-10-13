@@ -227,6 +227,19 @@ body.release-v1 {
   border-color:var(--winui-control-stroke); border-radius:var(--winui-overlay-radius); background:var(--winui-popup);
   color:var(--winui-text-primary); box-shadow:0 22px 56px var(--winui-shadow);
 }
+.release-v1 .planner-partial-notice {
+  border-color:var(--winui-control-stroke);
+  border-radius:var(--fluent-radius-overlay);
+  background:var(--winui-card-fill);
+  color:var(--fluent-text-secondary);
+}
+.release-v1 .planner-cfg-section {
+  border-color:var(--winui-control-stroke);
+  background:var(--winui-card-fill-alt);
+}
+.release-v1 .planner-cfg-summary {
+  color:var(--fluent-text-tertiary);
+}
 .release-v1 .modal-backdrop { background:rgba(0,0,0,.48); backdrop-filter:blur(1.5px); }
 
 .winui-social-footer { width:100%; margin-top:4px; padding:10px 4px 0; border-top:1px solid var(--winui-divider); }

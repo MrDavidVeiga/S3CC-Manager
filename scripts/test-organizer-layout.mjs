@@ -5,6 +5,7 @@ const read = file => readFileSync(new URL(`../${file}`, import.meta.url), "utf8"
 const html = read("index.html");
 const css = read("src/style.css");
 const fluent = read("src/ui/fluent/button-geometry.css");
+const app = read("src/app.js");
 
 const footer = html.match(/<div class="manager-list-footer-actions">([\s\S]*?)<\/div>/);
 assert(footer, "Organizer list action footer must exist");
@@ -19,5 +20,21 @@ assert.match(fluent, /#page-organizer \.manager-list-footer-actions\s*\{[\s\S]*?
 assert.match(css, /\.release-v1 #page-organizer \.manager-list-card[\s\S]*?display:\s*flex;\s*flex-direction:\s*column/);
 assert.match(css, /\.release-v1 #page-organizer \.manager-list-card \.package-list[\s\S]*?overflow-y:\s*auto/);
 assert.doesNotMatch(css, /@media\s*\(max-width:\s*760px\)\s*\{[\s\S]*?\.manager-list-footer-actions\s*,/);
+assert.match(html, /id="plan-partial-notice" class="planner-partial-notice hidden"/);
+assert.match(html, /id="plan-cfg-row" class="planner-section planner-cfg-section"/);
+assert.match(html, /id="plan-cfg-summary" class="planner-cfg-summary"/);
+assert.doesNotMatch(html, /id="plan-cfg-row"[^>]*style=/);
+assert.doesNotMatch(html, /id="plan-cfg-summary"[^>]*style=/);
+assert.match(css, /\.planner-modal\s*\{[\s\S]*?grid-template-rows:\s*auto auto auto auto minmax\(0,\s*1fr\) auto/);
+assert.match(css, /\.planner-partial-notice\s*\{[\s\S]*?height:\s*auto;[\s\S]*?overflow-wrap:\s*anywhere/);
+assert.match(css, /\.planner-cfg-summary\s*\{[\s\S]*?white-space:\s*pre-wrap;[\s\S]*?overflow:\s*auto/);
+const cfgHandler = app.match(/el\.planCfgCheckbox\.addEventListener\("change",[\s\S]*?el\.reviewDuplicatesBtn/);
+assert(cfgHandler, "Resource.cfg checkbox handler must remain present");
+assert.match(cfgHandler[0], /preview_resource_cfg_for_plan/);
+assert.match(cfgHandler[0], /const existingPlan = state\.plan/);
+assert.doesNotMatch(cfgHandler[0], /\bbuildPlan\s*\(/,
+  "Resource.cfg toggles must not rebuild the full organization plan");
+assert.doesNotMatch(cfgHandler[0], /state\.plan\s*=\s*null/,
+  "Resource.cfg toggles must preserve the existing plan while refreshing its preview");
 for (const id of ids) assert.match(footer[1], new RegExp(`id="${id}"`));
 console.log("Organizer three-action layout regression: PASS (one row, outside scrollable list, responsive label wrapping)");

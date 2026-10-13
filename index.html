@@ -294,15 +294,20 @@
             </div>
             <div class="analysis-list-footer" data-report-panel="duplicates">
               <span class="analysis-audit-status" data-audit-status="duplicates" aria-live="polite"></span>
-              <div class="analysis-list-footer-actions">
-                <button id="duplicates-select-exact-btn" class="secondary-btn" type="button" data-i18n="selectExactDuplicates">Select All Exact Copies</button>
-                <button id="duplicates-select-current-btn" class="secondary-btn" type="button" data-i18n="selectCurrentDuplicateGroup">Select Current Group Only</button>
-                <button id="duplicates-select-visible-btn" class="secondary-btn" type="button" data-i18n="selectVisibleExactGroups">Select Filtered Exact Groups</button>
-                <button id="duplicates-preview-all-btn" class="secondary-btn" type="button" data-i18n="previewQuarantine">Preview Quarantine</button>
-                <button id="duplicates-clear-selection-btn" class="secondary-btn" type="button" data-i18n="clearSelection">Clear Selection</button>
-                <button class="secondary-btn" type="button" data-export-audit="duplicates" data-i18n="exportAuditReport">Export Report</button>
-                <button class="secondary-btn hidden" type="button" data-open-report-folder="duplicates" data-i18n="openReportFolder">Open Reports</button>
-                <button id="duplicates-clear-list-btn" class="danger-btn" type="button" data-i18n="clearList">Clear List</button>
+              <div class="analysis-action-bar duplicates-action-bar" role="toolbar" aria-label="Duplicate actions">
+                <button id="duplicates-select-exact-btn" class="primary-btn" type="button" data-i18n="selectExactDuplicatesMain">Select Exact Duplicates</button>
+                <button id="duplicates-preview-all-btn" class="secondary-btn" type="button" data-i18n="viewQuarantine">View Quarantine</button>
+                <details class="analysis-more-actions">
+                  <summary data-i18n="moreActions">More Actions</summary>
+                  <div class="analysis-more-actions-menu" role="menu">
+                    <button id="duplicates-select-current-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectCurrentDuplicateGroup">Select Only This Group</button>
+                    <button id="duplicates-select-visible-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectVisibleExactGroups">Select Filtered Exact Groups</button>
+                    <button id="duplicates-clear-selection-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearSelection">Clear Selection</button>
+                    <button class="secondary-btn" type="button" role="menuitem" data-export-audit="duplicates" data-i18n="exportAuditReport">Export Report</button>
+                    <button class="secondary-btn hidden" type="button" role="menuitem" data-open-report-folder="duplicates" data-i18n="openReportFolder">Open Reports</button>
+                    <button id="duplicates-clear-list-btn" class="danger-btn" type="button" role="menuitem" data-i18n="clearList">Clear List</button>
+                  </div>
+                </details>
               </div>
               <div id="duplicates-batch-summary" class="analysis-batch-summary" role="status" aria-live="polite"></div>
               <div id="duplicates-batch-preview" class="quarantine-preview hidden" aria-live="polite"></div>
@@ -360,27 +365,28 @@
                 <span class="analysis-audit-status" data-audit-status="conflicts" aria-live="polite"></span>
                 <span id="conflicts-review-selection-count" class="analysis-batch-summary" role="status" aria-live="polite"></span>
               </div>
-              <div class="conflicts-action-primary">
-                <button id="conflicts-select-detected-btn" class="secondary-btn" type="button" data-i18n="selectAllDetectedConflicts">Select All Detected Conflicts</button>
-                <button id="conflicts-select-all-btn" class="secondary-btn" type="button" data-i18n="selectAllVisibleConflicts">Select Visible Conflicts</button>
-                <button id="conflicts-clear-review-btn" class="secondary-btn" type="button" data-i18n="clearReviewSelection">Clear Review Selection</button>
-                <button id="conflicts-prioritize-selected-btn" class="secondary-btn" type="button" data-i18n="prioritizeSelectedConflicts">Prioritize Selected</button>
-                <button id="conflicts-preview-quarantine-btn" class="primary-btn" type="button" data-i18n="previewSelectedQuarantine">Preview Selected Quarantine</button>
+              <div class="analysis-action-bar conflicts-action-primary" role="toolbar" aria-label="Conflict actions">
+                <button id="conflicts-select-detected-btn" class="primary-btn" type="button" data-i18n="selectForReview">Select for Review</button>
+                <button id="conflicts-review-selected-btn" class="secondary-btn" type="button" data-i18n="reviewSelected">Review Selected</button>
+                <details class="analysis-more-actions">
+                  <summary data-i18n="moreActions">More Actions</summary>
+                  <div class="analysis-more-actions-menu" role="menu">
+                    <button id="conflicts-select-all-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectAllVisibleConflicts">Select Visible Conflicts</button>
+                    <button id="conflicts-clear-review-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearReviewSelection">Clear Review Selection</button>
+                    <button id="conflicts-prioritize-selected-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="prioritizeSelectedConflicts">Prioritize Selected</button>
+                    <button id="conflicts-mark-intentional-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="markSelectedIntentional">Mark Selected Intentional</button>
+                    <button id="conflicts-mark-reviewed-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="markSelectedReviewed">Mark Selected Reviewed (Session)</button>
+                    <button id="conflicts-mark-ignored-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="ignoreSelectedSession">Ignore Selected (Session)</button>
+                    <button id="conflicts-clear-marks-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearSelectedMarks">Clear Selected Marks</button>
+                    <button id="conflicts-prioritize-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="prioritizeConflicts">Prioritize All</button>
+                    <button id="conflicts-preview-quarantine-btn" class="primary-btn" type="button" role="menuitem" data-i18n="previewSelectedQuarantine">Preview Selected Quarantine</button>
+                    <button id="conflicts-clear-quarantine-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearSelection">Clear Selection</button>
+                    <button class="secondary-btn" type="button" role="menuitem" data-export-audit="conflicts" data-i18n="exportAuditReport">Export Report</button>
+                    <button class="secondary-btn hidden" type="button" role="menuitem" data-open-report-folder="conflicts" data-i18n="openReportFolder">Open Reports</button>
+                    <button id="conflicts-clear-list-btn" class="danger-btn" type="button" role="menuitem" data-i18n="clearList">Clear List</button>
+                  </div>
+                </details>
               </div>
-              <details class="conflicts-extra-actions">
-                <summary data-i18n="moreConflictActions">More review and quarantine actions</summary>
-                <div class="conflicts-action-expanded">
-                  <button id="conflicts-mark-intentional-btn" class="secondary-btn" type="button" data-i18n="markSelectedIntentional">Mark Selected Intentional</button>
-                  <button id="conflicts-mark-reviewed-btn" class="secondary-btn" type="button" data-i18n="markSelectedReviewed">Mark Selected Reviewed (Session)</button>
-                  <button id="conflicts-mark-ignored-btn" class="secondary-btn" type="button" data-i18n="ignoreSelectedSession">Ignore Selected (Session)</button>
-                  <button id="conflicts-clear-marks-btn" class="secondary-btn" type="button" data-i18n="clearSelectedMarks">Clear Selected Marks</button>
-                  <button id="conflicts-prioritize-btn" class="secondary-btn" type="button" data-i18n="prioritizeConflicts">Prioritize All</button>
-                  <button id="conflicts-clear-quarantine-btn" class="secondary-btn" type="button" data-i18n="clearSelection">Clear Selection</button>
-                  <button class="secondary-btn" type="button" data-export-audit="conflicts" data-i18n="exportAuditReport">Export Report</button>
-                  <button class="secondary-btn hidden" type="button" data-open-report-folder="conflicts" data-i18n="openReportFolder">Open Reports</button>
-                  <button id="conflicts-clear-list-btn" class="danger-btn" type="button" data-i18n="clearList">Clear List</button>
-                </div>
-              </details>
             </div>
           </section>
 
@@ -504,7 +510,7 @@
                 <button id="tools-health-export" class="secondary-btn" type="button" data-i18n="healthExportSelected">Export selected (JSON)</button>
                 <span id="tools-health-selection-count" role="status" aria-live="polite"></span>
               </div>
-              <div class="health-review-toolbar"><select class="text-input" id="tools-health-filter"><option value="all" data-i18n="healthAll">All findings</option><option value="error" data-i18n="healthErrors">Errors</option><option value="warning" data-i18n="healthWarnings">Warnings</option><option value="info" data-i18n="healthInformation">Information</option></select><button class="secondary-btn" id="tools-health-select-visible" type="button" data-i18n="healthSelectVisible">Select visible</button><button class="secondary-btn" id="tools-health-clear-selection" type="button" data-i18n="healthClearSelection">Clear selection</button><button class="secondary-btn" id="tools-health-export" type="button" data-i18n="healthExport">Export selected (JSON)</button><span id="tools-health-selection-status" role="status"></span></div><div id="tools-health-summary" class="stats tools-stats"></div>
+              <div id="tools-health-summary" class="stats tools-stats"></div>
               <div class="tools-grid two">
                 <section class="tools-card"><h3 data-i18n="resourceCfgViewer">Resource.cfg Viewer / Load Order</h3><div id="tools-resourcecfg"></div></section>
                 <section class="tools-card"><h3 data-i18n="healthFindings">Health Findings</h3><div id="tools-health-findings" class="tools-list"></div></section>
@@ -883,9 +889,9 @@
         </div>
 
         <p id="plan-partial-notice" class="planner-partial-notice hidden" role="status" aria-live="polite"></p>
-        <div id="plan-cfg-row" class="planner-section" style="margin: 10px 16px;">
+        <div id="plan-cfg-row" class="planner-section planner-cfg-section">
           <label><input id="plan-cfg-checkbox" type="checkbox" /> <span data-i18n="resourceCfgUpdateLabel">Extend Resource.cfg for organized subfolders (backup required)</span></label>
-          <pre id="plan-cfg-summary" style="white-space: pre-wrap; max-height: 130px; overflow: auto;"></pre>
+          <pre id="plan-cfg-summary" class="planner-cfg-summary"></pre>
         </div>
 
         <div class="planner-body">
@@ -953,6 +959,10 @@
         </div>
         <footer class="planner-footer conflict-details-footer">
           <span><i class="fa-solid fa-shield-halved" aria-hidden="true"></i> <span data-i18n="conflictDetailsSafety">Reviewing a conflict does not change either package.</span></span>
+          <div class="conflict-details-navigation" role="group" aria-label="Conflict navigation">
+            <button id="conflict-previous-btn" class="secondary-btn" type="button" data-i18n="previousConflict">Previous</button>
+            <button id="conflict-next-btn" class="secondary-btn" type="button" data-i18n="nextConflict">Next</button>
+          </div>
           <button id="conflict-details-close-footer-btn" class="secondary-btn" type="button" data-i18n="close">Close</button>
         </footer>
       </section>
