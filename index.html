@@ -449,7 +449,10 @@
                 <h2 data-i18n="tools">Tools</h2>
                 <p data-i18n="converterIntro">Convert Sims3Pack files and access recovery history.</p>
               </div>
-              <div id="tools-state" class="scan-state"></div>
+              <div class="tools-status-row">
+                <div id="tools-state" class="scan-state" role="status" aria-live="polite"></div>
+                <button id="tools-cancel" class="secondary-btn compact-btn hidden" type="button" data-i18n="cancel">Cancel</button>
+              </div>
             </div>
 
             <div class="tools-subtabs" role="tablist">

@@ -1232,10 +1232,14 @@ fn merge_sims3pack_payloads(
     result
 }
 
-#[tauri::command]
-pub fn inspect_sims3packs(paths: Vec<String>, language: AppLanguage) -> Result<Vec<Sims3PackInspection>, String> {
+fn inspect_sims3packs_core(paths: Vec<String>, language: AppLanguage) -> Result<Vec<Sims3PackInspection>, String> {
     let mut results = Vec::new();
-    for raw in paths {
+    crate::operation::set_total("sims3pack_inspect", paths.len());
+    for (processed, raw) in paths.into_iter().enumerate() {
+        if crate::operation::is_cancelled("sims3pack_inspect") {
+            return Err(crate::operation::CANCELLED_ERROR.to_string());
+        }
+        crate::operation::update("sims3pack_inspect", processed, Some(raw.clone()), "inspecting");
         let path = PathBuf::from(raw.trim());
         if !path.is_file() {
             return Err(format!("Sims3Pack not found: {}", path.display()));
@@ -1245,8 +1249,7 @@ pub fn inspect_sims3packs(paths: Vec<String>, language: AppLanguage) -> Result<V
     Ok(results)
 }
 
-#[tauri::command]
-pub fn convert_sims3packs(
+fn convert_sims3packs_core(
     paths: Vec<String>,
     destination_folder: String,
     language: AppLanguage,
@@ -1261,7 +1264,12 @@ pub fn convert_sims3packs(
 
     let mut result = Sims3PackConversionResult::default();
 
-    for raw in paths {
+    crate::operation::set_total("sims3pack_convert", paths.len());
+    for (processed, raw) in paths.into_iter().enumerate() {
+        if crate::operation::is_cancelled("sims3pack_convert") {
+            return Err(crate::operation::CANCELLED_ERROR.to_string());
+        }
+        crate::operation::update("sims3pack_convert", processed, Some(raw.clone()), "converting");
         let source = PathBuf::from(raw.trim());
         let inspection = match inspect_one(&source, language) {
             Ok(value) => value,
@@ -1407,6 +1415,25 @@ pub fn convert_sims3packs(
     }
 
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn inspect_sims3packs(paths: Vec<String>, language: AppLanguage) -> Result<Vec<Sims3PackInspection>, String> {
+    crate::operation::run_blocking("sims3pack_inspect", "inspecting", move || {
+        inspect_sims3packs_core(paths, language)
+    }).await
+}
+
+#[tauri::command]
+pub async fn convert_sims3packs(
+    paths: Vec<String>,
+    destination_folder: String,
+    language: AppLanguage,
+    combined: bool,
+) -> Result<Sims3PackConversionResult, String> {
+    crate::operation::run_mutating_blocking("sims3pack_convert", "converting", move || {
+        convert_sims3packs_core(paths, destination_folder, language, combined)
+    }).await
 }
 
 #[cfg(test)]

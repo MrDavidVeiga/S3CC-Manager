@@ -1,4 +1,5 @@
 use crate::dbpf::Package;
+use crate::operation::{self, CANCELLED_ERROR};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -208,27 +209,30 @@ fn suggested_groups(findings: &[DependencyEvidence]) -> Vec<SuggestedDependencyG
     groups
 }
 
-#[tauri::command]
-pub fn analyze_dependencies(folder: String) -> Result<DependencyAnalysis, String> {
+fn analyze_dependencies_core(folder: String) -> Result<DependencyAnalysis, String> {
     let root = canonical_root(&folder)?;
+    let package_paths = walkdir::WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && is_package(entry.path()))
+        .map(|entry| entry.path().to_path_buf())
+        .collect::<Vec<_>>();
+    operation::set_total("dependencies", package_paths.len());
     let mut packages = Vec::new();
     let mut targets = HashMap::<[u8; 16], Vec<(usize, String)>>::new();
     let mut slider_instance_targets = HashMap::<u64, Vec<(usize, String)>>::new();
 
-    for e in walkdir::WalkDir::new(&root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !e.file_type().is_file() || !is_package(e.path()) {
-            continue;
+    for (processed, path) in package_paths.iter().enumerate() {
+        if operation::is_cancelled("dependencies") {
+            return Err(CANCELLED_ERROR.to_string());
         }
-        if let Ok(pkg) = Package::load(e.path()) {
+        operation::update("dependencies", processed, Some(path.to_string_lossy().into_owned()), "indexing");
+        if let Ok(pkg) = Package::load(path) {
             let idx = packages.len();
-            let rel = e
-                .path()
+            let rel = path
                 .strip_prefix(&root)
-                .unwrap_or(e.path())
+                .unwrap_or(path)
                 .to_string_lossy()
                 .replace('/', "\\");
 
@@ -246,7 +250,7 @@ pub fn analyze_dependencies(folder: String) -> Result<DependencyAnalysis, String
                 }
             }
 
-            packages.push((e.path().to_path_buf(), rel, pkg));
+            packages.push((path.to_path_buf(), rel, pkg));
         }
     }
 
@@ -257,6 +261,10 @@ pub fn analyze_dependencies(folder: String) -> Result<DependencyAnalysis, String
     let mut truncated = false;
 
     'packages: for (source_idx, (source_path, source_rel, pkg)) in packages.iter().enumerate() {
+        if operation::is_cancelled("dependencies") {
+            return Err(CANCELLED_ERROR.to_string());
+        }
+        operation::update("dependencies", source_idx, Some(source_rel.clone()), "resolving");
         for r in &pkg.entries {
             if is_reference_type(r.type_id) {
                 if oversized_reference_resource(r.file_size, r.mem_size) {
@@ -388,6 +396,14 @@ pub fn analyze_dependencies(folder: String) -> Result<DependencyAnalysis, String
         skipped_large_reference_resources,
         truncated,
     })
+}
+
+#[tauri::command]
+pub async fn analyze_dependencies(folder: String) -> Result<DependencyAnalysis, String> {
+    crate::operation::run_blocking("dependencies", "analyzing", move || {
+        analyze_dependencies_core(folder)
+    })
+    .await
 }
 
 #[cfg(test)]

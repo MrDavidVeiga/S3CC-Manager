@@ -126,12 +126,12 @@ pub fn run() {
             inbox::execute_inbox_import,
             selection_export::save_selection_export,
             history::get_operation_history,
-            quarantine::build_quarantine_plan,
-            quarantine::build_exact_duplicate_quarantine_plan,
-            quarantine::execute_quarantine,
-            quarantine::execute_exact_duplicate_quarantine,
-            quarantine::restore_quarantine,
-            quarantine::recover_quarantine,
+            quarantine::build_quarantine_plan_async,
+            quarantine::build_exact_duplicate_quarantine_plan_async,
+            quarantine::execute_quarantine_async,
+            quarantine::execute_exact_duplicate_quarantine_async,
+            quarantine::restore_quarantine_async,
+            quarantine::recover_quarantine_async,
             quarantine::remove_quarantine_history,
             planner::build_organization_plan,
             planner::build_organization_plan_with_cfg,
@@ -140,7 +140,7 @@ pub fn run() {
             executor::execute_organization_with_cfg,
             executor::execute_organization_plan_with_cfg,
             restore::preview_restore,
-            restore::execute_restore
+            restore::execute_restore_async
         ])
         .run(tauri::generate_context!())
         .expect("error while running S3CC Manager");

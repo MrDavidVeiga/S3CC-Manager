@@ -348,11 +348,17 @@ mod tests {
         assert!(!first.cache_hit);
         let (_, second) = get_or_build_with_metrics(&package, &mut cache).unwrap();
         assert!(second.cache_hit);
+        assert_eq!(second.dbpf_load_ms, 0);
+        assert_eq!(second.resource_decode_ms, 0);
 
         write_empty_dbpf(&package, 1);
         let (changed, third) = get_or_build_with_metrics(&package, &mut cache).unwrap();
         assert!(!third.cache_hit);
         assert_eq!(changed.dbpf_minor, Some(1));
+        println!(
+            "cache_benchmark first_ms={} hit_ms={} invalidated_ms={} hit_dbpf_load_ms={} hit_decode_ms={}",
+            first.total_ms, second.total_ms, third.total_ms, second.dbpf_load_ms, second.resource_decode_ms
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

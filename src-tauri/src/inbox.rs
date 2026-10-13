@@ -37,13 +37,11 @@ fn canonical_dir(raw:&str)->Result<PathBuf,String>{
     if !p.is_dir(){return Err("Selected path is not a directory.".into());}Ok(p)
 }
 fn is_package(path:&Path)->bool{path.extension().and_then(|v|v.to_str()).map(|v|v.eq_ignore_ascii_case("package")).unwrap_or(false)}
-#[tauri::command]
-pub fn scan_inbox(source_folder:String,language:AppLanguage)->Result<ScanResult,String>{
+fn scan_inbox_core(source_folder:String,language:AppLanguage)->Result<ScanResult,String>{
     let source=canonical_dir(&source_folder)?;
-    scan_packages_core(source.to_string_lossy().to_string(),language,None)
+    scan_packages_core(source.to_string_lossy().to_string(),language,Some("inbox_scan"))
 }
-#[tauri::command]
-pub fn build_inbox_import_plan(folder:String,source_folder:String,selected_paths:Vec<String>)->Result<InboxImportPlan,String>{
+fn build_inbox_import_plan_core(folder:String,source_folder:String,selected_paths:Vec<String>)->Result<InboxImportPlan,String>{
     let root=canonical_dir(&folder)?;let source_root=canonical_dir(&source_folder)?;
     if source_root.starts_with(&root) || root.starts_with(&source_root) {
         return Err("Inbox must be outside the selected Mods root and its parent tree.".into());
@@ -75,10 +73,9 @@ pub fn build_inbox_import_plan(folder:String,source_folder:String,selected_paths
         destination_root:destination_root.to_string_lossy().to_string(),can_execute:ready>0&&blocked==0,items,ready,blocked
     })
 }
-#[tauri::command]
-pub fn execute_inbox_import(folder:String,source_folder:String,selected_paths:Vec<String>)->Result<InboxImportResult,String>{
+fn execute_inbox_import_core(folder:String,source_folder:String,selected_paths:Vec<String>)->Result<InboxImportResult,String>{
     let root=canonical_dir(&folder)?;ensure_writable(&root)?;
-    let plan=build_inbox_import_plan(folder.clone(),source_folder,selected_paths)?;
+    let plan=build_inbox_import_plan_core(folder.clone(),source_folder,selected_paths)?;
     if !plan.can_execute{return Err("Inbox import is blocked by the preflight plan.".into());}
     let destination_root=PathBuf::from(&plan.destination_root);
     let mut copied=Vec::<PathBuf>::new();
@@ -127,4 +124,25 @@ pub fn execute_inbox_import(folder:String,source_folder:String,selected_paths:Ve
         Err(error)=>warnings.push(format!("Import completed, but the Inbox manifest could not be serialized: {error}")),
     }
     Ok(InboxImportResult{imported:copied.len(),manifest_path,destination_root:destination_root.to_string_lossy().to_string(),warnings})
+}
+
+#[tauri::command]
+pub async fn scan_inbox(source_folder:String,language:AppLanguage)->Result<ScanResult,String>{
+    crate::operation::run_blocking("inbox_scan", "scanning", move || {
+        scan_inbox_core(source_folder, language)
+    }).await
+}
+
+#[tauri::command]
+pub async fn build_inbox_import_plan(folder:String,source_folder:String,selected_paths:Vec<String>)->Result<InboxImportPlan,String>{
+    crate::operation::run_blocking("inbox_plan", "planning", move || {
+        build_inbox_import_plan_core(folder, source_folder, selected_paths)
+    }).await
+}
+
+#[tauri::command]
+pub async fn execute_inbox_import(folder:String,source_folder:String,selected_paths:Vec<String>)->Result<InboxImportResult,String>{
+    crate::operation::run_mutating_blocking("inbox_import", "importing", move || {
+        execute_inbox_import_core(folder, source_folder, selected_paths)
+    }).await
 }

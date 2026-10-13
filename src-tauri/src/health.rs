@@ -1,5 +1,6 @@
 use crate::{
     cache::{get_or_build_with_metrics, load_cache, retain_existing, save_cache},
+    operation,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     structure_manager::{append_log, ManualOperationRecord},
     workspace::{active_profile, ensure_writable, is_protected, load_workspace_for_root},
@@ -195,8 +196,7 @@ fn is_unanalyzed_cache(name: &str) -> bool {
     name.ends_with(".dbc") || name.ends_with(".ebc")
 }
 
-#[tauri::command]
-pub fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
+fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
     let root=canonical_root(&folder)?;
     let cfg_path=find_resource_cfg(&root);
     let mut findings=Vec::new();
@@ -230,7 +230,11 @@ pub fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
     let mut package_paths=Vec::new();
     let mut cache=load_cache(&root);
 
+    let mut processed_files = 0usize;
     for item in walkdir::WalkDir::new(&root).follow_links(false).into_iter() {
+        if operation::is_cancelled("health") {
+            return Err(operation::CANCELLED_ERROR.to_string());
+        }
         let e=match item {
             Ok(entry)=>entry,
             Err(error)=>{
@@ -241,6 +245,8 @@ pub fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
             }
         };
         if !e.file_type().is_file(){continue;}
+        processed_files += 1;
+        operation::update("health", processed_files, Some(rel(&root, e.path())), "analyzing");
         let name=e.file_name().to_string_lossy();
         let relative=rel(&root,e.path());
         if is_disabled_file(&name) {
@@ -343,6 +349,11 @@ pub fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
         unreadable_packages:unreadable,outside_packages:outside,coverage,resource_cfg,
         resource_cfg_error,findings,
     })
+}
+
+#[tauri::command]
+pub async fn analyze_mods_health(folder:String)->Result<ModsHealthReport,String>{
+    operation::run_blocking("health", "analyzing", move || analyze_mods_health_core(folder)).await
 }
 
 #[cfg(test)]

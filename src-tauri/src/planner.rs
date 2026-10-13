@@ -2752,7 +2752,7 @@ fn scan_selected_roots(
         });
     }
     if selected.len() >= 512 {
-        return scan_packages_core(root.to_string_lossy().to_string(), language, None);
+        return scan_packages_core(root.to_string_lossy().to_string(), language, Some("planning"));
     }
     let mut paths = selected.iter().cloned().collect::<Vec<_>>();
     paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
@@ -2812,17 +2812,7 @@ pub fn preview_resource_cfg_for_plan(
     preview_resource_cfg_update(&root, &destinations)
 }
 
-#[tauri::command]
-pub fn build_organization_plan(
-    folder: String,
-    language: AppLanguage,
-    selected_paths: Vec<String>,
-) -> Result<OrganizationPlan, String> {
-    build_organization_plan_with_cfg(folder, language, selected_paths, false)
-}
-
-#[tauri::command]
-pub fn build_organization_plan_with_cfg(
+pub(crate) fn build_organization_plan_with_cfg_core(
     folder: String,
     language: AppLanguage,
     selected_paths: Vec<String>,
@@ -4097,6 +4087,31 @@ pub fn build_organization_plan_with_cfg(
         analysis_before: OrganizationAnalysisSnapshot::from_scan("analysis_before", &scan.stats)
             .with_plan(&stats, stats.remaining_legacy_files),
     })
+}
+
+#[tauri::command]
+pub async fn build_organization_plan(
+    folder: String,
+    language: AppLanguage,
+    selected_paths: Vec<String>,
+) -> Result<OrganizationPlan, String> {
+    crate::operation::run_blocking("planning", "building", move || {
+        build_organization_plan_with_cfg_core(folder, language, selected_paths, false)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn build_organization_plan_with_cfg(
+    folder: String,
+    language: AppLanguage,
+    selected_paths: Vec<String>,
+    update_resource_cfg: bool,
+) -> Result<OrganizationPlan, String> {
+    crate::operation::run_blocking("planning", "building", move || {
+        build_organization_plan_with_cfg_core(folder, language, selected_paths, update_resource_cfg)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -5767,7 +5782,7 @@ mod tests {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let plan = build_organization_plan_with_cfg(root, AppLanguage::Pt, selected, false)
+        let plan = build_organization_plan_with_cfg_core(root, AppLanguage::Pt, selected, false)
             .expect("incremental residual plan");
         if let Ok(expected) = std::env::var("S3CC_RESIDUAL_EXPECTED_SELECTED") {
             assert_eq!(plan.stats.selected, expected.parse::<usize>().unwrap());

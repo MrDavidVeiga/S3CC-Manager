@@ -48,12 +48,20 @@ fn snapshots_dir(root:&Path)->PathBuf{
 fn package_path(path:&Path)->bool{
     path.extension().and_then(|v|v.to_str()).map(|v|v.eq_ignore_ascii_case("package")).unwrap_or(false)
 }
-fn capture(root:&Path)->Result<Vec<SnapshotEntry>,String>{
-    let mut entries=Vec::new();
+fn capture(root:&Path, kind: Option<&str>)->Result<Vec<SnapshotEntry>,String>{
+    let mut paths = Vec::new();
     for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok){
-        if !entry.file_type().is_file() || !package_path(entry.path()){continue;}
-        let (sha256,size)=sha256_file(entry.path()).map_err(|e|format!("Could not hash {}: {e}",entry.path().display()))?;
-        let rel=entry.path().strip_prefix(root).unwrap_or(entry.path()).to_string_lossy().replace('/',"\\");
+        if entry.file_type().is_file() && package_path(entry.path()) { paths.push(entry.path().to_path_buf()); }
+    }
+    if let Some(kind) = kind { crate::operation::set_total(kind, paths.len()); }
+    let mut entries=Vec::new();
+    for (processed, path) in paths.iter().enumerate(){
+        if let Some(kind) = kind {
+            if crate::operation::is_cancelled(kind) { return Err(crate::operation::CANCELLED_ERROR.to_string()); }
+            crate::operation::update(kind, processed, Some(path.to_string_lossy().into_owned()), "hashing");
+        }
+        let (sha256,size)=sha256_file(path).map_err(|e|format!("Could not hash {}: {e}",path.display()))?;
+        let rel=path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('/',"\\");
         entries.push(SnapshotEntry{relative_path:rel,size,sha256});
     }
     entries.sort_by_key(|e|e.relative_path.to_ascii_lowercase());
@@ -107,11 +115,10 @@ fn load_snapshot(path:&Path)->Result<ModsSnapshot,String>{
     let text=fs::read_to_string(path).map_err(|e|format!("Could not read snapshot: {e}"))?;
     serde_json::from_str(&text).map_err(|e|format!("Invalid snapshot: {e}"))
 }
-#[tauri::command]
-pub fn create_snapshot(folder:String)->Result<ModsSnapshot,String>{
+fn create_snapshot_core(folder:String)->Result<ModsSnapshot,String>{
     let root=canonical_root(&folder)?;
     let id=Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let snapshot=ModsSnapshot{id:id.clone(),created_at:Local::now().to_rfc3339(),root:root.to_string_lossy().to_string(),entries:capture(&root)?};
+    let snapshot=ModsSnapshot{id:id.clone(),created_at:Local::now().to_rfc3339(),root:root.to_string_lossy().to_string(),entries:capture(&root, Some("snapshot"))?};
     let dir=snapshots_dir(&root); fs::create_dir_all(&dir).map_err(|e|format!("Could not create snapshot directory: {e}"))?;
     let mut path=dir.join(format!("snapshot-{id}.json")); let mut n=1;
     while path.exists(){path=dir.join(format!("snapshot-{id}-{n}.json"));n+=1;}
@@ -130,18 +137,35 @@ pub fn list_snapshots(folder:String)->Result<Vec<ModsSnapshot>,String>{
     }
     out.sort_by(|a,b|b.created_at.cmp(&a.created_at)); Ok(out)
 }
-#[tauri::command]
-pub fn compare_snapshot_to_current(folder:String,snapshot_id:String)->Result<SnapshotDiff,String>{
+fn compare_snapshot_to_current_core(folder:String,snapshot_id:String)->Result<SnapshotDiff,String>{
     let root=canonical_root(&folder)?; let dir=snapshots_dir(&root);
     let mut selected=None;
     for e in fs::read_dir(&dir).map_err(|e|e.to_string())?.filter_map(Result::ok){
         if let Ok(s)=load_snapshot(&e.path()){if s.id==snapshot_id{selected=Some(s);break;}}
     }
     let snapshot=selected.ok_or_else(||"Snapshot not found.".to_string())?;
-    Ok(diff_entries(&snapshot.entries,&capture(&root)?))
+    Ok(diff_entries(&snapshot.entries,&capture(&root, Some("snapshot"))?))
 }
-#[tauri::command]
-pub fn compare_mods_roots(left_folder:String,right_folder:String)->Result<SnapshotDiff,String>{
+fn compare_mods_roots_core(left_folder:String,right_folder:String)->Result<SnapshotDiff,String>{
     let left=canonical_root(&left_folder)?; let right=canonical_root(&right_folder)?;
-    Ok(diff_entries(&capture(&left)?,&capture(&right)?))
+    Ok(diff_entries(&capture(&left, Some("snapshot"))?,&capture(&right, Some("snapshot"))?))
+}
+
+#[tauri::command]
+pub async fn create_snapshot(folder:String)->Result<ModsSnapshot,String>{
+    crate::operation::run_blocking("snapshot", "capturing", move || create_snapshot_core(folder)).await
+}
+
+#[tauri::command]
+pub async fn compare_snapshot_to_current(folder:String,snapshot_id:String)->Result<SnapshotDiff,String>{
+    crate::operation::run_blocking("snapshot", "comparing", move || {
+        compare_snapshot_to_current_core(folder, snapshot_id)
+    }).await
+}
+
+#[tauri::command]
+pub async fn compare_mods_roots(left_folder:String,right_folder:String)->Result<SnapshotDiff,String>{
+    crate::operation::run_blocking("snapshot", "comparing", move || {
+        compare_mods_roots_core(left_folder, right_folder)
+    }).await
 }

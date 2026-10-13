@@ -547,8 +547,7 @@ pub fn learned_fix_classification(
     })
 }
 
-#[tauri::command]
-pub fn build_persistent_fix_signature_index(
+fn build_persistent_fix_signature_index_core(
     reference_root: String,
 ) -> Result<FixSignatureIndex, String> {
     let index = build_fix_signature_index(Path::new(reference_root.trim()))?;
@@ -561,11 +560,30 @@ pub fn get_persistent_fix_signature_index_status() -> FixSignatureIndexStatus {
     persistent_index_status()
 }
 
-#[tauri::command]
-pub fn rebuild_persistent_fix_signature_index(
+fn rebuild_persistent_fix_signature_index_core(
     reference_root: String,
 ) -> Result<FixSignatureIndex, String> {
-    build_persistent_fix_signature_index(reference_root)
+    build_persistent_fix_signature_index_core(reference_root)
+}
+
+#[tauri::command]
+pub async fn build_persistent_fix_signature_index(
+    reference_root: String,
+) -> Result<FixSignatureIndex, String> {
+    crate::operation::run_blocking("fix_index", "building", move || {
+        build_persistent_fix_signature_index_core(reference_root)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn rebuild_persistent_fix_signature_index(
+    reference_root: String,
+) -> Result<FixSignatureIndex, String> {
+    crate::operation::run_blocking("fix_index", "rebuilding", move || {
+        rebuild_persistent_fix_signature_index_core(reference_root)
+    })
+    .await
 }
 
 #[cfg(test)]

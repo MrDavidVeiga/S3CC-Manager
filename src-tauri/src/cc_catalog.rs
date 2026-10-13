@@ -2,6 +2,7 @@ use crate::{
     catalog::{classify_resource, TYPE_CASP, TYPE_OBJD},
     dbpf::Package,
     i18n::AppLanguage,
+    operation::{self, CANCELLED_ERROR},
     package_family::{classify_package_family, PackageFamilyResult},
 };
 use calamine::{open_workbook_auto, Reader};
@@ -787,8 +788,7 @@ fn canonical_enabled(configs: &[CatalogSource]) -> Vec<PathBuf> {
         .filter_map(|config| PathBuf::from(config.path.trim()).canonicalize().ok()).collect()
 }
 
-#[tauri::command]
-pub fn scan_cc_catalog_sources(sources: Vec<CatalogSource>, ignored: Vec<CatalogSource>) -> Result<CatalogScanResult, String> {
+fn scan_cc_catalog_sources_core(sources: Vec<CatalogSource>, ignored: Vec<CatalogSource>) -> Result<CatalogScanResult, String> {
     let source_roots = canonical_enabled(&sources);
     if source_roots.is_empty() { return Err("No enabled CC source folders were found.".to_string()); }
     let ignored_roots = canonical_enabled(&ignored);
@@ -807,7 +807,12 @@ pub fn scan_cc_catalog_sources(sources: Vec<CatalogSource>, ignored: Vec<Catalog
         }
     }
     let mut entries = Vec::new();
-    for path in package_paths {
+    operation::set_total("catalog_scan", package_paths.len());
+    for (processed, path) in package_paths.into_iter().enumerate() {
+        if operation::is_cancelled("catalog_scan") {
+            return Err(CANCELLED_ERROR.to_string());
+        }
+        operation::update("catalog_scan", processed, Some(path.to_string_lossy().into_owned()), "reading");
         match scan_catalog_package(&path) { Ok(entry) => entries.push(entry), Err(error) => errors.push(error) }
     }
     entries.sort_by(|a, b| a.file_name.to_ascii_lowercase().cmp(&b.file_name.to_ascii_lowercase()));
@@ -828,8 +833,7 @@ fn differing_fields(a: &CatalogEntry, b: &CatalogEntry) -> Vec<String> {
     ].into_iter().filter_map(|(name, left, right)| (!left.trim().eq_ignore_ascii_case(right.trim())).then_some(name.to_string())).collect()
 }
 
-#[tauri::command]
-pub fn compare_cc_catalogs(left_path: String, right_path: String) -> Result<CatalogComparison, String> {
+fn compare_cc_catalogs_core(left_path: String, right_path: String) -> Result<CatalogComparison, String> {
     let (left_entries, _, _, _) = read_catalog_core(Path::new(left_path.trim()))?;
     let (right_entries, _, _, _) = read_catalog_core(Path::new(right_path.trim()))?;
     let mut left = left_entries.into_iter().map(|entry| (comparison_key(&entry), entry)).collect::<BTreeMap<_, _>>();
@@ -848,6 +852,20 @@ pub fn compare_cc_catalogs(left_path: String, right_path: String) -> Result<Cata
         }
     }
     Ok(out)
+}
+
+#[tauri::command]
+pub async fn scan_cc_catalog_sources(sources: Vec<CatalogSource>, ignored: Vec<CatalogSource>) -> Result<CatalogScanResult, String> {
+    crate::operation::run_blocking("catalog_scan", "scanning", move || {
+        scan_cc_catalog_sources_core(sources, ignored)
+    }).await
+}
+
+#[tauri::command]
+pub async fn compare_cc_catalogs(left_path: String, right_path: String) -> Result<CatalogComparison, String> {
+    crate::operation::run_blocking("catalog_compare", "comparing", move || {
+        compare_cc_catalogs_core(left_path, right_path)
+    }).await
 }
 
 fn missing_value(map: &BTreeMap<String, String>, key: &str) -> String {

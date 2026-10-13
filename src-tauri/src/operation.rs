@@ -34,6 +34,11 @@ fn registry() -> &'static Mutex<HashMap<String, OperationStatus>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn mutation_owner() -> &'static Mutex<Option<String>> {
+    static OWNER: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    OWNER.get_or_init(|| Mutex::new(None))
+}
+
 fn with_status<F>(kind: &str, mut f: F)
 where
     F: FnMut(&mut OperationStatus),
@@ -61,6 +66,33 @@ pub fn begin(kind: &str, phase: &str) {
             elapsed_ms: 0,
         };
     });
+}
+
+/// Start an operation that can mutate files.  The UI normally serializes
+/// these actions, but the backend must also reject concurrent callers so a
+/// stale second invocation cannot interleave with a transaction or rollback.
+pub fn begin_mutating(kind: &str, phase: &str) -> Result<(), String> {
+    let mut owner = mutation_owner()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(current) = owner.as_ref() {
+        return Err(format!(
+            "Another file operation is already running: {current}."
+        ));
+    }
+    *owner = Some(kind.to_string());
+    drop(owner);
+    begin(kind, phase);
+    Ok(())
+}
+
+fn release_mutation(kind: &str) {
+    let mut owner = mutation_owner()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if owner.as_deref() == Some(kind) {
+        *owner = None;
+    }
 }
 
 pub fn set_total(kind: &str, total: usize) {
@@ -94,6 +126,7 @@ pub fn finish(kind: &str, phase: &str, message: Option<String>) {
         status.message = message.clone();
         status.elapsed_ms = now_ms().saturating_sub(status.started_unix_ms);
     });
+    release_mutation(kind);
 }
 
 pub fn mark_cancelled(kind: &str) {
@@ -105,6 +138,49 @@ pub fn mark_cancelled(kind: &str) {
         status.message = Some("Cancelled by user.".to_string());
         status.elapsed_ms = now_ms().saturating_sub(status.started_unix_ms);
     });
+    release_mutation(kind);
+}
+
+/// Run CPU/I/O-heavy read-only work on Tauri's blocking pool and keep the
+/// operation status consistent for polling and cancellation.
+pub async fn run_blocking<T, F>(kind: &'static str, phase: &'static str, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    begin(kind, phase);
+    let joined = tauri::async_runtime::spawn_blocking(work).await;
+    let result = match joined {
+        Ok(result) => result,
+        Err(error) => Err(format!("{kind} worker failed: {error}")),
+    };
+    match &result {
+        Ok(_) => finish(kind, "complete", None),
+        Err(error) if error == CANCELLED_ERROR => mark_cancelled(kind),
+        Err(error) => finish(kind, "error", Some(error.clone())),
+    }
+    result
+}
+
+/// Variant used by commands that copy/move/delete files.  It combines the
+/// same worker-pool behavior with a backend mutation lock.
+pub async fn run_mutating_blocking<T, F>(kind: &'static str, phase: &'static str, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    begin_mutating(kind, phase)?;
+    let joined = tauri::async_runtime::spawn_blocking(work).await;
+    let result = match joined {
+        Ok(result) => result,
+        Err(error) => Err(format!("{kind} worker failed: {error}")),
+    };
+    match &result {
+        Ok(_) => finish(kind, "complete", None),
+        Err(error) if error == CANCELLED_ERROR => mark_cancelled(kind),
+        Err(error) => finish(kind, "error", Some(error.clone())),
+    }
+    result
 }
 
 #[tauri::command]
@@ -147,5 +223,14 @@ mod tests {
         assert!(is_cancelled("scan-test"));
         assert!(!is_cancelled("duplicates-test"));
         finish("duplicates-test", "complete", None);
+    }
+
+    #[test]
+    fn mutating_operations_are_serialized() {
+        begin_mutating("mutation-a", "starting").unwrap();
+        assert!(begin_mutating("mutation-b", "starting").is_err());
+        finish("mutation-a", "complete", None);
+        assert!(begin_mutating("mutation-b", "starting").is_ok());
+        finish("mutation-b", "complete", None);
     }
 }

@@ -20,7 +20,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::Instant,
+    time::{Instant, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
 
@@ -87,6 +87,7 @@ struct LatestScan {
     root: PathBuf,
     language: AppLanguage,
     result: ScanResult,
+    file_signatures: HashMap<String, (u64, u128)>,
 }
 
 static LATEST_SCAN: OnceLock<Mutex<Option<LatestScan>>> = OnceLock::new();
@@ -100,26 +101,50 @@ fn remember_latest_scan(result: &ScanResult, language: AppLanguage) {
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(&result.root));
     if let Ok(mut slot) = latest_scan_slot().lock() {
+        let file_signatures = result.items.iter().filter_map(|item| {
+            let path = PathBuf::from(&item.path);
+            let metadata = fs::metadata(&path).ok()?;
+            let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
+            Some((path.to_string_lossy().to_string(), (metadata.len(), modified)))
+        }).collect::<HashMap<_, _>>();
         *slot = Some(LatestScan {
             root,
             language,
             result: result.clone(),
+            file_signatures,
         });
     }
+}
+
+fn latest_scan_is_current(cached: &LatestScan) -> bool {
+    let current = WalkDir::new(&cached.root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && package_extension(entry.path()))
+        .filter_map(|entry| {
+            let path = entry.path().canonicalize().ok()?;
+            let metadata = fs::metadata(&path).ok()?;
+            let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
+            Some((path.to_string_lossy().to_string(), (metadata.len(), modified)))
+        })
+        .collect::<HashMap<_, _>>();
+    current == cached.file_signatures
 }
 
 pub fn cached_scan_for(root: &Path, language: AppLanguage) -> Option<ScanResult> {
     let canonical = root.canonicalize().ok()?;
     let slot = latest_scan_slot().lock().ok()?;
     let cached = slot.as_ref()?;
-    (cached.language == language && cached.root == canonical).then(|| cached.result.clone())
+    (cached.language == language && cached.root == canonical && latest_scan_is_current(cached))
+        .then(|| cached.result.clone())
 }
 
 pub fn cached_scan_paths(root: &Path) -> Option<Vec<PathBuf>> {
     let canonical = root.canonicalize().ok()?;
     let slot = latest_scan_slot().lock().ok()?;
     let cached = slot.as_ref()?;
-    if cached.root != canonical {
+    if cached.root != canonical || !latest_scan_is_current(cached) {
         return None;
     }
 
@@ -3905,10 +3930,15 @@ pub fn scan_selected_package_paths(
     paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
     let mut slider_instances = HashSet::<u64>::new();
     let fix_index = fix_signatures::load_persistent_index();
-    let mut items = paths
-        .iter()
-        .map(|path| scan_one(root, path, language, &mut slider_instances, fix_index.as_ref()))
-        .collect::<Vec<_>>();
+    operation::set_total("planning", paths.len());
+    let mut items = Vec::with_capacity(paths.len());
+    for (processed, path) in paths.iter().enumerate() {
+        if operation::is_cancelled("planning") {
+            return Err(CANCELLED_ERROR.to_string());
+        }
+        operation::update("planning", processed, Some(path.to_string_lossy().into_owned()), "scanning");
+        items.push(scan_one(root, path, language, &mut slider_instances, fix_index.as_ref()));
+    }
 
     apply_slider_companion_classification(&paths, &mut items, &slider_instances);
     apply_nraas_family_subfolders(language, &mut items);

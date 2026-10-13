@@ -1,4 +1,4 @@
-use crate::cache::{get_or_build,load_cache,save_cache};
+use crate::{cache::{get_or_build,load_cache,save_cache}, operation::{self, CANCELLED_ERROR}};
 use serde::Serialize;
 use std::path::{Path,PathBuf};
 
@@ -21,8 +21,7 @@ fn canonical_root(folder:&str)->Result<PathBuf,String>{
 fn is_package(path:&Path)->bool{path.extension().and_then(|v|v.to_str()).map(|v|v.eq_ignore_ascii_case("package")).unwrap_or(false)}
 fn parse_hex_u32(s:&str)->Option<u32>{u32::from_str_radix(s.trim_start_matches("0x"),16).ok()}
 fn parse_hex_u64(s:&str)->Option<u64>{u64::from_str_radix(s.trim_start_matches("0x"),16).ok()}
-#[tauri::command]
-pub fn technical_search(folder:String,query:String)->Result<Vec<TechnicalSearchHit>,String>{
+fn technical_search_core(folder:String,query:String)->Result<Vec<TechnicalSearchHit>,String>{
     let root=canonical_root(&folder)?;
     let q=query.trim();
     if q.is_empty(){return Ok(Vec::new());}
@@ -43,17 +42,22 @@ pub fn technical_search(folder:String,query:String)->Result<Vec<TechnicalSearchH
     }
 
     let mut cache=load_cache(&root);let mut hits=Vec::new();
-    for e in walkdir::WalkDir::new(&root).follow_links(false).into_iter().filter_map(Result::ok){
-        if !e.file_type().is_file()||!is_package(e.path()){continue;}
-        let rel=e.path().strip_prefix(&root).unwrap_or(e.path()).to_string_lossy().replace('/',"\\");
-        let (cached,_)=get_or_build(e.path(),&mut cache)?;
+    let package_paths=walkdir::WalkDir::new(&root).follow_links(false).into_iter()
+        .filter_map(Result::ok).filter(|e|e.file_type().is_file()&&is_package(e.path()))
+        .map(|e|e.path().to_path_buf()).collect::<Vec<_>>();
+    operation::set_total("technical_search", package_paths.len());
+    for (processed,path) in package_paths.iter().enumerate(){
+        if operation::is_cancelled("technical_search"){return Err(CANCELLED_ERROR.to_string());}
+        let rel=path.strip_prefix(&root).unwrap_or(path).to_string_lossy().replace('/',"\\");
+        operation::update("technical_search",processed,Some(rel.clone()),"searching");
+        let (cached,_)=get_or_build(path,&mut cache)?;
         let generic=type_filter.is_none()&&group_filter.is_none()&&instance_filter.is_none()&&sha_filter.is_none();
         if generic && (rel.to_ascii_lowercase().contains(&lower)||cached.file_sha256.to_ascii_lowercase().contains(&lower)){
-            hits.push(TechnicalSearchHit{package_path:e.path().to_string_lossy().to_string(),relative_path:rel.clone(),file_sha256:cached.file_sha256.clone(),type_hex:None,group_hex:None,instance_hex:None,tgi:None,payload_sha256:None});
+            hits.push(TechnicalSearchHit{package_path:path.to_string_lossy().to_string(),relative_path:rel.clone(),file_sha256:cached.file_sha256.clone(),type_hex:None,group_hex:None,instance_hex:None,tgi:None,payload_sha256:None});
         }
         if let Some(sha)=&sha_filter{
             if cached.file_sha256.starts_with(sha){
-                hits.push(TechnicalSearchHit{package_path:e.path().to_string_lossy().to_string(),relative_path:rel.clone(),file_sha256:cached.file_sha256.clone(),type_hex:None,group_hex:None,instance_hex:None,tgi:None,payload_sha256:None});
+                hits.push(TechnicalSearchHit{package_path:path.to_string_lossy().to_string(),relative_path:rel.clone(),file_sha256:cached.file_sha256.clone(),type_hex:None,group_hex:None,instance_hex:None,tgi:None,payload_sha256:None});
             }
         }
         for r in &cached.resources{
@@ -62,7 +66,7 @@ pub fn technical_search(folder:String,query:String)->Result<Vec<TechnicalSearchH
             if instance_filter.map(|v|v!=r.instance).unwrap_or(false){continue;}
             if type_filter.is_none()&&group_filter.is_none()&&instance_filter.is_none(){continue;}
             hits.push(TechnicalSearchHit{
-                package_path:e.path().to_string_lossy().to_string(),relative_path:rel.clone(),file_sha256:cached.file_sha256.clone(),
+                package_path:path.to_string_lossy().to_string(),relative_path:rel.clone(),file_sha256:cached.file_sha256.clone(),
                 type_hex:Some(format!("0x{:08X}",r.type_id)),group_hex:Some(format!("0x{:08X}",r.group)),
                 instance_hex:Some(format!("0x{:016X}",r.instance)),
                 tgi:Some(format!("0x{:08X}-0x{:08X}-0x{:016X}",r.type_id,r.group,r.instance)),
@@ -75,4 +79,12 @@ pub fn technical_search(folder:String,query:String)->Result<Vec<TechnicalSearchH
     let _=save_cache(&root,&cache);
     hits.sort_by_key(|h|h.relative_path.to_ascii_lowercase());
     Ok(hits)
+}
+
+#[tauri::command]
+pub async fn technical_search(folder:String,query:String)->Result<Vec<TechnicalSearchHit>,String>{
+    crate::operation::run_blocking("technical_search", "searching", move || {
+        technical_search_core(folder, query)
+    })
+    .await
 }

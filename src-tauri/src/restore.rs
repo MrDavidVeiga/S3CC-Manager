@@ -642,7 +642,6 @@ fn remove_organizer_directories(root: &Path, manifest: &RestoreManifest) {
     }
 }
 
-#[tauri::command]
 pub fn execute_restore(
     manifest_path: String,
     current_language: AppLanguage,
@@ -842,6 +841,18 @@ pub fn execute_restore(
         errors: Vec::new(),
         warnings,
     })
+}
+
+#[tauri::command(rename = "execute_restore")]
+pub async fn execute_restore_async(
+    manifest_path: String,
+    current_language: AppLanguage,
+    expected_root: Option<String>,
+    confirmed: bool,
+) -> Result<RestoreExecutionResult, String> {
+    crate::operation::run_mutating_blocking("restore", "restoring", move || {
+        execute_restore(manifest_path, current_language, expected_root, confirmed)
+    }).await
 }
 
 #[cfg(test)]

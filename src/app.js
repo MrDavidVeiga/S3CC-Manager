@@ -1857,6 +1857,7 @@ const state = {
   toolsTab: "technical",
   workspaceStore: null,
   toolsBusy: false,
+  toolsOperation: null,
   toolsError: "",
   toolsNotice: "",
   fixIndexStatus: null,
@@ -2203,6 +2204,7 @@ const el = {
   structureModalCancelBtn: document.querySelector("#structure-modal-cancel-btn"),
   structureModalActionBtn: document.querySelector("#structure-modal-action-btn"),
   toolsState: document.querySelector("#tools-state"),
+  toolsCancel: document.querySelector("#tools-cancel"),
   toolsSubtabs: [...document.querySelectorAll(".tools-subtab")],
   toolsPanels: [...document.querySelectorAll(".tools-panel")],
   toolsReadOnly: document.querySelector("#tools-readonly"),
@@ -5333,11 +5335,41 @@ async function monitorOperation(kind) {
   renderDiagnostics();
 }
 
+function beginToolsOperation(kind) {
+  state.toolsOperation = kind;
+  state.toolsOperationStatus = null;
+  void monitorToolsOperation(kind);
+}
+
+async function monitorToolsOperation(kind) {
+  while (state.toolsBusy && state.toolsOperation === kind) {
+    try {
+      state.toolsOperationStatus = await invoke("get_operation_status", { kind });
+      renderTools();
+    } catch (_) {}
+    await sleep(180);
+  }
+  if (state.toolsOperation === kind) {
+    try { state.toolsOperationStatus = await invoke("get_operation_status", { kind }); } catch (_) {}
+    renderTools();
+  }
+}
+
 async function cancelAnalysis(kind) {
   try {
     await invoke("cancel_operation", { kind });
     state.operations[kind] = await invoke("get_operation_status", { kind });
     renderOperationProgress(kind);
+  } catch (_) {}
+}
+
+async function cancelToolsOperation() {
+  const kind = state.toolsOperation;
+  if (!kind) return;
+  try {
+    await invoke("cancel_operation", { kind });
+    state.toolsOperationStatus = await invoke("get_operation_status", { kind });
+    renderTools();
   } catch (_) {}
 }
 
@@ -6895,25 +6927,25 @@ async function addCustomRule() {
 
 async function analyzeHealth() {
   if (!state.folder || toolsOperationLocked()) return;
-  state.toolsBusy = true; state.toolsError = "";
+  state.toolsBusy = true; state.toolsError = ""; beginToolsOperation("health");
   renderTools();
   try {
     state.healthReport = await invoke("analyze_mods_health", { folder: state.folder });
     state.healthSelected.clear();
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
 async function createSnapshotTool() {
   if (!state.folder || toolsOperationLocked()) return;
-  state.toolsBusy = true; renderTools();
+  state.toolsBusy = true; beginToolsOperation("snapshot"); renderTools();
   try {
     await invoke("create_snapshot", { folder: state.folder });
     state.toolsNotice = t("snapshotCreated");
     await refreshSnapshots();
     await refreshOperationHistory();
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
 async function chooseCompareRoot() {
@@ -6926,14 +6958,14 @@ async function chooseCompareRoot() {
 
 async function compareRootsTool() {
   if (!state.folder || !state.compareRoot || toolsOperationLocked()) return;
-  state.toolsBusy = true; renderTools();
+  state.toolsBusy = true; beginToolsOperation("snapshot"); renderTools();
   try {
     state.snapshotDiff = await invoke("compare_mods_roots", {
       leftFolder: state.folder,
       rightFolder: state.compareRoot,
     });
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
 async function chooseInboxFolder() {
@@ -6947,7 +6979,7 @@ async function chooseInboxFolder() {
 
 async function scanInboxTool() {
   if (!state.inboxFolder || toolsOperationLocked()) return;
-  state.toolsBusy = true; renderTools();
+  state.toolsBusy = true; beginToolsOperation("inbox_scan"); renderTools();
   try {
     state.inboxScan = await invoke("scan_inbox", {
       sourceFolder: state.inboxFolder,
@@ -6955,12 +6987,12 @@ async function scanInboxTool() {
     });
     state.inboxSelected.clear(); state.inboxPlan = null;
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
 async function previewInboxImport() {
   if (!state.folder || !state.inboxFolder || !state.inboxSelected.size || toolsOperationLocked()) return;
-  state.toolsBusy = true; renderTools();
+  state.toolsBusy = true; beginToolsOperation("inbox_plan"); renderTools();
   try {
     state.inboxPlan = await invoke("build_inbox_import_plan", {
       folder: state.folder,
@@ -6968,12 +7000,12 @@ async function previewInboxImport() {
       selectedPaths: [...state.inboxSelected],
     });
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
 async function executeInboxImport() {
   if (!state.inboxPlan?.canExecute || workspaceReadOnly() || toolsOperationLocked()) return;
-  state.toolsBusy = true; renderTools();
+  state.toolsBusy = true; beginToolsOperation("inbox_import"); renderTools();
   try {
     const result = await invoke("execute_inbox_import", {
       folder: state.folder,
@@ -6987,7 +7019,7 @@ async function executeInboxImport() {
     state.inboxSelected.clear(); state.inboxPlan = null;
     await Promise.all([scanFolder(false, true), refreshOperationHistory(), refreshCacheInfo()]);
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; render(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; render(); }
 }
 
 async function savePackageMetadataTool() {
@@ -7026,14 +7058,14 @@ async function saveGroupTool() {
 
 async function runTechnicalSearch() {
   if (!state.folder || !el.toolsTechQuery.value.trim() || toolsOperationLocked()) return;
-  state.toolsBusy = true; renderTools();
+  state.toolsBusy = true; beginToolsOperation("technical_search"); renderTools();
   try {
     state.technicalResults = await invoke("technical_search", {
       folder: state.folder, query: el.toolsTechQuery.value,
     });
     state.technicalSelected.clear();
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
 function technicalExportContent(format) {
@@ -7077,22 +7109,22 @@ async function comparePackagesTool() {
   const leftPath = el.toolsCompareLeft.value;
   const rightPath = el.toolsCompareRight.value;
   if (!leftPath || !rightPath || leftPath === rightPath || toolsOperationLocked()) return;
-  state.toolsBusy = true; renderTools();
+  state.toolsBusy = true; beginToolsOperation("package_compare"); renderTools();
   try {
     state.packageCompare = await invoke("compare_packages", {
       folder: state.folder, leftPath, rightPath,
     });
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
 async function analyzeDependenciesTool() {
   if (!state.folder || toolsOperationLocked()) return;
-  state.toolsBusy = true; renderTools();
+  state.toolsBusy = true; beginToolsOperation("dependencies"); renderTools();
   try {
     state.dependenciesAnalysis = await invoke("analyze_dependencies", { folder: state.folder });
   } catch (error) { state.toolsError = String(error); }
-  finally { state.toolsBusy = false; renderTools(); }
+  finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
 async function undoManualOperation() {
@@ -7125,7 +7157,13 @@ function renderTools() {
   }
 
   if (state.toolsBusy) {
-    el.toolsState.textContent = t("scanning");
+    const operation = state.toolsOperationStatus;
+    const progress = operation?.total
+      ? ` · ${operation.processed || 0}/${operation.total}`
+      : "";
+    el.toolsState.textContent = operation?.phase
+      ? `${operation.phase}${progress}`
+      : t("scanning");
     el.toolsState.className = "scan-state busy";
   } else if (state.toolsError) {
     el.toolsState.textContent = state.toolsError;
@@ -7136,6 +7174,15 @@ function renderTools() {
   } else {
     el.toolsState.textContent = "";
     el.toolsState.className = "scan-state";
+  }
+  if (el.toolsCancel) {
+    const active = !!state.toolsBusy && !!state.toolsOperation;
+    const transactional = ["inbox_import", "sims3pack_convert"].includes(state.toolsOperation);
+    el.toolsCancel.classList.toggle("hidden", !active || transactional);
+    el.toolsCancel.disabled = !!state.toolsOperationStatus?.cancelRequested || transactional;
+    el.toolsCancel.textContent = state.toolsOperationStatus?.cancelRequested
+      ? t("cancelling")
+      : t("cancel");
   }
 
   renderProfileTools();
@@ -9026,6 +9073,7 @@ el.toolsDeleteProfile.addEventListener("click", deleteActiveProfile);
 el.toolsAddProtected.addEventListener("click", addProtectedFolder);
 el.toolsAddRule.addEventListener("click", addCustomRule);
 el.toolsHealthRun.addEventListener("click", analyzeHealth);
+el.toolsCancel?.addEventListener("click", cancelToolsOperation);
 el.toolsHealthFilter.addEventListener("change", () => { state.healthFilter = el.toolsHealthFilter.value; renderHealthTools(); });
 el.toolsHealthSeverity.addEventListener("change", () => { state.healthSeverity = el.toolsHealthSeverity.value; renderHealthTools(); });
 el.toolsHealthSelectVisible.addEventListener("click", () => {

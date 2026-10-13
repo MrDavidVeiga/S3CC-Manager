@@ -1,11 +1,12 @@
 use crate::{
     cache::{get_or_build, load_cache, save_cache},
     catalog::{TYPE_CASP, TYPE_OBJD},
+    manifest::sha256_file,
     mesh_info::{analyze_package_meshes, PackageMeshInfo},
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Mutex, OnceLock}};
 use tauri::{AppHandle, Manager};
 
 use crate::dbpf::Package;
@@ -113,6 +114,17 @@ fn compression_label(value: u16) -> String {
 pub struct PackagePreview {
     pub thumbnail_base64: Option<String>,
     pub mime_type: Option<String>,
+}
+
+#[derive(Clone)]
+struct PreviewCacheEntry {
+    file_sha256: String,
+    preview: PackagePreview,
+}
+
+fn preview_cache() -> &'static Mutex<HashMap<String, PreviewCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, PreviewCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn preview_mime(data: &[u8]) -> Option<&'static str> {
@@ -251,8 +263,7 @@ fn package_preview_data(path: &std::path::Path) -> Result<PackagePreview, String
     })
 }
 
-#[tauri::command]
-pub fn get_package_preview(
+fn get_package_preview_core(
     app: AppHandle,
     folder: String,
     package_path: String,
@@ -267,16 +278,29 @@ pub fn get_package_preview(
         return Err("Package is outside the selected root.".to_string());
     }
 
-    let internal = package_preview_data(&path)?;
-    if internal.thumbnail_base64.is_some() {
-        return Ok(internal);
+    let (file_sha256, _) = sha256_file(&path)
+        .map_err(|error| format!("Could not hash package preview source: {error}"))?;
+    let key = path.to_string_lossy().to_string();
+    if let Some(cached) = preview_cache().lock().ok()
+        .and_then(|cache| cache.get(&key).cloned())
+        .filter(|cached| cached.file_sha256.eq_ignore_ascii_case(&file_sha256))
+    {
+        return Ok(cached.preview);
     }
 
-    Ok(external_game_thumbnail(&app, &path).unwrap_or(internal))
+    let internal = package_preview_data(&path)?;
+    let preview = if internal.thumbnail_base64.is_some() {
+        internal
+    } else {
+        external_game_thumbnail(&app, &path).unwrap_or(internal)
+    };
+    if let Ok(mut cache) = preview_cache().lock() {
+        cache.insert(key, PreviewCacheEntry { file_sha256, preview: preview.clone() });
+    }
+    Ok(preview)
 }
 
-#[tauri::command]
-pub fn get_package_technical_details(
+fn get_package_technical_details_core(
     folder: String,
     package_path: String,
 ) -> Result<PackageTechnicalDetails, String> {
@@ -334,4 +358,27 @@ pub fn get_package_technical_details(
         resources,
         mesh,
     })
+}
+
+#[tauri::command]
+pub async fn get_package_preview(
+    app: AppHandle,
+    folder: String,
+    package_path: String,
+) -> Result<PackagePreview, String> {
+    crate::operation::run_blocking("preview", "loading", move || {
+        get_package_preview_core(app, folder, package_path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_package_technical_details(
+    folder: String,
+    package_path: String,
+) -> Result<PackageTechnicalDetails, String> {
+    crate::operation::run_blocking("metadata", "loading", move || {
+        get_package_technical_details_core(folder, package_path)
+    })
+    .await
 }

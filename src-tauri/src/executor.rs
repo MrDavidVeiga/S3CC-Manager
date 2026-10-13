@@ -5,7 +5,7 @@ use crate::{
         replace_manifest_atomic, sha256_file, write_manifest_atomic, RestoreEntry, RestoreManifest,
     },
     planner::{
-        build_organization_plan_with_cfg, normalized_path_key, OrganizationAnalysisSnapshot,
+        build_organization_plan_with_cfg_core, normalized_path_key, OrganizationAnalysisSnapshot,
         OrganizationPlan, PlanItem,
     },
     scanner::{invalidate_latest_scan_for, scan_packages_core},
@@ -697,7 +697,7 @@ pub async fn execute_organization_with_cfg(
     // The extensive snapshot/hash work MUST run off the WebView/main
     // thread. Otherwise progress polling cannot update the UI.
     // Keep the file-move/rollback sequence unchanged and uninterruptible.
-    operation::begin("organize", "planning");
+    operation::begin_mutating("organize", "planning")?;
     let result = tauri::async_runtime::spawn_blocking(move || {
         execute_organization_core(
             folder, language, selected_paths, update_resource_cfg,
@@ -724,7 +724,7 @@ fn execute_organization_core(
     expected_cfg_hash: Option<String>,
     expected_cfg_rules: Vec<String>,
 ) -> Result<ExecutionResult, String> {
-    let plan = build_organization_plan_with_cfg(folder, language, selected_paths, update_resource_cfg)?;
+    let plan = build_organization_plan_with_cfg_core(folder, language, selected_paths, update_resource_cfg)?;
     execute_organization_plan_core(
         plan,
         language,
@@ -749,7 +749,7 @@ pub async fn execute_organization_plan_with_cfg(
     expected_cfg_hash: Option<String>,
     expected_cfg_rules: Vec<String>,
 ) -> Result<ExecutionResult, String> {
-    operation::begin("organize", "executing_plan");
+    operation::begin_mutating("organize", "executing_plan")?;
     let result = tauri::async_runtime::spawn_blocking(move || {
         execute_organization_plan_core(
             plan, language, update_resource_cfg, expected_cfg_hash, expected_cfg_rules,

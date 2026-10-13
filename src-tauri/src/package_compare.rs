@@ -30,8 +30,7 @@ fn canonical_inside(root:&PathBuf,raw:&str)->Result<PathBuf,String>{
     if !p.starts_with(root)||!p.is_file(){return Err("Package is outside selected root.".into());}
     Ok(p)
 }
-#[tauri::command]
-pub fn compare_packages(folder:String,left_path:String,right_path:String)->Result<PackageCompareResult,String>{
+fn compare_packages_core(folder:String,left_path:String,right_path:String)->Result<PackageCompareResult,String>{
     let root=PathBuf::from(folder.trim()).canonicalize().map_err(|e|format!("Could not resolve root: {e}"))?;
     let left=canonical_inside(&root,&left_path)?;let right=canonical_inside(&root,&right_path)?;
     let mut cache=load_cache(&root);
@@ -60,4 +59,11 @@ pub fn compare_packages(folder:String,left_path:String,right_path:String)->Resul
         left_sha256:l.file_sha256,right_sha256:r.file_sha256,left_resource_count:l.resources.len(),right_resource_count:r.resources.len(),
         identical_resources:identical,changed_resources:changed,only_left:only_l,only_right:only_r,resources
     })
+}
+
+#[tauri::command]
+pub async fn compare_packages(folder:String,left_path:String,right_path:String)->Result<PackageCompareResult,String>{
+    crate::operation::run_blocking("package_compare", "comparing", move || {
+        compare_packages_core(folder, left_path, right_path)
+    }).await
 }

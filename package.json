@@ -15,7 +15,8 @@
     "test:merged-sim-regression": "node scripts/test-merged-sim-regression.mjs",
     "test:organizer-layout": "node scripts/test-organizer-layout.mjs",
     "test:analysis-action-flow": "node scripts/test-analysis-action-flow.mjs",
-    "test:health-diagnostics": "node scripts/test-health-diagnostics.mjs"
+    "test:health-diagnostics": "node scripts/test-health-diagnostics.mjs",
+    "test:performance-architecture": "node scripts/test-performance-architecture.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

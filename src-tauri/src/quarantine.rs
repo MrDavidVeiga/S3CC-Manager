@@ -492,7 +492,6 @@ fn require_package(path: &Path) -> bool {
         .map(|s| s.eq_ignore_ascii_case("package")).unwrap_or(false)
 }
 
-#[tauri::command]
 pub fn build_quarantine_plan(folder: String, selected_paths: Vec<String>) -> Result<QuarantinePlan, String> {
     if selected_paths.is_empty() {
         return Err("No packages selected for quarantine.".into());
@@ -651,7 +650,6 @@ fn group_exact_duplicate_destinations(
     Ok(())
 }
 
-#[tauri::command]
 pub fn build_exact_duplicate_quarantine_plan(
     folder: String,
     selected_paths: Vec<String>,
@@ -682,7 +680,6 @@ fn preflight_plan(root: &Path, plan: &QuarantinePlan) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
 pub fn execute_quarantine(
     folder: String,
     selected_paths: Vec<String>,
@@ -692,7 +689,6 @@ pub fn execute_quarantine(
     execute_quarantine_core(folder, selected_paths, planned_quarantine_root, None)
 }
 
-#[tauri::command]
 pub fn execute_exact_duplicate_quarantine(
     folder: String,
     selected_paths: Vec<String>,
@@ -800,7 +796,6 @@ fn execute_quarantine_core(
     })
 }
 
-#[tauri::command]
 pub fn restore_quarantine(
     folder: String,
     manifest_path: String,
@@ -884,7 +879,6 @@ pub fn restore_quarantine(
 
 /// Recover an interrupted quarantine or restore by returning every validated
 /// file to its ORIGINAL location. Refuse ambiguity, corruption or overwrite.
-#[tauri::command]
 pub fn recover_quarantine(folder: String, manifest_path: String) -> Result<QuarantineResult, String> {
     let _guard = transaction_guard()?;
     let root = canonical_root(&folder)?;
@@ -940,6 +934,65 @@ pub fn recover_quarantine(folder: String, manifest_path: String) -> Result<Quara
         cleanup_removed: 0,
         cleanup_warnings: Vec::new(),
     })
+}
+
+#[tauri::command(rename = "build_quarantine_plan")]
+pub async fn build_quarantine_plan_async(folder: String, selected_paths: Vec<String>) -> Result<QuarantinePlan, String> {
+    crate::operation::run_blocking("quarantine_plan", "planning", move || {
+        build_quarantine_plan(folder, selected_paths)
+    }).await
+}
+
+#[tauri::command(rename = "build_exact_duplicate_quarantine_plan")]
+pub async fn build_exact_duplicate_quarantine_plan_async(
+    folder: String,
+    selected_paths: Vec<String>,
+    retained_paths: Vec<String>,
+) -> Result<QuarantinePlan, String> {
+    crate::operation::run_blocking("quarantine_plan", "planning", move || {
+        build_exact_duplicate_quarantine_plan(folder, selected_paths, retained_paths)
+    }).await
+}
+
+#[tauri::command(rename = "execute_quarantine")]
+pub async fn execute_quarantine_async(
+    folder: String,
+    selected_paths: Vec<String>,
+    planned_quarantine_root: Option<String>,
+) -> Result<QuarantineResult, String> {
+    crate::operation::run_mutating_blocking("quarantine", "quarantining", move || {
+        execute_quarantine(folder, selected_paths, planned_quarantine_root)
+    }).await
+}
+
+#[tauri::command(rename = "execute_exact_duplicate_quarantine")]
+pub async fn execute_exact_duplicate_quarantine_async(
+    folder: String,
+    selected_paths: Vec<String>,
+    planned_quarantine_root: Option<String>,
+    retained_paths: Vec<String>,
+) -> Result<QuarantineResult, String> {
+    crate::operation::run_mutating_blocking("quarantine", "quarantining", move || {
+        execute_exact_duplicate_quarantine(folder, selected_paths, planned_quarantine_root, retained_paths)
+    }).await
+}
+
+#[tauri::command(rename = "restore_quarantine")]
+pub async fn restore_quarantine_async(
+    folder: String,
+    manifest_path: String,
+    confirmed: bool,
+) -> Result<QuarantineResult, String> {
+    crate::operation::run_mutating_blocking("quarantine_restore", "restoring", move || {
+        restore_quarantine(folder, manifest_path, confirmed)
+    }).await
+}
+
+#[tauri::command(rename = "recover_quarantine")]
+pub async fn recover_quarantine_async(folder: String, manifest_path: String) -> Result<QuarantineResult, String> {
+    crate::operation::run_mutating_blocking("quarantine_recover", "recovering", move || {
+        recover_quarantine(folder, manifest_path)
+    }).await
 }
 
 
