@@ -39,6 +39,19 @@ const I18N = {
     converterIntro: "Convert Sims3Pack files to .package safely, separately or combined.",
     restore: "Restore",
     language: "Language:",
+    languageSelector: "Language",
+    languageEnglish: "English",
+    languagePortuguese: "Português",
+    languageSpanish: "Español",
+    theme: "Theme",
+    themeSystem: "System",
+    themeVeigaLight: "Veiga Light",
+    themeVeigaDark: "Veiga Dark",
+    themeMeanGirls: "Mean Girls",
+    themeEaApp: "EA App",
+    themeWinuiLight: "WinUI Light",
+    themeWinuiDark: "WinUI Dark",
+    themeSystemFootnote: "System theme and accent are read from the operating system.",
     chooseModsFolder: "Choose Mods Folder",
     noFolder: "No folder selected.",
     scanCcs: "Scan CCs",
@@ -618,6 +631,19 @@ const I18N = {
     converterIntro: "Converta arquivos Sims3Pack para .package com segurança, separadamente ou em conjunto.",
     restore: "Restaurar",
     language: "Idioma:",
+    languageSelector: "Idioma",
+    languageEnglish: "English",
+    languagePortuguese: "Português",
+    languageSpanish: "Español",
+    theme: "Tema",
+    themeSystem: "Sistema",
+    themeVeigaLight: "Veiga Claro",
+    themeVeigaDark: "Veiga Escuro",
+    themeMeanGirls: "Meninas Malvadas",
+    themeEaApp: "EA App",
+    themeWinuiLight: "WinUI Claro",
+    themeWinuiDark: "WinUI Escuro",
+    themeSystemFootnote: "O tema e a cor de destaque são obtidos do sistema operacional.",
     chooseModsFolder: "Escolher Pasta de Mods",
     noFolder: "Nenhuma pasta selecionada.",
     scanCcs: "Analisar CCs",
@@ -1196,6 +1222,19 @@ const I18N = {
     converterIntro: "Convierte archivos Sims3Pack a .package de forma segura, por separado o en conjunto.",
     restore: "Restaurar",
     language: "Idioma:",
+    languageSelector: "Idioma",
+    languageEnglish: "English",
+    languagePortuguese: "Português",
+    languageSpanish: "Español",
+    theme: "Tema",
+    themeSystem: "Sistema",
+    themeVeigaLight: "Veiga Claro",
+    themeVeigaDark: "Veiga Oscuro",
+    themeMeanGirls: "Chicas Malas",
+    themeEaApp: "EA App",
+    themeWinuiLight: "WinUI Claro",
+    themeWinuiDark: "WinUI Oscuro",
+    themeSystemFootnote: "El tema y el color de énfasis se leen del sistema operativo.",
     chooseModsFolder: "Elegir Carpeta de Mods",
     noFolder: "Ninguna carpeta seleccionada.",
     scanCcs: "Analizar CCs",
@@ -3172,10 +3211,26 @@ function renderLanguage() {
     const key = element.dataset.i18n;
     element.textContent = t(key);
   }
+  for (const element of document.querySelectorAll("[data-i18n-aria-label]")) {
+    element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel));
+  }
+  for (const element of document.querySelectorAll("[data-i18n-title]")) {
+    element.title = t(element.dataset.i18nTitle);
+  }
   for (const element of document.querySelectorAll("[data-i18n-placeholder]")) {
     element.placeholder = t(element.dataset.i18nPlaceholder);
   }
-  if (el.languageCode) el.languageCode.textContent = state.language.toUpperCase();
+  const languageLabels = {
+    en: t("languageEnglish"),
+    pt: t("languagePortuguese"),
+    es: t("languageSpanish"),
+  };
+  if (el.languageCode) {
+    el.languageCode.textContent = languageLabels[state.language] || languageLabels.en;
+  }
+  for (const option of el.languageMenuItems) {
+    option.setAttribute("aria-selected", String(option.dataset.lang === state.language));
+  }
   el.languageButton?.setAttribute(
     "aria-expanded",
     String(!el.languageMenu?.classList.contains("hidden"))
