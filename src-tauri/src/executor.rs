@@ -146,6 +146,17 @@ fn validate_ready_execution_paths(root: &Path, ready: &[&PlanItem]) -> Result<()
         destinations.insert(destination_key, *item);
     }
 
+    for (source_key, peers) in sources.iter().filter(|(_, peers)| peers.len() > 1) {
+        let names = peers
+            .iter()
+            .map(|peer| peer.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Err(format!(
+            "Plan contains multiple ready operations for the same source ({source_key}): {names}. No files were moved."
+        ));
+    }
+
     for item in ready {
         let destination = Path::new(item.destination_path.as_deref().unwrap());
         let destination_key = normalized_path_key(root, destination);
@@ -1292,6 +1303,58 @@ mod tests {
     }
 
     #[test]
+    fn preflight_rejects_duplicate_ready_sources_before_any_move() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-preflight-same-source-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let source = root.join("Packages").join("#Duplicados").join("legacy.package");
+        let destination_a = root.join("Packages").join("Sliders").join("legacy.package");
+        let destination_b = root.join("Packages").join("#Duplicados").join("legacy.package.duplicated");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"source bytes").unwrap();
+
+        let items = vec![
+            PlanItem {
+                id: "normal-selection".into(),
+                name: "legacy.package".into(),
+                source_path: source.to_string_lossy().into_owned(),
+                source_relative_path: "Packages\\#Duplicados\\legacy.package".into(),
+                destination_path: Some(destination_a.to_string_lossy().into_owned()),
+                destination_relative_path: Some("Packages\\Sliders\\legacy.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("A".repeat(64)),
+                size: 12,
+                warnings: vec![],
+            },
+            PlanItem {
+                id: "nested-migration".into(),
+                name: "legacy.package".into(),
+                source_path: format!(r"\\?\{}", source.display()),
+                source_relative_path: "Packages\\#Duplicados\\legacy.package".into(),
+                destination_path: Some(destination_b.to_string_lossy().into_owned()),
+                destination_relative_path: Some("Packages\\#Duplicados\\legacy.package.duplicated".into()),
+                classification_status: "duplicate_quarantine".into(),
+                classification_reason: None,
+                plan_status: "ready_duplicate_quarantine_migration".into(),
+                sha256: Some("A".repeat(64)),
+                size: 12,
+                warnings: vec![],
+            },
+        ];
+
+        let ready = ready_items(&items);
+        let error = validate_ready_execution_paths(&root, &ready).unwrap_err();
+        assert!(error.contains("same source"));
+        assert!(source.is_file());
+        assert!(!destination_a.exists() && !destination_b.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn preflight_rejects_verbatim_source_destination_overlap() {
         let root = std::env::temp_dir().join(format!(
             "s3cc-preflight-source-overlap-{}-{}",
@@ -1617,6 +1680,124 @@ mod tests {
         let mut fallback = items[1].clone();
         fallback.plan_status = "ready_uncategorized".into();
         assert_eq!(ready_items(&[items[0].clone(), fallback]).len(), 2);
+    }
+
+    #[test]
+    fn fixture_organization_moves_once_and_removes_empty_legacy_tree() {
+        let base = std::env::current_dir().unwrap().join("target").join(format!(
+            "s3cc-fixture-organization-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let root = base.join("Packages");
+        let source = root.join("Legacy").join("one.package");
+        let destination = root.join("Sliders").join("one.package");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&source, b"fixture package bytes").unwrap();
+        let root = root.canonicalize().unwrap();
+        let source = source.canonicalize().unwrap();
+        let destination = root.join("Sliders").join("one.package");
+        let (hash, size) = sha256_file(&source).unwrap();
+
+        let plan = OrganizationPlan {
+            root: root.to_string_lossy().into_owned(),
+            items: vec![PlanItem {
+                id: "one".into(),
+                name: "one.package".into(),
+                source_path: source.to_string_lossy().into_owned(),
+                source_relative_path: "Legacy\\one.package".into(),
+                destination_path: Some(destination.to_string_lossy().into_owned()),
+                destination_relative_path: Some("Sliders\\one.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: Some("isolated fixture".into()),
+                plan_status: "ready".into(),
+                sha256: Some(hash.clone()),
+                size,
+                warnings: Vec::new(),
+            }],
+            stats: crate::planner::PlanStats {
+                selected: 1,
+                ready: 1,
+                empty_folders_to_clean: 1,
+                ..Default::default()
+            },
+            directories_to_create: vec!["Sliders".into()],
+            protected_empty_directories: vec!["Sliders".into()],
+            cleanup_roots: vec!["Legacy".into()],
+            manifest_preview: String::new(),
+            resource_cfg_update: None,
+            can_execute: true,
+            analysis_before: OrganizationAnalysisSnapshot::from_scan(
+                "analysis_before",
+                &crate::scanner::ScanStats::default(),
+            ),
+        };
+
+        let result = execute_organization_plan_core(plan, AppLanguage::Pt, false, None, Vec::new())
+            .expect("fixture organization should complete");
+        assert_eq!(result.status, "COMPLETE");
+        assert_eq!(result.moved, 1);
+        assert!(!source.exists());
+        assert!(destination.is_file());
+        assert_eq!(sha256_file(&destination).unwrap(), (hash, size));
+        assert!(!root.join("Legacy").exists());
+        assert!(root.join("Sliders").is_dir());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn stale_fixture_source_is_rejected_before_any_move() {
+        let base = std::env::current_dir().unwrap().join("target").join(format!(
+            "s3cc-fixture-stale-source-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let root = base.join("Packages");
+        let source = root.join("Legacy").join("changed.package");
+        let destination = root.join("Sliders").join("changed.package");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"original").unwrap();
+        let root = root.canonicalize().unwrap();
+        let source = source.canonicalize().unwrap();
+        let (expected_hash, expected_size) = sha256_file(&source).unwrap();
+        fs::write(&source, b"changed").unwrap();
+
+        let plan = OrganizationPlan {
+            root: root.to_string_lossy().into_owned(),
+            items: vec![PlanItem {
+                id: "changed".into(),
+                name: "changed.package".into(),
+                source_path: source.to_string_lossy().into_owned(),
+                source_relative_path: "Legacy\\changed.package".into(),
+                destination_path: Some(destination.to_string_lossy().into_owned()),
+                destination_relative_path: Some("Sliders\\changed.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some(expected_hash),
+                size: expected_size,
+                warnings: Vec::new(),
+            }],
+            stats: crate::planner::PlanStats { selected: 1, ready: 1, ..Default::default() },
+            directories_to_create: vec!["Sliders".into()],
+            protected_empty_directories: vec!["Sliders".into()],
+            cleanup_roots: vec!["Legacy".into()],
+            manifest_preview: String::new(),
+            resource_cfg_update: None,
+            can_execute: true,
+            analysis_before: OrganizationAnalysisSnapshot::from_scan(
+                "analysis_before",
+                &crate::scanner::ScanStats::default(),
+            ),
+        };
+
+        let error = execute_organization_plan_core(plan, AppLanguage::Pt, false, None, Vec::new())
+            .unwrap_err();
+        assert!(error.contains("changed between Planner and manifest snapshot"));
+        assert!(source.is_file());
+        assert!(!destination.exists());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

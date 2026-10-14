@@ -2721,6 +2721,110 @@ fn mark_intra_plan_source_destination_collisions(
     }
 }
 
+/// A source may be present in more than one planner input.  This happens in
+/// particular when a package selected by the normal organizer is also found
+/// by the legacy nested-duplicate migration.  A filesystem rename consumes
+/// its source entry, so allowing both ready items to survive would make the
+/// second operation fail with "Source disappeared before move" after the
+/// first one had already changed the tree.
+///
+/// Resolve this while the plan is still in memory.  A confirmed duplicate
+/// quarantine migration is the authoritative operation for a source already
+/// below #Duplicados; it preserves the flat-quarantine invariant and is safer
+/// than letting a normal category move win merely because it was appended
+/// first.  If there is no such explicit winner, differing destinations are
+/// genuinely ambiguous and all competing operations remain blocked for
+/// review.  Identical duplicate operations are reduced to one deterministic
+/// representative without deleting or silently changing the source.
+fn resolve_intra_plan_source_conflicts(root: &Path, items: &mut [PlanItem]) {
+    let mut by_source = HashMap::<String, Vec<usize>>::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.plan_status.starts_with("ready") {
+            by_source
+                .entry(normalized_path_key(root, Path::new(&item.source_path)))
+                .or_default()
+                .push(index);
+        }
+    }
+
+    for indices in by_source.values().filter(|indices| indices.len() > 1) {
+        let migration_indices = indices
+            .iter()
+            .copied()
+            .filter(|index| items[*index].plan_status == "ready_duplicate_quarantine_migration")
+            .collect::<Vec<_>>();
+
+        let winner = if migration_indices.len() == 1 {
+            Some(migration_indices[0])
+        } else if migration_indices.len() > 1 {
+            None
+        } else {
+            let first_destination = items[indices[0]]
+                .destination_path
+                .as_deref()
+                .map(|path| normalized_path_key(root, Path::new(path)));
+            let same_destination = first_destination.is_some()
+                && indices.iter().all(|index| {
+                    items[*index]
+                        .destination_path
+                        .as_deref()
+                        .map(|path| normalized_path_key(root, Path::new(path)))
+                        == first_destination
+                });
+            let same_identity = indices.iter().all(|index| {
+                items[*index].size == items[indices[0]].size
+                    && items[*index]
+                        .sha256
+                        .as_deref()
+                        .zip(items[indices[0]].sha256.as_deref())
+                        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+            });
+            if same_destination && same_identity {
+                indices
+                    .iter()
+                    .copied()
+                    .min_by_key(|index| items[*index].id.to_ascii_lowercase())
+            } else {
+                None
+            }
+        };
+
+        if let Some(winner) = winner {
+            let winner_id = items[winner].id.clone();
+            for index in indices.iter().copied().filter(|index| *index != winner) {
+                let item = &mut items[index];
+                item.plan_status = "duplicate_source_skipped".to_string();
+                item.warnings.push(format!(
+                    "This source was proposed by more than one planner path. Only '{}' remains executable for the normalized source; this competing operation was skipped before execution.",
+                    winner_id
+                ));
+            }
+        } else {
+            let competing = indices
+                .iter()
+                .map(|index| {
+                    format!(
+                        "{} -> {}",
+                        items[*index].source_relative_path,
+                        items[*index]
+                            .destination_relative_path
+                            .as_deref()
+                            .unwrap_or("<none>")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            for index in indices.iter().copied() {
+                let item = &mut items[index];
+                item.plan_status = "blocked_duplicate_source_conflict".to_string();
+                item.warnings.push(format!(
+                    "The same normalized source was proposed by multiple incompatible operations; no move is executable until the conflict is reviewed: {competing}"
+                ));
+            }
+        }
+    }
+}
+
 fn is_manual_review_status(status: &str) -> bool {
     matches!(status, "needs_review" | "mixed")
 }
@@ -4212,6 +4316,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         &mut reserved_duplicate_destinations,
         &mut stats,
     )?;
+    resolve_intra_plan_source_conflicts(&root, &mut items);
     mark_intra_plan_source_destination_collisions(&root, &mut items);
 
     for group in workspace.groups.iter().filter(|group| group.keep_together) {
@@ -6296,5 +6401,102 @@ mod tests {
         assert!(model_components_match("Correcciones", "Fixes"));
         assert!(model_components_match("Substituições", "Replacements"));
         assert!(model_components_match("Reemplazos", "Substituições"));
+    }
+
+    #[test]
+    fn duplicate_source_from_normal_selection_and_nested_migration_is_executable_once() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-duplicate-source-intersection-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let source = root.join("Packages").join("#Duplicados").join("legacy").join("eruwen.package");
+        let source_text = source.to_string_lossy().into_owned();
+        let mut items = vec![
+            PlanItem {
+                id: "normal-selection".into(),
+                name: "eruwen.package".into(),
+                source_path: source_text.clone(),
+                source_relative_path: "Packages\\#Duplicados\\legacy\\eruwen.package".into(),
+                destination_path: Some(root.join("Packages\\Genética\\eruwen.package").to_string_lossy().into_owned()),
+                destination_relative_path: Some("Packages\\Genética\\eruwen.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("A".repeat(64)),
+                size: 10,
+                warnings: Vec::new(),
+            },
+            PlanItem {
+                id: "nested-quarantine-migration".into(),
+                name: "eruwen.package".into(),
+                source_path: format!(r"\\?\{}", source.display()),
+                source_relative_path: "Packages\\#Duplicados\\legacy\\eruwen.package".into(),
+                destination_path: Some(root.join("Packages\\#Duplicados\\eruwen.package.package.duplicated").to_string_lossy().into_owned()),
+                destination_relative_path: Some("Packages\\#Duplicados\\eruwen.package.package.duplicated".into()),
+                classification_status: "duplicate_quarantine".into(),
+                classification_reason: Some("confirmed keeper".into()),
+                plan_status: "ready_duplicate_quarantine_migration".into(),
+                sha256: Some("A".repeat(64)),
+                size: 10,
+                warnings: Vec::new(),
+            },
+        ];
+
+        resolve_intra_plan_source_conflicts(&root, &mut items);
+
+        assert_eq!(
+            items.iter().filter(|item| item.plan_status.starts_with("ready")).count(),
+            1
+        );
+        assert_eq!(items[1].plan_status, "ready_duplicate_quarantine_migration");
+        assert_eq!(items[0].plan_status, "duplicate_source_skipped");
+        assert!(items[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("more than one planner path")));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn incompatible_duplicate_source_proposals_are_blocked_before_execution() {
+        let root = PathBuf::from(r"C:\Mods");
+        let source = r"C:\Mods\Legacy\same.package";
+        let mut items = vec![
+            PlanItem {
+                id: "first".into(),
+                name: "same.package".into(),
+                source_path: source.into(),
+                source_relative_path: "Legacy\\same.package".into(),
+                destination_path: Some(r"C:\Mods\Packages\A\same.package".into()),
+                destination_relative_path: Some("Packages\\A\\same.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("A".repeat(64)),
+                size: 1,
+                warnings: Vec::new(),
+            },
+            PlanItem {
+                id: "second".into(),
+                name: "same.package".into(),
+                source_path: format!(r"\\?\{source}"),
+                source_relative_path: "Legacy\\same.package".into(),
+                destination_path: Some(r"C:\Mods\Packages\B\same.package".into()),
+                destination_relative_path: Some("Packages\\B\\same.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: None,
+                plan_status: "ready".into(),
+                sha256: Some("A".repeat(64)),
+                size: 1,
+                warnings: Vec::new(),
+            },
+        ];
+
+        resolve_intra_plan_source_conflicts(&root, &mut items);
+
+        assert!(items
+            .iter()
+            .all(|item| item.plan_status == "blocked_duplicate_source_conflict"));
     }
 }

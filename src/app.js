@@ -1884,6 +1884,9 @@ const state = {
   planError: "",
   notice: "",
   plan: null,
+  planKey: "",
+  planPreparationKey: "",
+  planPreparationPromise: null,
   updateResourceCfg: false,
   organizationReview: null,
   organizationCollisionItems: [],
@@ -8787,6 +8790,16 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
     render();
   }
   if (scanSucceeded && analysisSessionMatches(folder, runId)) {
+    // Prepare the exact plan once the scan has supplied a valid, current
+    // classification snapshot.  The request is asynchronous and keyed to
+    // this scan/selection, so opening the modal later reuses it instead of
+    // starting another planner pass on the user's click.
+    void preparePlanInBackground(folder, runId).catch(error => {
+      if (analysisSessionMatches(folder, runId)) {
+        state.planError = String(error);
+        render();
+      }
+    });
     void runAutomaticAnalyses(folder, runId);
   }
 }
@@ -8833,8 +8846,10 @@ async function buildPlan() {
     state.structureBusy
   ) return;
 
+  const requestedKey = planPreviewKey();
+
   // If nothing changed since the last preview, reopening is instantaneous.
-  if (state.plan && !state.planError) {
+  if (state.plan && !state.planError && state.planKey === requestedKey) {
     openPlanModal();
     return;
   }
@@ -8846,20 +8861,66 @@ async function buildPlan() {
   render();
 
   try {
-    state.plan = await invoke("build_organization_plan_with_cfg", {
-      folder: state.folder,
-      language: state.language,
-      selectedPaths: [...state.selectedForPlan],
-      updateResourceCfg: state.updateResourceCfg,
-    });
+    const prepared = await preparePlanInBackground(state.folder, state.analysisRunId);
+    if (prepared && planPreviewKey() === requestedKey) {
+      state.plan = prepared;
+      state.planKey = requestedKey;
+    }
   } catch (error) {
     state.plan = null;
+    state.planKey = "";
     state.planError = String(error);
   } finally {
     state.planning = false;
     render();
     if (state.plan) openPlanModal();
   }
+}
+
+function planPreviewKey(
+  folder = state.folder,
+  runId = state.analysisRunId,
+  updateResourceCfg = state.updateResourceCfg,
+  selectedPaths = [...state.selectedForPlan],
+) {
+  const normalized = selectedPaths
+    .map(path => String(path || "").replaceAll("/", "\\").toLocaleLowerCase())
+    .sort();
+  return [runId, folder, state.language, updateResourceCfg ? "cfg:on" : "cfg:off", ...normalized]
+    .join("\u001f");
+}
+
+async function preparePlanInBackground(folder, runId) {
+  if (!folder || !analysisSessionMatches(folder, runId) || !state.selectedForPlan.size) return null;
+
+  if (!supportsResourceCfgUpdate(folder)) state.updateResourceCfg = false;
+  const selectedPaths = [...state.selectedForPlan];
+  const key = planPreviewKey(folder, runId, state.updateResourceCfg, selectedPaths);
+  if (state.plan && state.planKey === key && !state.planError) return state.plan;
+  if (state.planPreparationKey === key && state.planPreparationPromise) {
+    return state.planPreparationPromise;
+  }
+
+  const request = invoke("build_organization_plan_with_cfg", {
+    folder,
+    language: state.language,
+    selectedPaths,
+    updateResourceCfg: state.updateResourceCfg,
+  }).then(plan => {
+    if (analysisSessionMatches(folder, runId) && planPreviewKey() === key) {
+      state.plan = plan;
+      state.planKey = key;
+      state.planError = "";
+      render();
+    }
+    return plan;
+  });
+
+  state.planPreparationKey = key;
+  state.planPreparationPromise = request.finally(() => {
+    if (state.planPreparationKey === key) state.planPreparationPromise = null;
+  });
+  return state.planPreparationPromise;
 }
 
 // Rust returns the verified source/destination pair for every completed
@@ -9551,6 +9612,7 @@ el.planCfgCheckbox.addEventListener("change", async event => {
   // duplicate and path analysis for the whole selection.
   if (!enabled) {
     state.plan = { ...state.plan, resourceCfgUpdate: null };
+    state.planKey = planPreviewKey();
     el.planModal.__renderedPlan = null;
     render();
     return;
@@ -9564,6 +9626,7 @@ el.planCfgCheckbox.addEventListener("change", async event => {
       plan: existingPlan,
     });
     state.plan = { ...existingPlan, resourceCfgUpdate };
+    state.planKey = planPreviewKey();
     el.planModal.__renderedPlan = null;
   } catch (error) {
     state.updateResourceCfg = false;
