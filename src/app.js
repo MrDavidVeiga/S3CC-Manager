@@ -127,6 +127,9 @@ const I18N = {
     loadingPhaseOrganization: "Organizing packages",
     loadingPhaseIntegrity: "Checking integrity",
     loadingPhaseCleanup: "Cleaning legacy folders",
+    loadingPhaseRestore: "Restoring files",
+    loadingPhaseTools: "Working in the background",
+    continueInBackground: "Continue in Background",
     loadingPhrase1: "The neighborhood is getting ready for its next story.",
     loadingPhrase2: "Sorting the details before the next move.",
     loadingPhrase3: "Making room for a smoother day in town.",
@@ -738,6 +741,9 @@ const I18N = {
     loadingPhaseOrganization: "Organizando packages",
     loadingPhaseIntegrity: "Verificando integridade",
     loadingPhaseCleanup: "Limpando pastas legadas",
+    loadingPhaseRestore: "Restaurando arquivos",
+    loadingPhaseTools: "Trabalhando em segundo plano",
+    continueInBackground: "Continuar em Segundo Plano",
     loadingPhrase1: "A vizinhança está se preparando para a próxima história.",
     loadingPhrase2: "Organizando os detalhes antes da próxima mudança.",
     loadingPhrase3: "Abrindo espaço para um dia mais tranquilo na cidade.",
@@ -1348,6 +1354,9 @@ const I18N = {
     loadingPhaseOrganization: "Organizando packages",
     loadingPhaseIntegrity: "Comprobando integridad",
     loadingPhaseCleanup: "Limpiando carpetas antiguas",
+    loadingPhaseRestore: "Restaurando archivos",
+    loadingPhaseTools: "Trabajando en segundo plano",
+    continueInBackground: "Continuar en Segundo Plano",
     loadingPhrase1: "El vecindario se prepara para su próxima historia.",
     loadingPhrase2: "Ordenando los detalles antes del próximo cambio.",
     loadingPhrase3: "Haciendo espacio para un día más tranquilo en la ciudad.",
@@ -1883,6 +1892,8 @@ const state = {
   restorePlan: null,
   restorePreviewManifest: "",
   restoreBusy: false,
+  restoreOperationActive: false,
+  restoreOperationStatus: null,
   restoreError: "",
   restoreNotice: "",
   duplicatesAnalysis: null,
@@ -1954,6 +1965,7 @@ const state = {
   workspaceStore: null,
   toolsBusy: false,
   toolsOperation: null,
+  externalOperation: null,
   toolsError: "",
   toolsNotice: "",
   fixIndexStatus: null,
@@ -2005,6 +2017,7 @@ let conflictMarksVersion = 0;
 let loadingPhraseIndex = -1;
 let loadingPhraseAt = 0;
 let loadingPhraseKey = "";
+let loadingOverlayDismissedKey = "";
 
 function debounce(callback, delay = SEARCH_DEBOUNCE_MS) {
   let timer = 0;
@@ -2165,6 +2178,7 @@ const el = {
   loadingOverlayCount: document.querySelector("#loading-overlay-count"),
   loadingOverlayPhrase: document.querySelector("#loading-overlay-phrase"),
   loadingOverlayCancel: document.querySelector("#loading-overlay-cancel"),
+  loadingOverlayContinue: document.querySelector("#loading-overlay-continue"),
   organizationReviewPanel: document.querySelector("#organization-review-panel"),
   organizationReviewSummary: document.querySelector("#organization-review-summary"),
   organizationReviewLeftovers: document.querySelector("#organization-review-leftovers"),
@@ -5427,25 +5441,56 @@ function renderOrganizationProgress() {
 function loadingOverlayState() {
   if (state.executing) {
     const status = state.organizeProgress || {};
-    return { key: `organize:${status.phase || "planning"}`, kind: "organize", status,
-      phase: ({ moving: "loadingPhaseOrganization", integrity_check: "loadingPhaseIntegrity", cleaning: "loadingPhaseCleanup" }[status.phase] || "loadingPhaseOrganization"), blocking: true, cancelable: false };
+    const operationKey = `organize:${status.startedUnixMs || "active"}`;
+    return { key: `${operationKey}:${status.phase || "planning"}`, operationKey,
+      kind: "organize", status,
+      phase: ({ moving: "loadingPhaseOrganization", integrity_check: "loadingPhaseIntegrity", cleaning: "loadingPhaseCleanup" }[status.phase] || "loadingPhaseOrganization"),
+      blocking: true, cancelable: false, continueable: false };
+  }
+  if (state.restoreOperationActive) {
+    const status = state.restoreOperationStatus || {};
+    const operationKey = `restore:${status.startedUnixMs || "active"}`;
+    return { key: `${operationKey}:${status.phase || "restoring"}`, operationKey,
+      kind: "restore", status, phase: "loadingPhaseRestore",
+      blocking: true, cancelable: false, continueable: false };
   }
   if (state.planning) {
-    return { key: "planning", kind: "planning", status: {}, phase: "loadingPhasePlan", blocking: false, cancelable: false };
+    return { key: "planning", operationKey: "planning", kind: "planning", status: {},
+      phase: "loadingPhasePlan", blocking: false, cancelable: false, continueable: true };
+  }
+  if (state.toolsBusy && state.toolsOperation) {
+    const kind = state.toolsOperation;
+    const status = state.toolsOperationStatus || {};
+    const operationKey = `${kind}:${status.startedUnixMs || "active"}`;
+    const blocking = ["inbox_import", "sims3pack_convert"].includes(kind);
+    return { key: `${operationKey}:${status.phase || "working"}`, operationKey, kind, status,
+      phase: kind === "health" ? "loadingPhaseAnalysis" : "loadingPhaseTools",
+      blocking, cancelable: !blocking, continueable: !blocking };
+  }
+  if (state.externalOperation?.active) {
+    const { kind, status = {} } = state.externalOperation;
+    const operationKey = `${kind}:${status.startedUnixMs || "active"}`;
+    const blocking = kind === "sims3pack_convert";
+    return { key: `${operationKey}:${status.phase || "working"}`, operationKey, kind, status,
+      phase: kind === "sims3pack_inspect" ? "loadingPhaseAnalysis" : "loadingPhaseTools",
+      blocking, cancelable: !blocking, continueable: !blocking };
   }
   for (const kind of ["scan", "duplicates", "conflicts"]) {
     if (!operationBusy(kind) && !state.operations[kind]?.running) continue;
     const status = state.operations[kind] || {};
+    const operationKey = `${kind}:${status.startedUnixMs || "active"}`;
     const scanPhase = kind === "scan"
       ? ({ starting: "loadingPhaseIdentification", scanning: "loadingPhaseAnalysis", fingerprinting: "loadingPhaseAnalysis", indexing: "loadingPhaseAnalysis", comparing: "loadingPhaseDuplicates" }[status.phase] || "loadingPhaseAnalysis")
       : "loadingPhaseDuplicates";
     return {
-      key: `${kind}:${status.phase || "starting"}`,
+      key: `${operationKey}:${status.phase || "starting"}`,
+      operationKey,
       kind,
       status,
       phase: scanPhase,
       blocking: false,
       cancelable: true,
+      continueable: true,
     };
   }
   return null;
@@ -5454,11 +5499,15 @@ function loadingOverlayState() {
 function renderLoadingOverlay() {
   if (!el.loadingOverlay) return;
   const current = loadingOverlayState();
-  el.loadingOverlay.classList.toggle("hidden", !current);
-  if (!current) {
+  const dismissed = current && loadingOverlayDismissedKey === current.operationKey;
+  el.loadingOverlay.classList.toggle("hidden", !current || dismissed);
+  if (!current || dismissed) {
     el.loadingOverlay.setAttribute("aria-hidden", "true");
-    loadingPhraseKey = "";
-    loadingPhraseAt = 0;
+    if (!current) {
+      loadingOverlayDismissedKey = "";
+      loadingPhraseKey = "";
+      loadingPhraseAt = 0;
+    }
     return;
   }
 
@@ -5499,6 +5548,18 @@ function renderLoadingOverlay() {
   el.loadingOverlayCancel.classList.toggle("hidden", !current.cancelable);
   el.loadingOverlayCancel.disabled = !canCancel;
   el.loadingOverlayCancel.textContent = status.cancelRequested ? t("cancelling") : t("cancelAnalysis");
+  if (el.loadingOverlayContinue) {
+    el.loadingOverlayContinue.classList.toggle("hidden", !current.continueable);
+    el.loadingOverlayContinue.disabled = !current.continueable;
+    el.loadingOverlayContinue.textContent = t("continueInBackground");
+  }
+}
+
+function continueLoadingInBackground() {
+  const current = loadingOverlayState();
+  if (!current?.continueable) return;
+  loadingOverlayDismissedKey = current.operationKey;
+  renderLoadingOverlay();
 }
 
 async function monitorOrganizationProgress() {
@@ -5545,6 +5606,7 @@ async function monitorOperation(kind) {
 function beginToolsOperation(kind) {
   state.toolsOperation = kind;
   state.toolsOperationStatus = null;
+  renderLoadingOverlay();
   void monitorToolsOperation(kind);
 }
 
@@ -5553,12 +5615,14 @@ async function monitorToolsOperation(kind) {
     try {
       state.toolsOperationStatus = await invoke("get_operation_status", { kind });
       renderTools();
+      renderLoadingOverlay();
     } catch (_) {}
     await sleep(180);
   }
   if (state.toolsOperation === kind) {
     try { state.toolsOperationStatus = await invoke("get_operation_status", { kind }); } catch (_) {}
     renderTools();
+    renderLoadingOverlay();
   }
 }
 
@@ -5568,6 +5632,34 @@ async function cancelAnalysis(kind) {
     state.operations[kind] = await invoke("get_operation_status", { kind });
     renderOperationProgress(kind);
   } catch (_) {}
+}
+
+async function cancelLoadingOperation(kind) {
+  if (["scan", "duplicates", "conflicts"].includes(kind)) {
+    return cancelAnalysis(kind);
+  }
+  if (kind === state.toolsOperation) {
+    return cancelToolsOperation();
+  }
+  try {
+    await invoke("cancel_operation", { kind });
+    if (state.externalOperation?.kind === kind) {
+      state.externalOperation.status = await invoke("get_operation_status", { kind });
+    }
+    renderLoadingOverlay();
+  } catch (_) {}
+}
+
+async function monitorRestoreProgress() {
+  while (state.restoreOperationActive) {
+    try {
+      state.restoreOperationStatus = await invoke("get_operation_status", { kind: "restore" });
+      renderLoadingOverlay();
+    } catch (_) {}
+    await sleep(180);
+  }
+  state.restoreOperationStatus = null;
+  renderLoadingOverlay();
 }
 
 async function cancelToolsOperation() {
@@ -8942,8 +9034,11 @@ async function executeRestore() {
       el.confirmModal.classList.contains("hidden")) return;
 
   state.restoreBusy = true;
+  state.restoreOperationActive = true;
+  state.restoreOperationStatus = null;
   state.restoreError = "";
   el.confirmActionBtn.disabled = true;
+  void monitorRestoreProgress();
   render();
 
   try {
@@ -8973,6 +9068,7 @@ async function executeRestore() {
     state.restoreError = String(error);
   } finally {
     state.restoreBusy = false;
+    state.restoreOperationActive = false;
     state.pendingAction = "";
     state.pendingRestoreManifest = "";
     el.confirmModal.classList.add("hidden");
@@ -9199,7 +9295,16 @@ el.duplicatesCancelBtn.addEventListener("click", () => cancelAnalysis("duplicate
 el.conflictsCancelBtn.addEventListener("click", () => cancelAnalysis("conflicts"));
 el.loadingOverlayCancel.addEventListener("click", () => {
   const current = loadingOverlayState();
-  if (current?.cancelable) void cancelAnalysis(current.kind);
+  if (current?.cancelable) void cancelLoadingOperation(current.kind);
+});
+el.loadingOverlayContinue?.addEventListener("click", continueLoadingInBackground);
+window.addEventListener("s3cc-operation-progress", event => {
+  const detail = event.detail || {};
+  if (!detail.kind) return;
+  state.externalOperation = detail.active
+    ? { kind: detail.kind, status: detail.status || {}, active: true }
+    : null;
+  renderLoadingOverlay();
 });
 el.refreshRestoreHistoryBtn.addEventListener("click", loadRestoreHistory);
 el.removeRestoreHistoryBtn.addEventListener("click", () => openConfirm("remove_restore_history"));

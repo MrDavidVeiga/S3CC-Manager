@@ -1455,12 +1455,118 @@ fn duplicate_quarantine_destination(
     Ok((candidate, parts))
 }
 
+fn duplicate_logical_name(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    let lower = name.to_ascii_lowercase();
+    let stem = [
+        ".package.disabled",
+        ".package.duplicated",
+        ".package",
+    ]
+    .into_iter()
+    .find_map(|suffix| lower.strip_suffix(suffix).map(|_| &name[..name.len() - suffix.len()]))?;
+    Some(stem.to_ascii_lowercase())
+}
+
+fn is_inside_duplicate_quarantine(path: &Path, quarantine: &Path) -> bool {
+    path == quarantine || path.strip_prefix(quarantine).is_ok()
+}
+
+/// Confirm an active keeper before changing an existing duplicate-quarantine
+/// entry. The quarantine tree itself is deliberately excluded: another stale
+/// copy there is not proof that the user still has a preserved, loadable
+/// package. The index supplies likely canonical peers, while same-name peers
+/// cover current model copies that are not in the persistent index. Every
+/// accepted candidate is rehashed in full before it can authorize a move.
+fn confirmed_quarantine_keeper(
+    root: &Path,
+    quarantine: &Path,
+    source: &Path,
+    source_hash: &str,
+    manual_model: &ManualModelIndex,
+) -> Option<PathBuf> {
+    let source_name = duplicate_logical_name(source)?;
+    let mut candidates = BTreeSet::<PathBuf>::new();
+
+    if let Some(files) = manual_model
+        .files_by_sha256
+        .get(&source_hash.to_ascii_uppercase())
+    {
+        for file in files {
+            let candidate = root.join(&file.relative_path);
+            if candidate.is_file()
+                && !is_inside_duplicate_quarantine(&candidate, quarantine)
+                && is_package_file(&candidate)
+                && !is_disabled_package_path(&candidate)
+            {
+                if let Ok(canonical) = candidate.canonicalize() {
+                    candidates.insert(canonical);
+                }
+            }
+        }
+    }
+
+    // Do not hash the entire selected tree just to migrate old quarantine
+    // entries. Enumerate only packages with the same logical filename, then
+    // verify their complete SHA-256. This also handles a current copy that
+    // predates the persistent model index.
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file()
+            || !is_package_file(entry.path())
+            || is_inside_duplicate_quarantine(entry.path(), quarantine)
+            || is_disabled_package_path(entry.path())
+            || duplicate_logical_name(entry.path()).as_deref() != Some(source_name.as_str())
+        {
+            continue;
+        }
+        if let Ok(canonical) = entry.path().canonicalize() {
+            candidates.insert(canonical);
+        }
+    }
+
+    let model_paths = manual_model
+        .files_by_sha256
+        .get(&source_hash.to_ascii_uppercase())
+        .into_iter()
+        .flatten()
+        .map(|file| relative_key(Path::new(&file.relative_path)).to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    let mut confirmed = candidates
+        .into_iter()
+        .filter(|candidate| !same_path_case_insensitive(candidate, source))
+        .filter_map(|candidate| {
+            let (hash, _) = sha256_file(&candidate).ok()?;
+            if !hash.eq_ignore_ascii_case(source_hash) {
+                return None;
+            }
+            let relative = candidate
+                .strip_prefix(root)
+                .map(relative_key)
+                .unwrap_or_else(|_| relative_key(&candidate));
+            Some((
+                model_paths.contains(&relative.to_ascii_lowercase()),
+                relative,
+                candidate,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    confirmed.sort_by_key(|(is_model, relative, _)| (!*is_model, relative.to_ascii_lowercase()));
+    confirmed.into_iter().next().map(|(_, _, path)| path)
+}
+
 /// Move legacy nested duplicate quarantine entries into the canonical flat
 /// root. This is part of the real planner, so old layouts are repaired by the
 /// same executor and remain reversible through the normal restore manifest.
 fn append_nested_duplicate_quarantine_items(
     root: &Path,
     language: AppLanguage,
+    manual_model: &ManualModelIndex,
     items: &mut Vec<PlanItem>,
     directories: &mut BTreeSet<String>,
     stats: &mut PlanStats,
@@ -1518,6 +1624,41 @@ fn append_nested_duplicate_quarantine_items(
                 source.display()
             )
         })?;
+        let keeper = confirmed_quarantine_keeper(
+            root,
+            &quarantine,
+            &source_canonical,
+            &hash,
+            manual_model,
+        );
+        if keeper.is_none() {
+            let relative = source_canonical
+                .strip_prefix(root)
+                .map_err(|_| format!("Nested duplicate escaped root: {}", source.display()))?;
+            stats.blocked += 1;
+            items.push(PlanItem {
+                id: format!("duplicate-quarantine-blocked:{}", relative_key(relative)),
+                name: source_canonical
+                    .file_name()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "duplicate.package".to_string()),
+                source_path: source_canonical.to_string_lossy().to_string(),
+                source_relative_path: relative_key(relative),
+                destination_path: None,
+                destination_relative_path: None,
+                classification_status: "duplicate_quarantine".to_string(),
+                classification_reason: Some(
+                    "Existing quarantine entry was preserved because no active keeper was confirmed outside #Duplicados.".to_string(),
+                ),
+                plan_status: "blocked_duplicate_no_keeper".to_string(),
+                sha256: Some(hash),
+                size,
+                warnings: vec![
+                    "No active byte-identical keeper was confirmed with a full SHA-256 outside #Duplicados. The original extension and bytes remain untouched for review.".to_string(),
+                ],
+            });
+            continue;
+        }
         let (destination_relative, destination_parts) =
             duplicate_quarantine_destination(root, language, &source_canonical, &hash, reserved)?;
         let destination = root.join(&destination_relative);
@@ -4054,6 +4195,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     append_nested_duplicate_quarantine_items(
         &root,
         language,
+        &manual_model,
         &mut items,
         &mut directories,
         &mut stats,
@@ -4342,6 +4484,7 @@ mod tests {
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::create_dir_all(&quarantine).unwrap();
         std::fs::write(quarantine.join("same.package"), b"existing").unwrap();
+        std::fs::write(quarantine.join("same.package.duplicated"), b"existing marker").unwrap();
         let mut reserved = HashSet::new();
         reserved.insert(String::from(
             "#duplicados\\same [aaaaaaaaaaaaaaaa].package.duplicated",
@@ -4449,14 +4592,22 @@ mod tests {
             .join("Old");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("same.package"), b"duplicate bytes").unwrap();
+        let keeper = packages.join("Sliders").join("same.package");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, b"duplicate bytes").unwrap();
         let mut items = Vec::new();
         let mut directories = BTreeSet::new();
         let mut stats = PlanStats::default();
         let mut reserved = HashSet::new();
+        let manual_model = ManualModelIndex {
+            directories: BTreeMap::new(),
+            files_by_sha256: HashMap::new(),
+        };
         let packages = packages.canonicalize().unwrap();
         append_nested_duplicate_quarantine_items(
             &packages,
             AppLanguage::Pt,
+            &manual_model,
             &mut items,
             &mut directories,
             &mut stats,
@@ -4488,6 +4639,9 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let source = nested.join("same.package");
         std::fs::write(&source, b"duplicate bytes").unwrap();
+        let keeper = packages.join("Sliders").join("same.package");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, b"duplicate bytes").unwrap();
         let packages = packages.canonicalize().unwrap();
         let source = source.canonicalize().unwrap();
 
@@ -4495,9 +4649,14 @@ mod tests {
         let mut directories = BTreeSet::new();
         let mut stats = PlanStats::default();
         let mut reserved = HashSet::new();
+        let manual_model = ManualModelIndex {
+            directories: BTreeMap::new(),
+            files_by_sha256: HashMap::new(),
+        };
         append_nested_duplicate_quarantine_items(
             &packages,
             AppLanguage::Pt,
+            &manual_model,
             &mut items,
             &mut directories,
             &mut stats,
@@ -4515,6 +4674,7 @@ mod tests {
         append_nested_duplicate_quarantine_items(
             &packages,
             AppLanguage::Pt,
+            &manual_model,
             &mut second_items,
             &mut second_directories,
             &mut second_stats,
@@ -4523,6 +4683,95 @@ mod tests {
         .unwrap();
         assert!(second_items.is_empty());
         assert_eq!(second_stats.ready, 0);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn existing_quarantine_without_active_keeper_is_preserved() {
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-duplicate-no-keeper-{}-{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let packages = base.join("Packages");
+        let nested = packages.join("#Duplicados").join("legacy");
+        std::fs::create_dir_all(&nested).unwrap();
+        let source = nested.join("orphan.package");
+        std::fs::write(&source, b"no keeper").unwrap();
+        let packages = packages.canonicalize().unwrap();
+        let manual_model = ManualModelIndex {
+            directories: BTreeMap::new(),
+            files_by_sha256: HashMap::new(),
+        };
+        let mut items = Vec::new();
+        let mut directories = BTreeSet::new();
+        let mut stats = PlanStats::default();
+        let mut reserved = HashSet::new();
+
+        append_nested_duplicate_quarantine_items(
+            &packages,
+            AppLanguage::Pt,
+            &manual_model,
+            &mut items,
+            &mut directories,
+            &mut stats,
+            &mut reserved,
+        )
+        .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].plan_status, "blocked_duplicate_no_keeper");
+        assert!(items[0].destination_path.is_none());
+        assert!(source.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn disabled_quarantine_entry_requires_keeper_and_stays_inactive() {
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-duplicate-disabled-{}-{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let packages = base.join("Packages");
+        let nested = packages.join("#Duplicados").join("legacy");
+        std::fs::create_dir_all(&nested).unwrap();
+        let source = nested.join("disabled.package.disabled");
+        std::fs::write(&source, b"disabled duplicate").unwrap();
+        let keeper = packages.join("Skins").join("disabled.package");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, b"disabled duplicate").unwrap();
+        let packages = packages.canonicalize().unwrap();
+        let manual_model = ManualModelIndex {
+            directories: BTreeMap::new(),
+            files_by_sha256: HashMap::new(),
+        };
+        let mut items = Vec::new();
+        let mut directories = BTreeSet::new();
+        let mut stats = PlanStats::default();
+        let mut reserved = HashSet::new();
+
+        append_nested_duplicate_quarantine_items(
+            &packages,
+            AppLanguage::Pt,
+            &manual_model,
+            &mut items,
+            &mut directories,
+            &mut stats,
+            &mut reserved,
+        )
+        .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].plan_status, "ready_duplicate_quarantine_migration");
+        assert!(items[0]
+            .destination_relative_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(".package.duplicated")));
+        assert!(items[0]
+            .source_relative_path
+            .to_ascii_lowercase()
+            .ends_with(".package.disabled"));
         std::fs::remove_dir_all(base).unwrap();
     }
 

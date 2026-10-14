@@ -5132,8 +5132,9 @@ body.release-v1 .conflicts-results {
   }
 }
 
-/* Lightweight Sims-inspired progress overlay. It remains non-blocking for
-   read-only analysis and becomes modal only while a write transaction runs. */
+/* Lightweight Sims-inspired progress overlay. It is modal while visible so
+   blurred content cannot receive accidental clicks; read-only operations can
+   be dismissed with Continue in Background without cancelling the task. */
 .loading-overlay {
   position: fixed;
   inset: 0;
@@ -5143,11 +5144,9 @@ body.release-v1 .conflicts-results {
   padding: clamp(18px, 4vw, 56px);
   background: color-mix(in srgb, var(--bg, #0a0d10) 62%, transparent);
   backdrop-filter: blur(10px) saturate(.9);
-  pointer-events: none;
+  pointer-events: auto;
   transition: opacity .2s ease, visibility .2s ease;
 }
-
-.loading-overlay[data-blocking="true"] { pointer-events: auto; }
 
 .loading-dialog {
   width: min(470px, 92vw);
@@ -5167,6 +5166,7 @@ body.release-v1 .conflicts-results {
 .loading-count { min-height: 1.1em; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; }
 .loading-dialog p { min-height: 2.4em; margin: 14px 0 18px; color: var(--muted); font-size: .82rem; line-height: 1.5; }
 .loading-dialog .secondary-btn { width: auto; min-width: 110px; }
+.loading-dialog .secondary-btn + .secondary-btn { margin-left: 8px; }
 .loading-sim-spinner { display: flex; justify-content: center; gap: 7px; min-height: 15px; margin-bottom: 2px; }
 .loading-sim-spinner span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent, #618422); animation: loading-dot 1.2s ease-in-out infinite; }
 .loading-sim-spinner span:nth-child(2) { animation-delay: .15s; }
@@ -5176,6 +5176,10 @@ body.release-v1 .conflicts-results {
 @media (prefers-reduced-motion: reduce) {
   .loading-overlay, .loading-progress-track > span { transition: none; }
   .loading-sim-spinner span, .loading-overlay[data-fluent-progress="indeterminate"] .loading-progress-track > span { animation: none; }
+}
+@media (max-width: 520px) {
+  .loading-dialog .secondary-btn { display: block; width: 100%; margin: 8px 0 0; }
+  .loading-dialog .secondary-btn + .secondary-btn { margin-left: 0; }
 }
 .manager-plan-footer #open-organized-folder-btn {
   flex: 0 1 auto;

@@ -99,6 +99,25 @@ function setStatus(message, error = false) {
   node.className = "scan-state" + (message ? (error ? " error" : " success") : "");
 }
 
+function emitOperationProgress(kind, active, status = {}) {
+  window.dispatchEvent(new CustomEvent("s3cc-operation-progress", {
+    detail: { kind, active, status },
+  }));
+}
+
+async function monitorOperationProgress(kind) {
+  while (state.busy) {
+    try {
+      const status = await invoke("get_operation_status", { kind });
+      emitOperationProgress(kind, true, status || {});
+    } catch (_) {
+      // The converter result remains authoritative; progress is presentation
+      // only and must not interfere with inspection or conversion.
+    }
+    await new Promise(resolve => setTimeout(resolve, 180));
+  }
+}
+
 function setStaticText() {
   q("#sims3pack-converter-title").textContent = tr("title");
   q("#sims3pack-converter-intro").textContent = tr("intro");
@@ -307,6 +326,8 @@ async function inspectSelected() {
   }
 
   state.busy = true;
+  emitOperationProgress("sims3pack_inspect", true);
+  void monitorOperationProgress("sims3pack_inspect");
   setStatus(tr("inspecting"));
   render();
   try {
@@ -320,6 +341,7 @@ async function inspectSelected() {
     setStatus(String(error), true);
   } finally {
     state.busy = false;
+    emitOperationProgress("sims3pack_inspect", false);
     render();
   }
 }
@@ -354,6 +376,8 @@ async function convert() {
     return;
   }
   state.busy = true;
+  emitOperationProgress("sims3pack_convert", true);
+  void monitorOperationProgress("sims3pack_convert");
   state.lastResult = null;
   setStatus(tr("converting"));
   render();
@@ -369,6 +393,7 @@ async function convert() {
     setStatus(String(error), true);
   } finally {
     state.busy = false;
+    emitOperationProgress("sims3pack_convert", false);
     render();
   }
 }
