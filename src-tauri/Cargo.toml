@@ -34,4 +34,4 @@ tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-dialog = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = ["UI", "UI_ViewManagement"] }
+windows = { version = "0.62.2", features = ["UI", "UI_ViewManagement", "Win32_Storage_FileSystem"] }

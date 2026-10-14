@@ -448,6 +448,48 @@ fn cleanup_remove_diagnostic(folder: &Path, error: &std::io::Error) -> String {
     )
 }
 
+#[cfg(windows)]
+fn windows_file_attributes(folder: &Path) -> Result<u32, std::io::Error> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{GetFileAttributesW, INVALID_FILE_ATTRIBUTES};
+
+    let mut path = folder.as_os_str().encode_wide().collect::<Vec<_>>();
+    path.push(0);
+    let attributes = unsafe { GetFileAttributesW(PCWSTR(path.as_ptr())) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(attributes)
+    }
+}
+
+#[cfg(windows)]
+fn set_windows_file_attributes(folder: &Path, attributes: u32) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES,
+    };
+
+    let mut path = folder.as_os_str().encode_wide().collect::<Vec<_>>();
+    path.push(0);
+    unsafe {
+        SetFileAttributesW(
+            PCWSTR(path.as_ptr()),
+            FILE_FLAGS_AND_ATTRIBUTES(attributes),
+        )
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn windows_is_reparse_point(folder: &Path) -> Result<bool, std::io::Error> {
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    Ok(windows_file_attributes(folder)? & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
+}
+
 fn cleanup_empty_directories_after_organization_with_protected(
     root: &Path,
     _moved_pairs: &[(PathBuf, PathBuf, String, u64)],
@@ -512,6 +554,19 @@ fn cleanup_empty_directories_after_organization_with_protected(
                 match entry {
                     Ok(entry) if entry.file_type().is_dir() && !entry.file_type().is_symlink() => {
                         let path = entry.path();
+                        #[cfg(windows)]
+                        if match windows_is_reparse_point(path) {
+                            Ok(is_reparse_point) => is_reparse_point,
+                            Err(error) => {
+                                warnings.push(format!(
+                                    "Could not verify whether legacy folder {} is a junction or reparse point: {error}",
+                                    path.display()
+                                ));
+                                true
+                            }
+                        } {
+                            continue;
+                        }
                         if is_protected_empty_directory(path) {
                             continue;
                         }
@@ -597,6 +652,74 @@ fn cleanup_empty_directories_after_organization_with_protected(
                 // outcome, not a cleanup failure.
             }
             Err(error) => {
+                #[cfg(windows)]
+                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
+
+                    match windows_file_attributes(&folder) {
+                        Ok(attributes) if attributes & FILE_ATTRIBUTE_READONLY.0 != 0 => {
+                            // Windows treats FILE_ATTRIBUTE_READONLY on a
+                            // directory as a removal restriction. Clear only
+                            // that bit on this already-verified empty folder;
+                            // ACLs, files, and every other attribute remain
+                            // untouched.
+                            let writable_attributes =
+                                attributes & !FILE_ATTRIBUTE_READONLY.0;
+                            match set_windows_file_attributes(
+                                &folder,
+                                writable_attributes,
+                            ) {
+                                Ok(()) => match fs::remove_dir(&folder) {
+                                    Ok(()) => {
+                                        removed += 1;
+                                        continue;
+                                    }
+                                    Err(retry_error)
+                                        if retry_error.kind()
+                                            == std::io::ErrorKind::NotFound =>
+                                    {
+                                        // Another actor removed it after
+                                        // the attribute update. This is the
+                                        // expected idempotent outcome.
+                                        continue;
+                                    }
+                                    Err(retry_error) => {
+                                        let restore_error =
+                                            set_windows_file_attributes(&folder, attributes)
+                                                .err();
+                                        let restore_note = restore_error
+                                            .map(|restore| {
+                                                format!(
+                                                    "; restoring original attributes also failed: {restore}"
+                                                )
+                                            })
+                                            .unwrap_or_default();
+                                        warnings.push(format!(
+                                            "Could not remove verified-empty legacy folder {} after clearing only FILE_ATTRIBUTE_READONLY: {retry_error}{restore_note}",
+                                            folder.display()
+                                        ));
+                                        continue;
+                                    }
+                                },
+                                Err(attribute_error) => {
+                                    warnings.push(format!(
+                                        "Could not remove verified-empty legacy folder {}: clearing only FILE_ATTRIBUTE_READONLY failed: {attribute_error}; original removal error: {error}",
+                                        folder.display()
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(attribute_error) => {
+                            warnings.push(format!(
+                                "Could not inspect attributes for verified-empty legacy folder {} after access denied: {attribute_error}; original removal error: {error}",
+                                folder.display()
+                            ));
+                            continue;
+                        }
+                    }
+                }
                 // A nonempty directory is expected and must be kept intact.
                 // Surface only failures concerning an actually empty folder,
                 // including a genuine Windows AccessDenied after the handle
@@ -815,7 +938,11 @@ pub async fn execute_organization_with_cfg(
     .map_err(|error| format!("Organization worker failed: {error}"))
     .and_then(|output| output);
     match &result {
-        Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" => {
+        Ok(output)
+            if output.status == "COMPLETE"
+                || output.status == "COMPLETE_WITH_WARNINGS"
+                || output.status == "NO_CHANGES" =>
+        {
             operation::finish(&operation_run, "complete", None)
         }
         Ok(output) => operation::finish(&operation_run, "failed", Some(output.status.clone())),
@@ -876,7 +1003,11 @@ pub async fn execute_organization_plan_with_cfg(
     .map_err(|error| format!("Organization worker failed: {error}"))
     .and_then(|output| output);
     match &result {
-        Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" => {
+        Ok(output)
+            if output.status == "COMPLETE"
+                || output.status == "COMPLETE_WITH_WARNINGS"
+                || output.status == "NO_CHANGES" =>
+        {
             operation::finish(&operation_run, "complete", None)
         }
         Ok(output) => operation::finish(&operation_run, "failed", Some(output.status.clone())),
@@ -931,7 +1062,11 @@ fn execute_organization_plan_core(
             .collect();
         let analysis_current = Some(incremental_current_snapshot(&plan, remaining_legacy_files));
         return Ok(ExecutionResult {
-            status: "NO_CHANGES".to_string(),
+            status: if cleanup_warnings.is_empty() {
+                "NO_CHANGES".to_string()
+            } else {
+                "COMPLETE_WITH_WARNINGS".to_string()
+            },
             moved_files: Vec::new(),
             organized_directory: root.to_string_lossy().to_string(),
             manifest_path: None,
@@ -1268,7 +1403,11 @@ fn execute_organization_plan_core(
         .map(|detail| detail.relative_path.clone())
         .collect();
 
-    manifest.status = "COMPLETE".to_string();
+    manifest.status = if cleanup_warnings.is_empty() {
+        "COMPLETE".to_string()
+    } else {
+        "COMPLETE_WITH_WARNINGS".to_string()
+    };
     replace_manifest_atomic(&manifest_path, &manifest)?;
     operation::update("organize", 1, None, "complete");
 
@@ -1311,7 +1450,7 @@ fn execute_organization_plan_core(
         .to_string();
 
     Ok(ExecutionResult {
-        status: "COMPLETE".to_string(),
+        status: manifest.status.clone(),
         moved_files,
         organized_directory,
         manifest_path: Some(manifest_path.to_string_lossy().to_string()),
@@ -1826,6 +1965,54 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(!legacy.exists());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_empty_legacy_directory_is_removed_by_clearing_only_readonly() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-readonly-cleanup-{}-{nonce}",
+            std::process::id()
+        ));
+        let root = base.join("Mods");
+        let targets = [
+            "Packages\\#1 Face\\Make Up\\Blush",
+            "Packages\\#1 Face\\Make Up\\Eyeliner",
+            "Packages\\#1 Face\\Make Up\\Lipstick",
+            "Packages\\#1 Face\\Make Up\\Moles",
+            "Packages\\#4 Hair\\Female\\Adult",
+            "Packages\\#4 Hair\\Female\\Child",
+            "Packages\\#4 Hair\\Female\\Toddler",
+            "Packages\\#1 Face\\Eyes",
+            "Packages\\#4 Hair\\Eyebrows",
+            "Packages\\#7 Objects\\Store",
+        ];
+        for relative in targets {
+            let folder = root.join(relative);
+            fs::create_dir_all(&folder).unwrap();
+            let original = windows_file_attributes(&folder).unwrap();
+            set_windows_file_attributes(&folder, original | FILE_ATTRIBUTE_READONLY.0).unwrap();
+            assert!(
+                fs::remove_dir(&folder).is_err(),
+                "the read-only probe must fail before the targeted retry for {relative}"
+            );
+        }
+
+        let (removed, _, warnings) = cleanup_empty_directories_after_organization(&root, &[]);
+        assert!(removed >= targets.len());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(targets
+            .iter()
+            .all(|relative| !root.join(relative).exists()));
+        assert!(root.join("Packages").is_dir());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(unix)]

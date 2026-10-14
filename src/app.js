@@ -439,6 +439,7 @@ const I18N = {
     notEligible: "Not eligible for automatic organization",
     executing: "Organizing selected packages…",
     executionComplete: "Organization completed",
+    executionCompleteWithWarnings: "Organization completed with warnings",
     executionNoChanges: "Nothing needed to be moved",
     executionRolledBack: "Organization failed and was rolled back",
     confirmOrganizeTitle: "Organize selected packages?",
@@ -1055,6 +1056,7 @@ const I18N = {
     notEligible: "Não elegível para organização automática",
     executing: "Organizando packages selecionados…",
     executionComplete: "Organização concluída",
+    executionCompleteWithWarnings: "Organização concluída com avisos",
     executionNoChanges: "Nenhum arquivo precisava ser movido",
     executionRolledBack: "A organização falhou e foi revertida",
     confirmOrganizeTitle: "Organizar os packages selecionados?",
@@ -1670,6 +1672,7 @@ const I18N = {
     notEligible: "No apto para organización automática",
     executing: "Organizando packages seleccionados…",
     executionComplete: "Organización completada",
+    executionCompleteWithWarnings: "Organización completada con avisos",
     executionNoChanges: "No era necesario mover archivos",
     executionRolledBack: "La organización falló y fue revertida",
     confirmOrganizeTitle: "¿Organizar los packages seleccionados?",
@@ -9178,9 +9181,9 @@ async function executeOrganization() {
       expectedCfgRules: completedPlan.resourceCfgUpdate?.addedRules ?? [],
     });
 
-    if (result.status === "COMPLETE" || result.status === "NO_CHANGES") {
+    if (result.status === "COMPLETE" || result.status === "COMPLETE_WITH_WARNINGS" || result.status === "NO_CHANGES") {
       state.lastOrganizedDirectory = result.organizedDirectory || state.folder;
-      if (result.status === "COMPLETE") {
+      if (result.status === "COMPLETE" || result.status === "COMPLETE_WITH_WARNINGS") {
         reconcileSuccessfulOrganization(result);
       }
       state.organizationReview = {
@@ -9202,8 +9205,8 @@ async function executeOrganization() {
       };
       state.organizationCollisionItems = collisionItems;
 
-      state.notice = result.status === "COMPLETE"
-        ? `${t("executionComplete")}: ${result.moved}`
+      state.notice = result.status === "COMPLETE" || result.status === "COMPLETE_WITH_WARNINGS"
+        ? `${result.status === "COMPLETE_WITH_WARNINGS" ? t("executionCompleteWithWarnings") : t("executionComplete")}: ${result.moved}`
         : t("executionNoChanges");
       // File moves have succeeded, but a permission problem may have kept an
       // empty folder. Surface cleanup warnings instead of silently hiding it.
@@ -9212,7 +9215,9 @@ async function executeOrganization() {
       }
       terminalOutcome = {
         state: "complete",
-        title: result.status === "COMPLETE" ? t("executionComplete") : t("executionNoChanges"),
+        title: result.status === "COMPLETE_WITH_WARNINGS"
+          ? t("executionCompleteWithWarnings")
+          : result.status === "COMPLETE" ? t("executionComplete") : t("executionNoChanges"),
         summary: state.notice,
         counters: [
           { label: t("organizedPackages"), value: result.moved ?? 0 },
