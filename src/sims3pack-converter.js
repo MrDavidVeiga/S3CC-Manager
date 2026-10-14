@@ -74,6 +74,8 @@ const state = {
   combined: false,
   busy: false,
   lastResult: null,
+  operationSequence: 0,
+  operationId: "",
 };
 
 const q = selector => document.querySelector(selector);
@@ -99,22 +101,25 @@ function setStatus(message, error = false) {
   node.className = "scan-state" + (message ? (error ? " error" : " success") : "");
 }
 
-function emitOperationProgress(kind, active, status = {}) {
+function emitOperationProgress(kind, active, status = {}, operationId = state.operationId) {
   window.dispatchEvent(new CustomEvent("s3cc-operation-progress", {
-    detail: { kind, active, status },
+    detail: { kind, active, status, operationId },
   }));
 }
 
-async function monitorOperationProgress(kind) {
-  while (state.busy) {
+async function monitorOperationProgress(kind, operationId) {
+  while (state.busy && state.operationId === operationId) {
     try {
       const status = await invoke("get_operation_status", { kind });
-      emitOperationProgress(kind, true, status || {});
+      if (!state.busy || state.operationId !== operationId) return;
+      emitOperationProgress(kind, true, status || {}, operationId);
     } catch (_) {
       // The converter result remains authoritative; progress is presentation
       // only and must not interfere with inspection or conversion.
     }
-    await new Promise(resolve => setTimeout(resolve, 180));
+    if (state.busy && state.operationId === operationId) {
+      await new Promise(resolve => setTimeout(resolve, 180));
+    }
   }
 }
 
@@ -326,8 +331,9 @@ async function inspectSelected() {
   }
 
   state.busy = true;
+  state.operationId = `sims3pack_inspect:${++state.operationSequence}`;
   emitOperationProgress("sims3pack_inspect", true);
-  void monitorOperationProgress("sims3pack_inspect");
+  void monitorOperationProgress("sims3pack_inspect", state.operationId);
   setStatus(tr("inspecting"));
   render();
   try {
@@ -342,6 +348,7 @@ async function inspectSelected() {
   } finally {
     state.busy = false;
     emitOperationProgress("sims3pack_inspect", false);
+    state.operationId = "";
     render();
   }
 }
@@ -376,8 +383,9 @@ async function convert() {
     return;
   }
   state.busy = true;
+  state.operationId = `sims3pack_convert:${++state.operationSequence}`;
   emitOperationProgress("sims3pack_convert", true);
-  void monitorOperationProgress("sims3pack_convert");
+  void monitorOperationProgress("sims3pack_convert", state.operationId);
   state.lastResult = null;
   setStatus(tr("converting"));
   render();
@@ -394,6 +402,7 @@ async function convert() {
   } finally {
     state.busy = false;
     emitOperationProgress("sims3pack_convert", false);
+    state.operationId = "";
     render();
   }
 }
