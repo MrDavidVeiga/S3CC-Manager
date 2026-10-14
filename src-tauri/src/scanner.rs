@@ -1,4 +1,5 @@
 use crate::{
+    cache,
     catalog::{classify_resource, CatalogClassification, TYPE_CASP, TYPE_OBJD},
     dbpf::Package,
     fix_signatures::{self, FixSignatureIndex},
@@ -20,7 +21,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::{Instant, UNIX_EPOCH},
+    time::Instant,
 };
 use walkdir::WalkDir;
 
@@ -72,6 +73,14 @@ pub struct ScanStats {
     pub casp_resources: usize,
     pub objd_resources: usize,
     pub total_ms: u128,
+    pub discovery_ms: u128,
+    pub classification_ms: u128,
+    pub postprocess_ms: u128,
+    pub dbpf_load_ms: u128,
+    pub resource_decode_ms: u128,
+    pub package_reads: usize,
+    pub cache_hit: bool,
+    pub reused_packages: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +89,10 @@ pub struct ScanResult {
     pub root: String,
     pub items: Vec<ScanPackageItem>,
     pub stats: ScanStats,
+    #[serde(default)]
+    pub cache_hit: bool,
+    #[serde(default)]
+    pub reused_packages: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +100,8 @@ struct LatestScan {
     root: PathBuf,
     language: AppLanguage,
     result: ScanResult,
-    file_signatures: HashMap<String, (u64, u128)>,
+    file_signatures: HashMap<String, (u64, u128, String)>,
+    classification_context: String,
 }
 
 static LATEST_SCAN: OnceLock<Mutex<Option<LatestScan>>> = OnceLock::new();
@@ -96,22 +110,53 @@ fn latest_scan_slot() -> &'static Mutex<Option<LatestScan>> {
     LATEST_SCAN.get_or_init(|| Mutex::new(None))
 }
 
+const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261013-1";
+
+fn context_file_signature(path: &Path) -> String {
+    if !path.is_file() {
+        return "missing".to_string();
+    }
+    sha256_file(path)
+        .map(|(hash, size)| format!("{size}:{hash}"))
+        .unwrap_or_else(|error| format!("unreadable:{error}"))
+}
+
+fn classification_context_fingerprint(root: &Path, language: AppLanguage) -> String {
+    let workspace = root
+        .parent()
+        .unwrap_or(root)
+        .join("S3CC Organizer")
+        .join("Workspace")
+        .join("workspace-v1.json");
+    let fix_index = fix_signatures::index_path();
+    let fix_backup = fix_signatures::index_backup_path();
+    format!(
+        "{CLASSIFICATION_RULES_VERSION}|{language:?}|workspace={}|fix={}|fix-backup={}",
+        context_file_signature(&workspace),
+        context_file_signature(&fix_index),
+        context_file_signature(&fix_backup),
+    )
+}
+
+fn stable_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn remember_latest_scan(result: &ScanResult, language: AppLanguage) {
-    let root = PathBuf::from(&result.root)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(&result.root));
+    let root = stable_path(Path::new(&result.root));
     if let Ok(mut slot) = latest_scan_slot().lock() {
         let file_signatures = result.items.iter().filter_map(|item| {
             let path = PathBuf::from(&item.path);
-            let metadata = fs::metadata(&path).ok()?;
-            let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
-            Some((path.to_string_lossy().to_string(), (metadata.len(), modified)))
+            let canonical = stable_path(&path);
+            let signature = cache::analysis_file_fingerprint(&canonical).ok()?;
+            Some((canonical.to_string_lossy().to_string(), signature))
         }).collect::<HashMap<_, _>>();
         *slot = Some(LatestScan {
-            root,
+            root: root.clone(),
             language,
             result: result.clone(),
             file_signatures,
+            classification_context: classification_context_fingerprint(&root, language),
         });
     }
 }
@@ -123,25 +168,40 @@ fn latest_scan_is_current(cached: &LatestScan) -> bool {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file() && package_extension(entry.path()))
         .filter_map(|entry| {
-            let path = entry.path().canonicalize().ok()?;
-            let metadata = fs::metadata(&path).ok()?;
-            let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
-            Some((path.to_string_lossy().to_string(), (metadata.len(), modified)))
+            let path = stable_path(entry.path());
+            let signature = cache::analysis_file_fingerprint(&path).ok()?;
+            Some((path.to_string_lossy().to_string(), signature))
         })
         .collect::<HashMap<_, _>>();
     current == cached.file_signatures
+        && cached.classification_context
+            == classification_context_fingerprint(&cached.root, cached.language)
 }
 
 pub fn cached_scan_for(root: &Path, language: AppLanguage) -> Option<ScanResult> {
-    let canonical = root.canonicalize().ok()?;
+    let canonical = stable_path(root);
     let slot = latest_scan_slot().lock().ok()?;
     let cached = slot.as_ref()?;
     (cached.language == language && cached.root == canonical && latest_scan_is_current(cached))
         .then(|| cached.result.clone())
 }
 
+fn previous_scan_for(root: &Path, language: AppLanguage) -> Option<LatestScan> {
+    let stable_root = stable_path(root);
+    let slot = latest_scan_slot().lock().ok()?;
+    let cached = slot.as_ref()?;
+    if cached.language != language
+        || cached.root != stable_root
+        || cached.classification_context
+            != classification_context_fingerprint(&cached.root, cached.language)
+    {
+        return None;
+    }
+    Some(cached.clone())
+}
+
 pub fn cached_scan_paths(root: &Path) -> Option<Vec<PathBuf>> {
-    let canonical = root.canonicalize().ok()?;
+    let canonical = stable_path(root);
     let slot = latest_scan_slot().lock().ok()?;
     let cached = slot.as_ref()?;
     if cached.root != canonical || !latest_scan_is_current(cached) {
@@ -162,7 +222,7 @@ pub fn cached_scan_paths(root: &Path) -> Option<Vec<PathBuf>> {
 /// receives the exact move mapping and can update its list incrementally;
 /// future explicit rescans or new previews must not reuse pre-move paths.
 pub fn invalidate_latest_scan_for(root: &Path) {
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical = stable_path(root);
     if let Ok(mut slot) = latest_scan_slot().lock() {
         if slot.as_ref().is_some_and(|current| current.root == canonical) {
             *slot = None;
@@ -3251,12 +3311,20 @@ fn verified_eyelash_catalog_bundle(
     Some(result)
 }
 
+#[derive(Debug, Default)]
+struct ScanTiming {
+    package_reads: usize,
+    dbpf_load_us: u128,
+    resource_decode_us: u128,
+}
+
 fn scan_one(
     root: &Path,
     path: &Path,
     language: AppLanguage,
     slider_instances: &mut HashSet<u64>,
     fix_index: Option<&FixSignatureIndex>,
+    timing: &mut ScanTiming,
 ) -> ScanPackageItem {
     let relative = path
         .strip_prefix(root)
@@ -3279,7 +3347,11 @@ fn scan_one(
             .next()
             .is_some_and(|value| value.eq_ignore_ascii_case("Overrides"));
 
-    let package = match Package::load(path) {
+    let dbpf_started = Instant::now();
+    let package_result = Package::load(path);
+    timing.package_reads += 1;
+    timing.dbpf_load_us += dbpf_started.elapsed().as_micros();
+    let package = match package_result {
         Ok(package) => package,
         Err(error) => {
             return ScanPackageItem {
@@ -3349,7 +3421,10 @@ fn scan_one(
         catalog_resource_count += 1;
         detected_from.insert(resource_type_label(entry.type_id));
 
-        match package.data(entry) {
+        let decode_started = Instant::now();
+        let data_result = package.data(entry);
+        timing.resource_decode_us += decode_started.elapsed().as_micros();
+        match data_result {
             Ok(data) => match classify_resource(entry.type_id, &data, language) {
                 Some(mut classification) => {
                     refine_headwear_accessory(&mut classification, &name, language);
@@ -3794,14 +3869,37 @@ pub fn scan_packages_core(
     operation_kind: Option<&str>,
 ) -> Result<ScanResult, String> {
     let total_started = Instant::now();
-    let root = PathBuf::from(folder.trim());
     if folder.trim().is_empty() {
         return Err("No folder was selected.".to_string());
     }
+    let root = PathBuf::from(folder.trim());
     if !root.is_dir() {
         return Err(format!("Folder does not exist: {}", root.display()));
     }
 
+    // The latest scan is a read-only presentation cache. Its bounded file
+    // fingerprints, rule-version context and language/manual-index context
+    // must all still match before any classified item is reused. Mutating
+    // operations continue to verify full SHA-256 identities separately.
+    if let Some(mut cached) = cached_scan_for(&root, language) {
+        cached.cache_hit = true;
+        cached.reused_packages = cached.items.len();
+        cached.stats.total_ms = total_started.elapsed().as_millis();
+        cached.stats.cache_hit = true;
+        cached.stats.reused_packages = cached.items.len();
+        cached.stats.package_reads = 0;
+        cached.stats.dbpf_load_ms = 0;
+        cached.stats.resource_decode_ms = 0;
+        cached.stats.classification_ms = 0;
+        cached.stats.postprocess_ms = 0;
+        if let Some(kind) = operation_kind {
+            operation::set_total(kind, cached.items.len());
+            operation::update(kind, cached.items.len(), None, "cache_reused");
+        }
+        return Ok(cached);
+    }
+
+    let discovery_started = Instant::now();
     let mut package_paths = WalkDir::new(&root)
         .follow_links(false)
         .into_iter()
@@ -3810,6 +3908,7 @@ pub fn scan_packages_core(
         .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
     package_paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    let discovery_ms = discovery_started.elapsed().as_millis();
 
     if let Some(kind) = operation_kind {
         operation::set_total(kind, package_paths.len());
@@ -3819,6 +3918,17 @@ pub fn scan_packages_core(
     let mut items = Vec::with_capacity(package_paths.len());
     let mut slider_instances = HashSet::<u64>::new();
     let fix_index = fix_signatures::load_persistent_index();
+    let mut timing = ScanTiming::default();
+    let previous = previous_scan_for(&root, language);
+    let previous_items = previous.as_ref().map(|scan| {
+        scan.result
+            .items
+            .iter()
+            .map(|item| (stable_path(Path::new(&item.path)), item))
+            .collect::<HashMap<_, _>>()
+    });
+    let mut reused_packages = 0usize;
+    let classification_started = Instant::now();
 
     for (index, path) in package_paths.iter().enumerate() {
         if let Some(kind) = operation_kind {
@@ -3827,13 +3937,41 @@ pub fn scan_packages_core(
             }
         }
 
-        items.push(scan_one(
-            &root,
-            path,
-            language,
-            &mut slider_instances,
-            fix_index.as_ref(),
-        ));
+        let stable = stable_path(path);
+        let reused = previous_items
+            .as_ref()
+            .and_then(|items| items.get(&stable).copied())
+            .filter(|item| {
+                // FBLN packages seed the companion index and STBL packages
+                // are revisited by the companion pass. Reopen those small
+                // dependency carriers when another package changed; ordinary
+                // unchanged classifications can be reused safely.
+                !item.resource_types.iter().any(|kind| kind == "FBLN" || kind == "STBL")
+            })
+            .filter(|_| {
+                previous
+                    .as_ref()
+                    .and_then(|scan| scan.file_signatures.get(&stable.to_string_lossy().to_string()))
+                    .is_some_and(|signature| {
+                        cache::analysis_file_fingerprint(path)
+                            .ok()
+                            .is_some_and(|current| current == *signature)
+                    })
+            });
+
+        if let Some(item) = reused {
+            items.push(item.clone());
+            reused_packages += 1;
+        } else {
+            items.push(scan_one(
+                &root,
+                path,
+                language,
+                &mut slider_instances,
+                fix_index.as_ref(),
+                &mut timing,
+            ));
+        }
 
         if let Some(kind) = operation_kind {
             let processed = index + 1;
@@ -3843,6 +3981,8 @@ pub fn scan_packages_core(
         }
     }
 
+    let classification_ms = classification_started.elapsed().as_millis();
+    let postprocess_started = Instant::now();
     apply_slider_companion_classification(&package_paths, &mut items, &slider_instances);
     apply_nraas_family_subfolders(language, &mut items);
     apply_named_mod_companions(&mut items);
@@ -3874,6 +4014,7 @@ pub fn scan_packages_core(
             })
             .collect();
     }
+    let postprocess_ms = postprocess_started.elapsed().as_millis();
 
     let mut stats = ScanStats::default();
     stats.packages = items.len();
@@ -3902,11 +4043,21 @@ pub fn scan_packages_core(
     }
 
     stats.total_ms = total_started.elapsed().as_millis();
+    stats.discovery_ms = discovery_ms;
+    stats.classification_ms = classification_ms;
+    stats.postprocess_ms = postprocess_ms;
+    stats.dbpf_load_ms = timing.dbpf_load_us / 1_000;
+    stats.resource_decode_ms = timing.resource_decode_us / 1_000;
+    stats.package_reads = timing.package_reads;
+    stats.cache_hit = false;
+    stats.reused_packages = reused_packages;
 
     Ok(ScanResult {
         root: root.to_string_lossy().to_string(),
         items,
         stats,
+        cache_hit: false,
+        reused_packages,
     })
 }
 
@@ -3932,12 +4083,20 @@ pub fn scan_selected_package_paths(
     let fix_index = fix_signatures::load_persistent_index();
     operation::set_total("planning", paths.len());
     let mut items = Vec::with_capacity(paths.len());
+    let mut timing = ScanTiming::default();
     for (processed, path) in paths.iter().enumerate() {
         if operation::is_cancelled("planning") {
             return Err(CANCELLED_ERROR.to_string());
         }
         operation::update("planning", processed, Some(path.to_string_lossy().into_owned()), "scanning");
-        items.push(scan_one(root, path, language, &mut slider_instances, fix_index.as_ref()));
+        items.push(scan_one(
+            root,
+            path,
+            language,
+            &mut slider_instances,
+            fix_index.as_ref(),
+            &mut timing,
+        ));
     }
 
     apply_slider_companion_classification(&paths, &mut items, &slider_instances);
@@ -4004,6 +4163,8 @@ pub fn scan_selected_package_paths(
         root: root.to_string_lossy().to_string(),
         items,
         stats,
+        cache_hit: false,
+        reused_packages: 0,
     })
 }
 
@@ -4132,6 +4293,7 @@ mod tests {
                     AppLanguage::Pt,
                     &mut slider_instances,
                     fix_index.as_ref(),
+                    &mut ScanTiming::default(),
                 );
                 item.destination_parts = physical_destination_parts(
                     Path::new(&backup_root),
@@ -4148,11 +4310,15 @@ mod tests {
             root: backup_root.clone(),
             items: scan_selected(),
             stats: ScanStats::default(),
+            cache_hit: false,
+            reused_packages: 0,
         };
         let rescanned = ScanResult {
             root: backup_root.clone(),
             items: scan_selected(),
             stats: ScanStats::default(),
+            cache_hit: false,
+            reused_packages: 0,
         };
         assert_eq!(scan.items.len(), rescanned.items.len());
 
@@ -4367,6 +4533,7 @@ mod tests {
                 AppLanguage::Pt,
                 &mut slider_instances,
                 fix_index.as_ref(),
+                &mut ScanTiming::default(),
             );
             if target.eq_ignore_ascii_case("Anach_CASDetails8x2.package") {
                 assert_eq!(item.status, "classified");
@@ -4769,6 +4936,49 @@ mod tests {
         assert!(package_extension(Path::new("Hair.package")));
         assert!(package_extension(Path::new("Hair.PACKAGE")));
         assert!(!package_extension(Path::new("Hair.sims3pack")));
+    }
+
+    #[test]
+    fn unchanged_scan_reuses_contextual_cache_and_detects_content_change() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("s3cc-scan-cache-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("sample.package");
+        let unchanged_package = root.join("unchanged.package");
+        std::fs::write(&package, vec![0u8; 64]).unwrap();
+        std::fs::write(&unchanged_package, vec![0u8; 64]).unwrap();
+
+        let first = scan_packages_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
+            .expect("first scan");
+        assert!(!first.cache_hit);
+        assert_eq!(first.stats.package_reads, 2);
+        remember_latest_scan(&first, AppLanguage::Pt);
+
+        let second = scan_packages_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
+            .expect("cached scan");
+        assert!(second.cache_hit);
+        assert_eq!(second.reused_packages, 2);
+        assert_eq!(second.stats.package_reads, 2);
+
+        // Keep the size unchanged. The bounded content fingerprint must still
+        // invalidate the presentation cache rather than reusing stale status.
+        let mut changed = vec![0u8; 64];
+        changed[32] = 1;
+        std::fs::write(&package, changed).unwrap();
+        let third = scan_packages_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
+            .expect("changed scan");
+        assert!(!third.cache_hit);
+        assert_eq!(third.stats.package_reads, 1);
+        assert_eq!(third.reused_packages, 1);
+
+        invalidate_latest_scan_for(&root);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
 
@@ -5202,6 +5412,7 @@ mod tests {
                 AppLanguage::Pt,
                 &mut slider_instances,
                 fix_signatures::load_persistent_index().as_ref(),
+                &mut ScanTiming::default(),
             );
             assert_eq!(item.status, "classified", "{relative}");
             assert!(item.destination_parts.starts_with(&[
@@ -5264,6 +5475,7 @@ mod tests {
                 AppLanguage::Pt,
                 &mut slider_instances,
                 fix_signatures::load_persistent_index().as_ref(),
+                &mut ScanTiming::default(),
             );
             assert!(
                 !package.entries.iter().any(|entry| entry.type_id == TYPE_FBLN),

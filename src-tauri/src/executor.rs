@@ -393,11 +393,16 @@ fn cleanup_empty_directories_after_organization_with_protected(
     scope_roots: Option<&[PathBuf]>,
     protected_relative_directories: &[String],
 ) -> (usize, usize, Vec<String>) {
-    let mods_root = crate::resource_cfg::is_mods_layout_root(root);
     let is_protected_empty_directory = |path: &Path| {
         protected_relative_directories.iter().any(|relative| {
             normalized_path_key(root, path)
                 == normalized_path_key(root, Path::new(relative))
+        })
+    };
+    let is_loading_branch_root = |path: &Path| {
+        (path == root || path.parent() == Some(root)) && path.file_name().is_some_and(|name| {
+            name.to_string_lossy().eq_ignore_ascii_case("Packages")
+                || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
         })
     };
     let mut candidates = Vec::<PathBuf>::new();
@@ -411,7 +416,13 @@ fn cleanup_empty_directories_after_organization_with_protected(
         if !walk_root.is_dir() {
             continue;
         }
-        if scope_roots.is_none() {
+        let full_tree_scope = scope_roots.is_some_and(|roots| {
+            roots.iter().any(|root_path| {
+                normalized_path_key(root, root_path)
+                    == normalized_path_key(root, &walk_root)
+            })
+        });
+        if scope_roots.is_none() || full_tree_scope {
             let minimum_depth = usize::from(walk_root == root);
             for entry in WalkDir::new(&walk_root)
                 .follow_links(false)
@@ -426,12 +437,7 @@ fn cleanup_empty_directories_after_organization_with_protected(
                         }
                         // These are the two loading branch roots. They must survive
                         // even if they contain zero packages after organization.
-                        if mods_root && path.parent() == Some(root) && path.file_name()
-                            .is_some_and(|name| {
-                                name.to_string_lossy().eq_ignore_ascii_case("Packages")
-                                    || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
-                            })
-                        {
+                        if is_loading_branch_root(path) {
                             continue;
                         }
                         candidates.push(path.to_path_buf());
@@ -446,7 +452,10 @@ fn cleanup_empty_directories_after_organization_with_protected(
             // A focused plan only needs the old source directory and its
             // ancestors. Recursing from a source parent such as `Jonas`
             // would inspect unrelated siblings and defeat incremental mode.
-            if !is_protected_empty_directory(&walk_root) {
+            if !is_protected_empty_directory(&walk_root)
+                && walk_root != root
+                && !is_loading_branch_root(&walk_root)
+            {
                 candidates.push(walk_root.to_path_buf());
             }
         }
@@ -461,7 +470,10 @@ fn cleanup_empty_directories_after_organization_with_protected(
                 if folder == root || !folder.starts_with(root) {
                     break;
                 }
-                if !is_protected_empty_directory(folder) {
+                if !is_protected_empty_directory(folder)
+                    && folder != root
+                    && !is_loading_branch_root(folder)
+                {
                     candidates.push(folder.to_path_buf());
                 }
                 ancestor = folder.parent();
@@ -472,6 +484,7 @@ fn cleanup_empty_directories_after_organization_with_protected(
     // Remove children before their parents. As each descendant disappears,
     // another formerly nonempty parent can become empty in the same pass.
     candidates.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    candidates.dedup();
     let mut removed = 0;
     for folder in candidates {
         if is_protected_empty_directory(&folder) {
@@ -517,11 +530,7 @@ fn cleanup_empty_directories_after_organization_with_protected(
                 break;
             }
             // The branch roots are intentionally kept, not "occupied".
-            let protected = mods_root && folder.parent() == Some(root) &&
-                folder.file_name().is_some_and(|name| {
-                    name.to_string_lossy().eq_ignore_ascii_case("Packages")
-                        || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
-                });
+            let protected = is_loading_branch_root(folder);
             if !protected {
                 old_folders.insert(folder.to_path_buf());
             }
@@ -537,6 +546,19 @@ fn cleanup_empty_directories_after_organization_with_protected(
 
 fn cleanup_scope_roots(root: &Path, plan: &OrganizationPlan) -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
+    for relative in &plan.cleanup_roots {
+        let candidate = if relative == "." {
+            root.to_path_buf()
+        } else {
+            root.join(relative)
+        };
+        let canonical = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
+        if canonical.is_dir() && canonical.starts_with(root) {
+            roots.insert(canonical);
+        }
+    }
     for item in &plan.items {
         let source = PathBuf::from(&item.source_path);
         let Ok(_) = source.strip_prefix(root) else {
@@ -548,7 +570,7 @@ fn cleanup_scope_roots(root: &Path, plan: &OrganizationPlan) -> Vec<PathBuf> {
         // Scope cleanup to the actual old-source branches.  Using only the
         // first component (for example `Packages\Cabelos`) made a residual
         // plan walk an entire category tree even when it contained one file.
-        if parent.is_dir() && parent.starts_with(root) {
+        if parent.is_dir() && parent != root && parent.starts_with(root) {
             roots.insert(parent.to_path_buf());
         }
     }
@@ -1429,6 +1451,45 @@ mod tests {
         assert_eq!(retained, 0);
         assert!(canonical.is_dir());
         assert!(!legacy.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn no_move_plan_cleans_selected_legacy_root_but_keeps_canonical_empty_tree() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("s3cc-no-move-cleanup-{}-{nonce}", std::process::id()));
+        let root = base.join("Packages");
+        let legacy = root.join("#6 Sliders").join("Old");
+        let canonical = root.join("Sliders");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&canonical).unwrap();
+
+        let plan = OrganizationPlan {
+            root: root.display().to_string(),
+            items: Vec::new(),
+            stats: crate::planner::PlanStats::default(),
+            directories_to_create: Vec::new(),
+            protected_empty_directories: vec!["Sliders".into()],
+            cleanup_roots: vec!["#6 Sliders".into()],
+            manifest_preview: String::new(),
+            resource_cfg_update: None,
+            can_execute: true,
+            analysis_before: OrganizationAnalysisSnapshot::from_scan(
+                "analysis_before",
+                &crate::scanner::ScanStats::default(),
+            ),
+        };
+
+        let result = execute_organization_plan_core(plan, AppLanguage::Pt, false, None, Vec::new())
+            .expect("empty cleanup plan");
+        assert_eq!(result.status, "NO_CHANGES");
+        assert!(result.old_folders_removed >= 2);
+        assert!(!legacy.parent().unwrap().exists());
+        assert!(canonical.is_dir());
         fs::remove_dir_all(base).unwrap();
     }
 

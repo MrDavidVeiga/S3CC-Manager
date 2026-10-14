@@ -1063,6 +1063,12 @@ pub struct OrganizationPlan {
     /// cleanup. They may be intentionally empty in the manual model.
     #[serde(default)]
     pub protected_empty_directories: Vec<String>,
+    /// Explicit directory selections are carried into execution so a run
+    /// with no package moves can still remove empty legacy descendants. These
+    /// are relative to the selected root and never authorize deletion of the
+    /// selected root itself.
+    #[serde(default)]
+    pub cleanup_roots: Vec<String>,
     pub manifest_preview: String,
     pub resource_cfg_update: Option<ResourceCfgUpdate>,
     pub can_execute: bool,
@@ -2749,6 +2755,8 @@ fn scan_selected_roots(
             root: root.to_string_lossy().to_string(),
             items: Vec::new(),
             stats: ScanStats::default(),
+            cache_hit: false,
+            reused_packages: 0,
         });
     }
     if selected.len() >= 512 {
@@ -2886,6 +2894,17 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         }
     }
 
+    let cleanup_roots = selected_roots
+        .iter()
+        .filter_map(|path| path.strip_prefix(&root).ok())
+        .map(|relative| {
+            let key = relative_key(relative);
+            if key.is_empty() { ".".to_string() } else { key }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
     let workspace = load_workspace_for_root(&root);
     let profile = active_profile(&workspace);
     let resource_cfg = resource_cfg_context(&root);
@@ -2896,6 +2915,8 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             root: root.to_string_lossy().to_string(),
             items: Vec::new(),
             stats: ScanStats::default(),
+            cache_hit: false,
+            reused_packages: 0,
         }
     } else {
         match cached_scan_for(&root, language) {
@@ -4080,6 +4101,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         manifest_preview: manifest_preview(&root, language, &ready_items),
         directories_to_create: directories.into_iter().collect(),
         protected_empty_directories,
+        cleanup_roots,
         resource_cfg_update,
         stats: stats.clone(),
         items,
@@ -5259,6 +5281,7 @@ mod tests {
             stats: PlanStats::default(),
             directories_to_create: Vec::new(),
             protected_empty_directories: Vec::new(),
+            cleanup_roots: Vec::new(),
             manifest_preview: String::new(),
             resource_cfg_update: None,
             can_execute: true,

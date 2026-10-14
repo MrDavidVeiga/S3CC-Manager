@@ -117,6 +117,17 @@ fn quick_fingerprint(path: &Path, size: u64) -> Result<String, String> {
     Ok(format!("{:X}", digest.finalize()))
 }
 
+/// Bounded fingerprint used by read-only analysis caches. This is deliberately
+/// not an integrity proof: mutating operations must still use the full
+/// SHA-256 path. It prevents an unchanged scan from reopening and decoding
+/// every DBPF while still detecting ordinary external edits, including edits
+/// made without changing the file size.
+pub fn analysis_file_fingerprint(path: &Path) -> Result<(u64, u128, String), String> {
+    let (size, modified_ns) = metadata_signature(path)?;
+    let fingerprint = quick_fingerprint(path, size)?;
+    Ok((size, modified_ns, fingerprint))
+}
+
 fn canonical_key(path: &Path) -> Result<String, String> {
     Ok(path
         .canonicalize()

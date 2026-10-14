@@ -8380,8 +8380,15 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
     state.selectedId = visibleItems()[0]?.id || "";
     if (preserveNotice) state.notice = previousNotice;
     state.analysisStatus.manager = "completed";
-    state.duplicatesAnalysis = null;
-    state.conflictsAnalysis = null;
+    // A cache-hit scan has already validated the package set, language and
+    // classification context. Keep matching duplicate/conflict results so a
+    // second click does not immediately reopen every package; a fresh scan
+    // still invalidates both analyses exactly as before.
+    const reusedScan = result.cacheHit === true;
+    const keepDuplicates = reusedScan && !!oldDuplicates;
+    const keepConflicts = reusedScan && !!oldConflicts;
+    state.duplicatesAnalysis = keepDuplicates ? oldDuplicates : null;
+    state.conflictsAnalysis = keepConflicts ? oldConflicts : null;
     state.conflictReviewSelected.clear();
     state.conflictsSelectedOnly = false;
     conflictVisibleMemo.analysis = null;
@@ -8395,8 +8402,8 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
     state.quarantinePlan = null;
     closeDuplicateDetails();
     closeConflictDetails();
-    state.analysisStatus.duplicates = "queued";
-    state.analysisStatus.conflicts = "queued";
+    state.analysisStatus.duplicates = keepDuplicates ? "completed" : "queued";
+    state.analysisStatus.conflicts = keepConflicts ? "completed" : "queued";
     scanSucceeded = true;
   } catch (error) {
     const message = String(error);
@@ -8435,8 +8442,11 @@ async function runAutomaticAnalyses(folder, runId) {
   if (!analysisSessionMatches(folder, runId) || state.analysisPipelineBusy) return;
   state.analysisPipelineBusy = true;
   try {
-    await analyzeDuplicates({ automated: true, folder, runId });
-    if (analysisSessionMatches(folder, runId)) {
+    if (state.analysisStatus.duplicates === "queued") {
+      await analyzeDuplicates({ automated: true, folder, runId });
+    }
+    if (analysisSessionMatches(folder, runId) &&
+        state.analysisStatus.conflicts === "queued") {
       await analyzeConflicts({ automated: true, folder, runId });
     }
   } finally {
