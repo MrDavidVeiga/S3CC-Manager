@@ -367,6 +367,71 @@ fn relation_id(kind: &str, left: &PackageFingerprint, right: &PackageFingerprint
     format!("{kind}:{}", &digest[..16])
 }
 
+fn relation_id_for_members(kind: &str, left: &DuplicateMember, right: &DuplicateMember) -> String {
+    let mut paths = [left.relative_path.clone(), right.relative_path.clone()];
+    paths.sort();
+    let digest = format!("{:X}", Sha256::digest(format!("{kind}|{}|{}", paths[0], paths[1]).as_bytes()));
+    format!("{kind}:{}", &digest[..16])
+}
+
+fn move_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+/// Exact-content membership is unaffected by a verified rename. Update only
+/// the presentation paths and relation identifiers instead of traversing and
+/// comparing the full library again after organization.
+pub(crate) fn reconcile_moved_paths(
+    analysis: &mut DuplicateAnalysis,
+    root: &Path,
+    moves: &[(PathBuf, PathBuf)],
+) {
+    let changed = moves
+        .iter()
+        .map(|(source, destination)| {
+            (
+                move_path_key(source),
+                destination.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let update = |member: &mut DuplicateMember| {
+        let key = move_path_key(Path::new(&member.path));
+        let Some(destination) = changed.get(&key) else {
+            return false;
+        };
+        let destination = destination
+            .canonicalize()
+            .unwrap_or_else(|_| destination.to_path_buf());
+        member.path = destination.to_string_lossy().to_string();
+        member.relative_path = destination
+            .strip_prefix(root)
+            .unwrap_or(&destination)
+            .to_string_lossy()
+            .replace('/', "\\");
+        member.name = destination
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| member.name.clone());
+        true
+    };
+    for group in &mut analysis.groups {
+        for member in &mut group.members {
+            update(member);
+        }
+    }
+    for relation in &mut analysis.relations {
+        let changed_relation = update(&mut relation.left) | update(&mut relation.right);
+        if changed_relation {
+            relation.id = relation_id_for_members(&relation.kind, &relation.left, &relation.right);
+        }
+    }
+}
+
 fn pair_metrics(
     left: &PackageFingerprint,
     right: &PackageFingerprint,

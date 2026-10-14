@@ -9047,7 +9047,11 @@ function reconcileSuccessfulOrganization(result) {
   // It must invalidate the stale preview without pretending packages moved.
   if (!Array.isArray(moved)) return;
 
-  const key = path => String(path || "").replaceAll("\\", "/").toLocaleLowerCase();
+  const key = path => String(path || "")
+    .replace(/^\\\\\?\\/, "")
+    .replaceAll("\\", "/")
+    .replace(/\/+$/, "")
+    .toLocaleLowerCase();
   const bySource = new Map(moved.map(move => [key(move.sourcePath), move]));
   const priorSelection = state.selectedId;
   const selectedMove = bySource.get(key(priorSelection));
@@ -9068,6 +9072,28 @@ function reconcileSuccessfulOrganization(result) {
   virtualViews.manager.items = null;
   managerVisibleMemo.items = null;
 
+  const reconcileMember = member => {
+    const move = bySource.get(key(member?.path));
+    if (!move) return;
+    member.path = move.destinationPath;
+    member.relativePath = move.destinationRelativePath;
+    member.name = String(move.destinationPath || "").split(/[\\/]/).pop() || member.name;
+  };
+  const sharedAnalysisReconciled = result.analysisReconciled === true;
+  if (sharedAnalysisReconciled) {
+    for (const group of state.duplicatesAnalysis?.groups || []) {
+      for (const member of group.members || []) reconcileMember(member);
+    }
+    for (const relation of state.duplicatesAnalysis?.relations || []) {
+      reconcileMember(relation.left);
+      reconcileMember(relation.right);
+    }
+    for (const finding of state.conflictsAnalysis?.findings || []) {
+      reconcileMember(finding.left);
+      reconcileMember(finding.right);
+    }
+  }
+
   // Pre-move absolute paths must never leak into previews or future actions.
   state.packagePreviews = {};
   state.packagePreviewLoading = {};
@@ -9077,19 +9103,17 @@ function reconcileSuccessfulOrganization(result) {
   state.technicalDetailsErrors = {};
   state.technicalDetailsOpen.clear();
 
-  // Moved paths invalidate only the affected shared result.  Do not start a
-  // fresh duplicate/conflict traversal here: the next explicit analysis will
-  // rebuild all three views together from the changed inventory.
-  state.analysisRunId += 1;
-  state.duplicatesAnalysis = null;
-  state.conflictsAnalysis = null;
+  // Backend reconciliation changes only verified paths/load precedence and
+  // never decodes DBPFs again. When the shared index was unavailable, keep
+  // the Organizer current but mark only dependent relationship views stale.
+  if (!sharedAnalysisReconciled) state.analysisRunId += 1;
   state.analysisStatus.manager = "completed";
-  state.analysisStatus.duplicates = "stale";
-  state.analysisStatus.conflicts = "stale";
+  state.analysisStatus.duplicates = sharedAnalysisReconciled ? "completed" : "stale";
+  state.analysisStatus.conflicts = sharedAnalysisReconciled ? "completed" : "stale";
   state.duplicatesError = "";
   state.conflictsError = "";
-  state.duplicatesNotice = t("analysisNeedsRefresh");
-  state.conflictsNotice = t("analysisNeedsRefresh");
+  state.duplicatesNotice = sharedAnalysisReconciled ? "" : t("analysisNeedsRefresh");
+  state.conflictsNotice = sharedAnalysisReconciled ? "" : t("analysisNeedsRefresh");
   state.duplicateSelectedId = "";
   state.conflictSelectedId = "";
   state.quarantineSelected.clear();
@@ -9161,6 +9185,8 @@ async function executeOrganization() {
         analysisBefore: result.analysisBefore ?? completedPlan.analysisBefore ?? null,
         execution: result.execution ?? null,
         analysisCurrent: result.analysisCurrent ?? null,
+        timings: result.timings ?? null,
+        analysisReconciled: result.analysisReconciled === true,
       };
       state.organizationCollisionItems = collisionItems;
 

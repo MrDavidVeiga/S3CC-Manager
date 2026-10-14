@@ -10,7 +10,6 @@ use crate::{
     },
     resource_cfg::{package_priority, parse_resource_cfg},
     resource_cfg_update::{apply_resource_cfg_update, rollback_resource_cfg_update},
-    scanner::invalidate_latest_scan_for,
     unified_analysis,
     workspace::ensure_writable,
 };
@@ -20,6 +19,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 use walkdir::WalkDir;
 
@@ -44,6 +44,23 @@ pub struct ExecutionResult {
     pub analysis_before: OrganizationAnalysisSnapshot,
     pub execution: OrganizationAnalysisSnapshot,
     pub analysis_current: Option<OrganizationAnalysisSnapshot>,
+    #[serde(default)]
+    pub analysis_reconciled: bool,
+    #[serde(default)]
+    pub timings: ExecutionTimings,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionTimings {
+    pub total_ms: u128,
+    pub preflight_ms: u128,
+    pub manifest_ms: u128,
+    pub resource_cfg_ms: u128,
+    pub moving_ms: u128,
+    pub integrity_ms: u128,
+    pub cleanup_ms: u128,
+    pub cache_reconcile_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -404,6 +421,28 @@ fn cleanup_empty_directories_after_organization_scoped(
     cleanup_empty_directories_after_organization_with_protected(root, moved_pairs, scope_roots, &[])
 }
 
+fn cleanup_remove_diagnostic(folder: &Path, error: &std::io::Error) -> String {
+    let readonly = fs::metadata(folder)
+        .map(|metadata| metadata.permissions().readonly())
+        .unwrap_or(false);
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        if readonly {
+            return format!(
+                "Windows denied removal of verified-empty legacy folder {} because it is read-only; it was preserved without changing attributes or ACLs: {error}",
+                folder.display()
+            );
+        }
+        return format!(
+            "Windows denied removal of verified-empty legacy folder {} after the Manager released its enumeration handle; it may be held by another process or restricted by its ACL. The folder was preserved and no privilege or ACL change was attempted: {error}",
+            folder.display()
+        );
+    }
+    format!(
+        "Could not remove verified-empty legacy folder {}: {error}",
+        folder.display()
+    )
+}
+
 fn cleanup_empty_directories_after_organization_with_protected(
     root: &Path,
     _moved_pairs: &[(PathBuf, PathBuf, String, u64)],
@@ -557,10 +596,7 @@ fn cleanup_empty_directories_after_organization_with_protected(
                 match fs::read_dir(&folder) {
                     Ok(mut contents) => {
                         if contents.next().is_none() {
-                            warnings.push(format!(
-                                "Could not remove verified-empty legacy folder {}: {error}",
-                                folder.display()
-                            ));
+                            warnings.push(cleanup_remove_diagnostic(&folder, &error));
                         }
                     }
                     Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
@@ -854,8 +890,12 @@ fn execute_organization_plan_core(
     // execution, and the rollback manifest records only ready movements.
     let root = PathBuf::from(&plan.root);
     ensure_writable(&root)?;
+    let total_started = Instant::now();
+    let mut timings = ExecutionTimings::default();
     let ready = ready_items(&plan.items);
+    let preflight_started = Instant::now();
     validate_ready_execution_paths(&root, &ready)?;
+    timings.preflight_ms = preflight_started.elapsed().as_millis();
     let move_total = ready.len();
     operation::update("organize", 0, None, "preparing");
 
@@ -864,6 +904,7 @@ fn execute_organization_plan_core(
         // directories. Clean only genuinely empty ones, even if no new move
         // was necessary. Never remove files or the Packages/Overrides roots.
         let cleanup_roots = universal_cleanup_roots(&root);
+        let cleanup_started = Instant::now();
         let (removed, retained, cleanup_warnings) =
             cleanup_empty_directories_after_organization_with_protected(
                 &root,
@@ -871,6 +912,8 @@ fn execute_organization_plan_core(
                 Some(&cleanup_roots),
                 &plan.protected_empty_directories,
             );
+        timings.cleanup_ms = cleanup_started.elapsed().as_millis();
+        timings.total_ms = total_started.elapsed().as_millis();
         let remaining_legacy_details = remaining_legacy_details(&root, &[], &plan.items);
         let remaining_legacy_files = remaining_legacy_details.len();
         let remaining_legacy_examples = remaining_legacy_details
@@ -899,9 +942,12 @@ fn execute_organization_plan_core(
                 .clone()
                 .with_plan(&plan.stats, remaining_legacy_files),
             analysis_current,
+            analysis_reconciled: true,
+            timings,
         });
     }
 
+    let manifest_started = Instant::now();
     let manifest_path = make_manifest_path(&root)?;
     // The verified plan already carries every ready source identity. A
     // transaction needs a durable rollback record for files it can mutate,
@@ -913,7 +959,9 @@ fn execute_organization_plan_core(
         manifest_from_snapshot(&root, language, snapshot, &plan.directories_to_create);
     // Persist recovery information before touching Resource.cfg or CC files.
     write_manifest_atomic(&manifest_path, &manifest)?;
+    timings.manifest_ms = manifest_started.elapsed().as_millis();
 
+    let resource_cfg_started = Instant::now();
     let mut applied_cfg = None;
     if update_resource_cfg {
         let change = plan
@@ -979,9 +1027,11 @@ fn execute_organization_plan_core(
             }
         }
     }
+    timings.resource_cfg_ms = resource_cfg_started.elapsed().as_millis();
 
     operation::set_total("organize", move_total);
     operation::update("organize", 0, None, "moving");
+    let moving_started = Instant::now();
     let mut moved_pairs: Vec<(PathBuf, PathBuf, String, u64)> = Vec::new();
     let mut errors = Vec::new();
 
@@ -1053,12 +1103,14 @@ fn execute_organization_plan_core(
             }
         }
     }
+    timings.moving_ms = moving_started.elapsed().as_millis();
 
     // A rename is atomic, but the transaction still performs an explicit
     // destination identity check before any legacy-folder cleanup. If an
     // external process changed a moved file, the existing rollback path below
     // restores every verified pair and no cleanup is attempted.
     if errors.is_empty() {
+        let integrity_started = Instant::now();
         operation::set_total("organize", moved_pairs.len().max(1));
         operation::update("organize", 0, None, "integrity_check");
         for (index, (_, destination, expected_hash, expected_size)) in
@@ -1073,6 +1125,7 @@ fn execute_organization_plan_core(
             }
             operation::update("organize", index + 1, None, "integrity_check");
         }
+        timings.integrity_ms = integrity_started.elapsed().as_millis();
     }
 
     if !errors.is_empty() {
@@ -1176,11 +1229,17 @@ fn execute_organization_plan_core(
             analysis_before: plan.analysis_before.clone(),
             execution: plan.analysis_before.clone().with_plan(&plan.stats, 0),
             analysis_current: None,
+            analysis_reconciled: false,
+            timings: ExecutionTimings {
+                total_ms: total_started.elapsed().as_millis(),
+                ..timings
+            },
         });
     }
 
     operation::set_total("organize", 1);
     operation::update("organize", 0, None, "cleaning");
+    let cleanup_started = Instant::now();
     let cleanup_roots = universal_cleanup_roots(&root);
     let (old_folders_removed, old_folders_retained, cleanup_warnings) =
         cleanup_empty_directories_after_organization_with_protected(
@@ -1189,6 +1248,7 @@ fn execute_organization_plan_core(
             Some(&cleanup_roots),
             &plan.protected_empty_directories,
         );
+    timings.cleanup_ms = cleanup_started.elapsed().as_millis();
 
     let remaining_legacy_details = remaining_legacy_details(&root, &moved_pairs, &plan.items);
     let remaining_legacy_files = remaining_legacy_details.len();
@@ -1202,10 +1262,26 @@ fn execute_organization_plan_core(
     replace_manifest_atomic(&manifest_path, &manifest)?;
     operation::update("organize", 1, None, "complete");
 
-    // Invalidate the Rust scan cache before any later plan preview: the
-    // cache contains pre-move absolute paths and must never be reused.
-    invalidate_latest_scan_for(&root);
-    unified_analysis::invalidate_for(&root);
+    let cache_reconcile_started = Instant::now();
+    let moved_path_pairs = moved_pairs
+        .iter()
+        .map(|(source, destination, _, _)| (source.clone(), destination.clone()))
+        .collect::<Vec<_>>();
+    let analysis_reconciled = match unified_analysis::reconcile_organization_moves(
+        &root,
+        language,
+        &moved_path_pairs,
+    ) {
+        Ok(reconciled) => reconciled,
+        Err(error) => {
+            errors.push(format!(
+                "Organization completed, but shared analysis needs refresh: {error}"
+            ));
+            false
+        }
+    };
+    timings.cache_reconcile_ms = cache_reconcile_started.elapsed().as_millis();
+    timings.total_ms = total_started.elapsed().as_millis();
     let analysis_current = Some(incremental_current_snapshot(&plan, remaining_legacy_files));
     let moved_files = moved_pairs
         .iter()
@@ -1243,6 +1319,8 @@ fn execute_organization_plan_core(
             .clone()
             .with_plan(&plan.stats, remaining_legacy_files),
         analysis_current,
+        analysis_reconciled,
+        timings,
     })
 }
 

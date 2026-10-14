@@ -219,6 +219,14 @@ fn stable_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn move_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
 fn remember_latest_scan(result: &ScanResult, language: AppLanguage) {
     let root = stable_path(Path::new(&result.root));
     if let Ok(mut slot) = latest_scan_slot().lock() {
@@ -326,6 +334,62 @@ pub fn invalidate_latest_scan_for(root: &Path) {
             *slot = None;
         }
     }
+}
+
+/// Update the presentation cache after executor-verified renames. This keeps
+/// Organizer paths current without reopening DBPFs; any later external change
+/// still invalidates the snapshot through `current_package_signatures`.
+pub(crate) fn reconcile_latest_scan_moves(
+    root: &Path,
+    language: AppLanguage,
+    moves: &[(PathBuf, PathBuf)],
+) -> bool {
+    if moves.is_empty() {
+        return true;
+    }
+    let canonical_root = stable_path(root);
+    let signatures = current_package_signatures(&canonical_root);
+    let mut slot = match latest_scan_slot().lock() {
+        Ok(slot) => slot,
+        Err(_) => return false,
+    };
+    let Some(latest) = slot.as_mut() else {
+        return false;
+    };
+    if latest.root != canonical_root || latest.language != language {
+        return false;
+    }
+
+    for (source, destination) in moves {
+        let source_key = move_path_key(source);
+        let Some(item) = latest.result.items.iter_mut().find(|item| {
+            move_path_key(Path::new(&item.path)) == source_key
+        }) else {
+            // A move for an auxiliary file is not represented in ScanResult.
+            continue;
+        };
+        let destination = stable_path(destination);
+        let relative = destination
+            .strip_prefix(&canonical_root)
+            .unwrap_or(&destination)
+            .to_string_lossy()
+            .replace('/', "\\");
+        let path = destination.to_string_lossy().to_string();
+        item.id = path.clone();
+        item.path = path;
+        item.relative_path = relative;
+        item.name = destination
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| item.name.clone());
+    }
+    latest.file_signatures = signatures;
+    latest.result.cache_hit = true;
+    latest.result.reused_packages = latest.result.items.len();
+    latest.result.stats.cache_hit = true;
+    latest.result.stats.reused_packages = latest.result.items.len();
+    save_persistent_scan(latest);
+    true
 }
 
 fn package_extension(path: &Path) -> bool {

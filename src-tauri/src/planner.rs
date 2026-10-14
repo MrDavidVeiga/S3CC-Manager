@@ -18,6 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Component, Path, PathBuf},
+    time::Instant,
 };
 use walkdir::WalkDir;
 
@@ -64,6 +65,8 @@ pub struct PlanStats {
     /// after the ready operations are applied.
     #[serde(default)]
     pub legacy_folders_retained: usize,
+    #[serde(default)]
+    pub planning_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3193,6 +3196,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     selected_paths: Vec<String>,
     update_resource_cfg: bool,
 ) -> Result<OrganizationPlan, String> {
+    let planning_started = Instant::now();
     let root_input = PathBuf::from(folder.trim());
     let root = root_input
         .canonicalize()
@@ -4470,6 +4474,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         None
     };
 
+    stats.planning_ms = planning_started.elapsed().as_millis();
     Ok(OrganizationPlan {
         root: root.to_string_lossy().to_string(),
         manifest_preview: manifest_preview(&root, language, &ready_items),
@@ -4781,7 +4786,9 @@ mod tests {
 
     #[test]
     fn flat_duplicate_migration_is_idempotent_after_relocation() {
-        let base = std::env::temp_dir().join(format!(
+        // Keep the fixture under the workspace: sandboxed Windows temp folders
+        // can deny rename even though the production move is correct.
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(format!(
             "s3cc-duplicate-flat-idempotent-{}",
             std::process::id()
         ));
@@ -6252,7 +6259,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let base = std::env::temp_dir().join(format!(
+        // This test renames a model fixture; place it in the workspace so the
+        // test exercises the planner rather than a sandbox TEMP restriction.
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(format!(
             "s3cc-ambiguous-model-destination-{}-{nonce}",
             std::process::id()
         ));

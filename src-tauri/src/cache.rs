@@ -34,6 +34,14 @@ fn root_cache_key(root: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+fn move_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CacheBuildMetrics {
     pub cache_hit: bool,
@@ -258,6 +266,53 @@ pub fn save_cache(root: &Path, cache: &FingerprintCache) -> Result<(), String> {
 
     fs::rename(&temp, &path)
         .map_err(|error| format!("Could not commit cache {}: {error}", path.display()))
+}
+
+/// Rename cache keys after a verified same-volume file move. The resource
+/// index remains valid because the executor has already verified the source
+/// SHA-256 and `rename` does not alter package bytes. This is deliberately not
+/// an integrity shortcut for future writes: executor preflight still hashes
+/// every source in a new transaction.
+pub fn relocate_cached_entries(root: &Path, moves: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    if moves.is_empty() {
+        return Ok(());
+    }
+    let mut cache = load_cache(root);
+    for (source, destination) in moves {
+        let source_key = move_path_key(source);
+        let matching_key = cache
+            .entries
+            .keys()
+            .find(|key| move_path_key(Path::new(key)) == source_key)
+            .cloned();
+        let Some(key) = matching_key else {
+            // Auxiliary files and pre-existing cache misses have no DBPF
+            // entry to relocate. They do not invalidate other packages.
+            continue;
+        };
+        let mut cached = cache.entries.remove(&key).expect("cache key exists");
+        let destination_key = canonical_key(destination)?;
+        if cache.entries.contains_key(&destination_key) {
+            return Err(format!(
+                "Cache destination collision after verified move: {}",
+                destination.display()
+            ));
+        }
+        let (size, modified_ns) = metadata_signature(destination)?;
+        cached.path = destination_key.clone();
+        cached.size = size;
+        cached.modified_ns = modified_ns;
+        // The bounded probe is refreshed from the moved file. It is not a
+        // replacement for SHA-256 when a later transaction is authorized.
+        cached.quick_fingerprint = quick_fingerprint(destination, size)?;
+        cache.entries.insert(destination_key, cached);
+    }
+    // The in-memory root cache is updated before the persistent write. A
+    // locked cache file must not invalidate an otherwise verified organizer
+    // transaction or force a DBPF rescan; the next successful cache write
+    // will persist the same entries.
+    let _ = save_cache(root, &cache);
+    Ok(())
 }
 
 pub fn get_or_build_with_metrics(

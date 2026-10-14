@@ -475,6 +475,111 @@ fn package_ref(package: &PackageInfo) -> ConflictPackage {
     }
 }
 
+fn package_info_from_reference(reference: &ConflictPackage) -> PackageInfo {
+    PackageInfo {
+        name: reference.name.clone(),
+        path: PathBuf::from(&reference.path),
+        relative_path: PathBuf::from(&reference.relative_path),
+        file_sha256: reference.file_sha256.clone(),
+        readable: true,
+        resource_count: 0,
+        resource_set_sha256: None,
+        load_priority: reference.load_priority,
+        load_rule: reference.load_rule.clone(),
+    }
+}
+
+fn move_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+/// Reconcile findings after executor-verified renames without rebuilding the
+/// resource index. A rename cannot create or remove shared TGIs, so only the
+/// moved package references and their Resource.cfg load precedence change.
+pub(crate) fn reconcile_moved_paths(
+    analysis: &mut ConflictAnalysis,
+    root: &Path,
+    moves: &[(PathBuf, PathBuf)],
+) -> Result<(), String> {
+    if moves.is_empty() {
+        return Ok(());
+    }
+    let changed = moves
+        .iter()
+        .map(|(source, destination)| {
+            (
+                move_path_key(source),
+                destination.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let resource_cfg = find_resource_cfg(root)
+        .map(|path| parse_resource_cfg(&path))
+        .transpose()?;
+    let cfg_directory = resource_cfg
+        .as_ref()
+        .and_then(|cfg| PathBuf::from(&cfg.path).parent().map(Path::to_path_buf));
+    let reliable = resource_cfg
+        .as_ref()
+        .map(|cfg| cfg.precedence_reliable)
+        .unwrap_or(false);
+
+    let mut inactive_pairs = 0usize;
+    for finding in &mut analysis.findings {
+        let mut finding_changed = false;
+        for reference in [&mut finding.left, &mut finding.right] {
+            let key = move_path_key(Path::new(&reference.path));
+            let Some(destination) = changed.get(&key) else {
+                continue;
+            };
+            let destination = destination
+                .canonicalize()
+                .unwrap_or_else(|_| destination.to_path_buf());
+            reference.path = destination.to_string_lossy().to_string();
+            reference.relative_path = destination
+                .strip_prefix(root)
+                .unwrap_or(&destination)
+                .to_string_lossy()
+                .replace('/', "\\");
+            reference.name = destination
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| reference.name.clone());
+            let priority = match (&resource_cfg, &cfg_directory) {
+                (Some(cfg), Some(directory)) => package_priority(cfg, directory, &destination),
+                _ => None,
+            };
+            reference.load_priority = priority.as_ref().map(|value| value.priority);
+            reference.load_rule = priority.map(|value| value.rule);
+            finding_changed = true;
+        }
+        if finding_changed {
+            let left = package_info_from_reference(&finding.left);
+            let right = package_info_from_reference(&finding.right);
+            let (status, higher, explanation) =
+                load_order_info(&left, &right, resource_cfg.is_some(), reliable);
+            let impacts = finding.impact_kinds.iter().cloned().collect::<BTreeSet<_>>();
+            finding.id = pair_id(&left, &right);
+            finding.load_order_status = status.clone();
+            finding.higher_priority_path = higher;
+            finding.load_order_explanation_key = explanation;
+            finding.severity = finding_severity(&finding.kind, &impacts, &status, reliable).to_string();
+        }
+        if reliable
+            && matches!(finding.load_order_status.as_str(), "unmatched" | "partially_matched")
+        {
+            inactive_pairs += 1;
+        }
+    }
+    analysis.resource_cfg = resource_cfg;
+    analysis.stats.inactive_pairs = inactive_pairs;
+    Ok(())
+}
+
 fn load_order_info(
     left: &PackageInfo,
     right: &PackageInfo,

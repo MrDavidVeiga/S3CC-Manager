@@ -4,13 +4,17 @@
 //! DBPF resource index consumed by duplicate and conflict comparison.
 
 use crate::{
+    cache,
     conflicts::{analyze_conflicts_core, ConflictAnalysis},
     duplicates::{analyze_duplicates_core_from_shared_index, DuplicateAnalysis},
     i18n::AppLanguage,
     manifest::sha256_file,
     operation::{self, CANCELLED_ERROR},
     resource_cfg::find_resource_cfg,
-    scanner::{current_package_signatures, scan_packages_core_quiet_progress, ScanResult},
+    scanner::{
+        current_package_signatures, reconcile_latest_scan_moves, scan_packages_core_quiet_progress,
+        ScanResult,
+    },
 };
 use serde::Serialize;
 use std::{
@@ -71,6 +75,14 @@ fn stable_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn move_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
 fn optional_file_hash(path: Option<PathBuf>) -> String {
     match path {
         Some(path) if path.is_file() => sha256_file(&path)
@@ -108,6 +120,99 @@ pub fn invalidate_for(root: &Path) {
             *slot = None;
         }
     }
+}
+
+fn reconcile_scan_paths(scan: &mut ScanResult, root: &Path, moves: &[(PathBuf, PathBuf)]) {
+    let changed = moves
+        .iter()
+        .map(|(source, destination)| {
+            (
+                move_path_key(source),
+                destination.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for item in &mut scan.items {
+        let Some(destination) = changed.get(&move_path_key(Path::new(&item.path))) else {
+            continue;
+        };
+        let destination = stable_path(destination);
+        let path = destination.to_string_lossy().to_string();
+        item.id = path.clone();
+        item.path = path;
+        item.relative_path = destination
+            .strip_prefix(root)
+            .unwrap_or(&destination)
+            .to_string_lossy()
+            .replace('/', "\\");
+        item.name = destination
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| item.name.clone());
+    }
+    scan.cache_hit = true;
+    scan.reused_packages = scan.items.len();
+    scan.stats.cache_hit = true;
+    scan.stats.reused_packages = scan.items.len();
+}
+
+/// Apply executor-verified renames to the shared analysis. This path performs
+/// no DBPF parsing or duplicate/conflict rediscovery: classification evidence,
+/// SHA-256 values and resource relationships are unchanged by a same-volume
+/// rename. It updates only presentation paths and Resource.cfg precedence for
+/// existing conflict findings.
+pub(crate) fn reconcile_organization_moves(
+    root: &Path,
+    language: AppLanguage,
+    moves: &[(PathBuf, PathBuf)],
+) -> Result<bool, String> {
+    if moves.is_empty() {
+        return Ok(true);
+    }
+    let root = stable_path(root);
+    cache::relocate_cached_entries(&root, moves)?;
+    let scanner_reconciled = reconcile_latest_scan_moves(&root, language, moves);
+
+    let mut cached = {
+        let mut slot = latest_slot()
+            .lock()
+            .map_err(|_| "Unified analysis cache lock is poisoned.")?;
+        slot.take()
+    };
+    let Some(mut cached_value) = cached.take() else {
+        return Ok(false);
+    };
+    if cached_value.root != root || cached_value.language != language {
+        let mut slot = latest_slot()
+            .lock()
+            .map_err(|_| "Unified analysis cache lock is poisoned.")?;
+        *slot = Some(cached_value);
+        return Ok(false);
+    }
+
+    let reconcile_result = (|| -> Result<(), String> {
+        reconcile_scan_paths(&mut cached_value.result.scan, &root, moves);
+        crate::duplicates::reconcile_moved_paths(&mut cached_value.result.duplicates, &root, moves);
+        crate::conflicts::reconcile_moved_paths(&mut cached_value.result.conflicts, &root, moves)?;
+        cached_value.file_signatures = current_package_signatures(&root);
+        cached_value.result.stats.package_reads = 0;
+        cached_value.result.stats.dbpf_load_ms = 0;
+        cached_value.result.stats.resource_decode_ms = 0;
+        cached_value.result.stats.full_hash_ms = 0;
+        cached_value.result.stats.cache_hits = cached_value.result.scan.items.len();
+        cached_value.result.stats.cache_misses = 0;
+        cached_value.result.stats.scan_cache_reused = true;
+        cached_value.result.stats.unified_cache_reused = true;
+        cached_value.result.stats.duplicate_passes = 0;
+        cached_value.result.stats.conflict_passes = 0;
+        Ok(())
+    })();
+    let mut slot = latest_slot()
+        .lock()
+        .map_err(|_| "Unified analysis cache lock is poisoned.")?;
+    *slot = Some(cached_value);
+    reconcile_result?;
+    Ok(scanner_reconciled)
 }
 
 pub(crate) fn analyze_unified_core(
@@ -264,7 +369,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("s3cc-unified-analysis-{nonce}"));
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("s3cc-unified-analysis-{nonce}"));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("a.package"), minimal_dbpf(7)).unwrap();
         fs::write(root.join("b.package"), minimal_dbpf(7)).unwrap();
@@ -294,6 +402,35 @@ mod tests {
             second.conflicts.findings.len(),
             first.conflicts.findings.len()
         );
+
+        // A verified same-volume rename updates every shared view in place:
+        // no DBPF is reopened, duplicate members keep their identity, and a
+        // subsequent Analyze request is a cache reuse rather than a rescan.
+        let moved = root.join("Sliders").join("a.package");
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        fs::rename(root.join("a.package"), &moved).unwrap();
+        assert!(reconcile_organization_moves(
+            &root,
+            AppLanguage::Pt,
+            &[(root.join("a.package"), moved.clone())],
+        )
+        .expect("reconcile verified rename"));
+        let after_move =
+            analyze_unified_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
+                .expect("reused unified analysis after move");
+        assert!(after_move.stats.unified_cache_reused);
+        assert_eq!(after_move.stats.package_reads, 0);
+        assert!(after_move
+            .scan
+            .items
+            .iter()
+            .any(|item| item.relative_path == "Sliders\\a.package"));
+        assert!(after_move.duplicates.groups.iter().any(|group| {
+            group
+                .members
+                .iter()
+                .any(|member| member.relative_path == "Sliders\\a.package")
+        }));
 
         // A single changed package invalidates the unified result, but the
         // scanner keeps the unaffected item's classification and resource

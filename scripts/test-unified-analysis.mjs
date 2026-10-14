@@ -21,6 +21,11 @@ assert.match(unified, /unified_cache_reused/);
 assert.match(unified, /UnifiedAnalysisStats::default\(\)/);
 assert.match(unified, /assert_eq!\(second\.stats\.duplicate_passes, 0\)/);
 assert.match(unified, /assert_eq!\(second\.stats\.conflict_passes, 0\)/);
+assert.match(unified, /reconcile_organization_moves/);
+assert.match(unified, /duplicate_passes = 0/);
+assert.match(unified, /conflict_passes = 0/);
+assert.match(scanner, /reconcile_latest_scan_moves/);
+assert.match(cache, /relocate_cached_entries/);
 assert.match(scanner, /PersistentScan/);
 assert.match(cache, /analysis-snapshot-v1\.json/);
 assert.match(planner, /get_or_build_analysis_with_metrics/);
@@ -36,6 +41,8 @@ assert.match(app, /async function analyzeConflicts\(\)[\s\S]*runUnifiedAnalysis/
 assert.doesNotMatch(app, /runAutomaticAnalyses/);
 assert.match(app, /showOperationResult/);
 assert.match(html, /id="operation-result-modal"/);
+assert.match(app, /sharedAnalysisReconciled = result\.analysisReconciled === true/);
+assert.match(app, /state\.analysisStatus\.duplicates = sharedAnalysisReconciled \? "completed" : "stale"/);
 
 const functionSlice = (name) => {
   const start = app.indexOf(`async function ${name}`);
