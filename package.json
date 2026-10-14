@@ -17,7 +17,8 @@
     "test:analysis-action-flow": "node scripts/test-analysis-action-flow.mjs",
     "test:health-diagnostics": "node scripts/test-health-diagnostics.mjs",
     "test:performance-architecture": "node scripts/test-performance-architecture.mjs",
-    "test:language-theme-ui": "node scripts/test-language-theme-ui.mjs"
+    "test:language-theme-ui": "node scripts/test-language-theme-ui.mjs",
+    "test:planning-duplicate-loading": "node scripts/test-planning-duplicate-loading.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

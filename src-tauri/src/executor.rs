@@ -202,7 +202,9 @@ fn incremental_current_snapshot(
 fn package_extension(path: &Path) -> bool {
     let lower = path.file_name().map(|v| v.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    lower.ends_with(".package") || lower.ends_with(".package.disabled")
+    lower.ends_with(".package")
+        || lower.ends_with(".package.disabled")
+        || lower.ends_with(".package.duplicated")
 }
 
 fn snapshot_extension(path: &Path) -> bool {
@@ -1000,6 +1002,25 @@ fn execute_organization_plan_core(
                 errors.push(error);
                 break;
             }
+        }
+    }
+
+    // A rename is atomic, but the transaction still performs an explicit
+    // destination identity check before any legacy-folder cleanup. If an
+    // external process changed a moved file, the existing rollback path below
+    // restores every verified pair and no cleanup is attempted.
+    if errors.is_empty() {
+        operation::set_total("organize", moved_pairs.len().max(1));
+        operation::update("organize", 0, None, "integrity_check");
+        for (index, (_, destination, expected_hash, expected_size)) in moved_pairs.iter().enumerate() {
+            if let Err(error) = verify_identity(destination, expected_hash, *expected_size) {
+                errors.push(format!(
+                    "Post-move integrity verification failed for {}: {error}",
+                    destination.display()
+                ));
+                break;
+            }
+            operation::update("organize", index + 1, None, "integrity_check");
         }
     }
 

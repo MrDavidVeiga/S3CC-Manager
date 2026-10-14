@@ -823,6 +823,12 @@ button:disabled {
   border-color: rgba(var(--accent-rgb),.45);
 }
 
+.plan-status-ready_duplicate_quarantine,
+.plan-status-ready_duplicate_quarantine_migration {
+  color: var(--winui-warning-text, #f0d3a3);
+  border-color: rgba(var(--accent-rgb), .45);
+}
+
 .plan-status-keep_uncategorized,
 .plan-status-duplicate_skipped {
   color: #cbd5d9;
@@ -5124,6 +5130,52 @@ body.release-v1 .conflicts-results {
   .analysis-more-actions-menu {
     width: min(320px, calc(100vw - 28px));
   }
+}
+
+/* Lightweight Sims-inspired progress overlay. It remains non-blocking for
+   read-only analysis and becomes modal only while a write transaction runs. */
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  display: grid;
+  place-items: center;
+  padding: clamp(18px, 4vw, 56px);
+  background: color-mix(in srgb, var(--bg, #0a0d10) 62%, transparent);
+  backdrop-filter: blur(10px) saturate(.9);
+  pointer-events: none;
+  transition: opacity .2s ease, visibility .2s ease;
+}
+
+.loading-overlay[data-blocking="true"] { pointer-events: auto; }
+
+.loading-dialog {
+  width: min(470px, 92vw);
+  padding: clamp(22px, 4vw, 34px);
+  text-align: center;
+  background: color-mix(in srgb, var(--surface, #0c1014) 92%, transparent);
+  border: 1px solid var(--panel-border, rgba(186,196,206,.28));
+  box-shadow: 0 24px 80px rgba(0,0,0,.35);
+}
+
+.loading-dialog h2 { margin: 4px 0 18px; font-size: clamp(1rem, 2vw, 1.22rem); }
+.loading-meta { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .78rem; }
+.loading-meta strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.loading-progress-track { width: 100%; height: 9px; margin: 10px 0 8px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.11); }
+.loading-progress-track > span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent-dark-1, #435c17), var(--accent, #618422)); transition: width .22s ease; }
+.loading-overlay[data-fluent-progress="indeterminate"] .loading-progress-track > span { width: 34%; animation: loading-sweep 1.35s ease-in-out infinite; }
+.loading-count { min-height: 1.1em; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; }
+.loading-dialog p { min-height: 2.4em; margin: 14px 0 18px; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+.loading-dialog .secondary-btn { width: auto; min-width: 110px; }
+.loading-sim-spinner { display: flex; justify-content: center; gap: 7px; min-height: 15px; margin-bottom: 2px; }
+.loading-sim-spinner span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent, #618422); animation: loading-dot 1.2s ease-in-out infinite; }
+.loading-sim-spinner span:nth-child(2) { animation-delay: .15s; }
+.loading-sim-spinner span:nth-child(3) { animation-delay: .3s; }
+@keyframes loading-dot { 0%, 100% { transform: translateY(2px); opacity: .4; } 50% { transform: translateY(-3px); opacity: 1; } }
+@keyframes loading-sweep { 0% { transform: translateX(-120%); } 100% { transform: translateX(330%); } }
+@media (prefers-reduced-motion: reduce) {
+  .loading-overlay, .loading-progress-track > span { transition: none; }
+  .loading-sim-spinner span, .loading-overlay[data-fluent-progress="indeterminate"] .loading-progress-track > span { animation: none; }
 }
 .manager-plan-footer #open-organized-folder-btn {
   flex: 0 1 auto;

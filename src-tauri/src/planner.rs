@@ -43,6 +43,11 @@ pub struct PlanStats {
     pub ready: usize,
     pub already_organized: usize,
     pub duplicate_skipped: usize,
+    /// Exact duplicates that have a verified, executable destination in the
+    /// flat #Duplicados quarantine. These are separate from ordinary CCs so
+    /// the plan can show what will be disabled before execution.
+    #[serde(default)]
+    pub duplicate_quarantine_ready: usize,
     pub collision_same_content: usize,
     pub collision_different_content: usize,
     pub blocked: usize,
@@ -52,6 +57,10 @@ pub struct PlanStats {
     /// roots after all `ready*` items are applied.
     #[serde(default)]
     pub remaining_legacy_files: usize,
+    /// Legacy folders that will still contain protected/unresolved content
+    /// after the ready operations are applied.
+    #[serde(default)]
+    pub legacy_folders_retained: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,10 +76,14 @@ pub struct OrganizationAnalysisSnapshot {
     pub ready: usize,
     pub already_organized: usize,
     pub duplicate_skipped: usize,
+    #[serde(default)]
+    pub duplicate_quarantine_ready: usize,
     pub collision_same_content: usize,
     pub collision_different_content: usize,
     pub blocked: usize,
     pub remaining_legacy_files: usize,
+    #[serde(default)]
+    pub legacy_folders_retained: usize,
 }
 
 impl OrganizationAnalysisSnapshot {
@@ -86,10 +99,12 @@ impl OrganizationAnalysisSnapshot {
             ready: 0,
             already_organized: 0,
             duplicate_skipped: 0,
+            duplicate_quarantine_ready: 0,
             collision_same_content: 0,
             collision_different_content: 0,
             blocked: 0,
             remaining_legacy_files: 0,
+            legacy_folders_retained: 0,
         }
     }
 
@@ -97,10 +112,12 @@ impl OrganizationAnalysisSnapshot {
         self.ready = stats.ready;
         self.already_organized = stats.already_organized;
         self.duplicate_skipped = stats.duplicate_skipped;
+        self.duplicate_quarantine_ready = stats.duplicate_quarantine_ready;
         self.collision_same_content = stats.collision_same_content;
         self.collision_different_content = stats.collision_different_content;
         self.blocked = stats.blocked;
         self.remaining_legacy_files = remaining_legacy_files;
+        self.legacy_folders_retained = stats.legacy_folders_retained;
         self
     }
 }
@@ -152,7 +169,19 @@ fn is_package_file(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .map(|name| {
             let name = name.to_lowercase();
-            name.ends_with(".package") || name.ends_with(".package.disabled")
+            name.ends_with(".package")
+                || name.ends_with(".package.disabled")
+                || name.ends_with(".package.duplicated")
+        })
+        .unwrap_or(false)
+}
+
+fn is_disabled_package_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let name = name.to_ascii_lowercase();
+            name.ends_with(".package.disabled") || name.ends_with(".package.duplicated")
         })
         .unwrap_or(false)
 }
@@ -1321,10 +1350,34 @@ fn fallback_relative_path(
     Ok((destination_relative, destination_parts))
 }
 
+/// Build the inactive filename used by the flat duplicate quarantine. The
+/// marker is deliberately not a loadable `.package` suffix, so a quarantined
+/// copy cannot become active merely because Resource.cfg also covers the
+/// quarantine directory.
+fn duplicate_quarantine_file_name(file_name: &str, hash_key: &str, attempt: usize) -> String {
+    let lower = file_name.to_ascii_lowercase();
+    let suffix = if attempt == 0 {
+        String::new()
+    } else if attempt == 1 {
+        format!(" [{}]", hash_key)
+    } else {
+        format!(" [{}-{}]", hash_key, attempt - 1)
+    };
+    let stem = if lower.ends_with(".package.disabled") {
+        &file_name[..file_name.len() - ".package.disabled".len()]
+    } else if lower.ends_with(".package.duplicated") {
+        &file_name[..file_name.len() - ".package.duplicated".len()]
+    } else if lower.ends_with(".package") {
+        &file_name[..file_name.len() - ".package".len()]
+    } else {
+        file_name
+    };
+    format!("{stem}{suffix}.package.duplicated")
+}
+
 /// Allocate a reversible quarantine destination for a confirmed byte-identical
-/// duplicate. The hash directory prevents same-name copies from colliding and
-/// the original filename is retained for human review. No file is deleted or
-/// overwritten by this helper.
+/// duplicate. All duplicate files are kept directly below #Duplicados. No
+/// file is deleted or overwritten by this helper.
 fn duplicate_quarantine_destination(
     root: &Path,
     language: AppLanguage,
@@ -1352,9 +1405,9 @@ fn duplicate_quarantine_destination(
         vec![language.duplicates_folder().to_string()]
     };
 
-    // A file directly below #Duplicados is already in the canonical flat
-    // quarantine. Nested descendants are deliberately treated as migration
-    // sources and are flattened on the next organization run.
+    // A file already directly below #Duplicados with the inactive marker is
+    // already in the canonical flat quarantine. Active/legacy names in the
+    // flat root are normalized in place to the marker on the next plan.
     let direct_quarantine_parent = source_relative.parent().is_some_and(|parent| {
         let mut expected = PathBuf::new();
         for part in &parts {
@@ -1362,7 +1415,12 @@ fn duplicate_quarantine_destination(
         }
         same_path_case_insensitive(parent, &expected)
     });
-    if direct_quarantine_parent {
+    if direct_quarantine_parent
+        && source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.to_ascii_lowercase().ends_with(".package.duplicated"))
+    {
         return Ok((source_relative.to_path_buf(), parts));
     }
 
@@ -1370,28 +1428,16 @@ fn duplicate_quarantine_destination(
     for part in &parts {
         candidate.push(part);
     }
-    candidate.push(file_name);
+    let file_name = file_name.to_string_lossy();
+    candidate.push(duplicate_quarantine_file_name(&file_name, &hash_key, 0));
     let occupied = |relative: &Path| {
         root.join(relative).exists()
             || reserved.contains(&relative_key(relative).to_ascii_lowercase())
     };
 
     if occupied(&candidate) {
-        let path = Path::new(file_name);
-        let stem = path
-            .file_stem()
-            .and_then(|v| v.to_str())
-            .unwrap_or("package");
-        let extension = path
-            .extension()
-            .and_then(|v| v.to_str())
-            .unwrap_or("package");
         for attempt in 0usize..10_000 {
-            let name = if attempt == 0 {
-                format!("{stem} [{hash_key}].{extension}")
-            } else {
-                format!("{stem} [{hash_key}-{attempt}].{extension}")
-            };
+            let name = duplicate_quarantine_file_name(&file_name, &hash_key, attempt + 1);
             let mut alternative = PathBuf::new();
             for part in &parts {
                 alternative.push(part);
@@ -1442,10 +1488,18 @@ fn append_nested_duplicate_quarantine_items(
             } else {
                 PathBuf::from(language.duplicates_folder())
             };
-            if same_path_case_insensitive(parent, &flat_parent) {
+            let is_flat = same_path_case_insensitive(parent, &flat_parent);
+            let inactive = entry
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.to_ascii_lowercase().ends_with(".package.duplicated"));
+            if is_flat && inactive {
                 None
-            } else {
+            } else if is_package_file(entry.path()) {
                 Some(entry.path().to_path_buf())
+            } else {
+                None
             }
         })
         .collect::<Vec<_>>();
@@ -1473,6 +1527,7 @@ fn append_nested_duplicate_quarantine_items(
         add_missing_directories(root, &destination_parts, directories);
         reserved.insert(relative_key(&destination_relative).to_ascii_lowercase());
         stats.ready += 1;
+        stats.duplicate_quarantine_ready += 1;
         let relative = source_canonical
             .strip_prefix(root)
             .map_err(|_| format!("Nested duplicate escaped root: {}", source.display()))?;
@@ -1580,6 +1635,7 @@ fn append_preview_image_items(
                     let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
                     name.ends_with(".package")
                         || name.ends_with(".package.disabled")
+                        || name.ends_with(".package.duplicated")
                         || name.ends_with(".sims3pack")
                 }
             });
@@ -1760,6 +1816,7 @@ fn append_auxiliary_items(
             let lower = name.to_ascii_lowercase();
             if lower.ends_with(".package")
                 || lower.ends_with(".package.disabled")
+                || lower.ends_with(".package.duplicated")
                 || preview_extension(&source)
             {
                 continue;
@@ -1916,16 +1973,6 @@ fn retarget_item_to_not_categorized(
 // Organize one selected representative of each exact-content group. Moving
 // none leaves entire legacy source folders stranded. A second copy is never
 // deleted here: it remains available for an explicitly confirmed quarantine.
-// Disabled files are a distinct load state and must not be selected as the
-// keeper of an enabled group (or vice versa).
-fn is_disabled_package_path(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| {
-        name.to_string_lossy()
-            .to_ascii_lowercase()
-            .ends_with(".package.disabled")
-    })
-}
-
 fn is_selected_content_keeper(
     source: &Path,
     sha256: &str,
@@ -1992,7 +2039,7 @@ fn is_canonical_duplicate_peer(
             files.iter().any(|file| {
                 same_relative_path(&file.relative_path, &relative)
                     && is_disabled_package_path(path)
-                        == file.relative_path.to_ascii_lowercase().ends_with(".package.disabled")
+                        == is_disabled_package_path(Path::new(&file.relative_path))
             })
         })
     {
@@ -2392,13 +2439,16 @@ fn index_suspected_merged_sliders(
 
 fn mark_intra_plan_destination_collisions(
     root: &Path,
+    language: AppLanguage,
     items: &mut [PlanItem],
+    directories: &mut BTreeSet<String>,
+    reserved_duplicate_destinations: &mut HashSet<String>,
     stats: &mut PlanStats,
-) {
+) -> Result<(), String> {
     let mut destinations = HashMap::<String, Vec<usize>>::new();
 
     for (index, item) in items.iter().enumerate() {
-        if item.plan_status != "ready" {
+        if !item.plan_status.starts_with("ready") {
             continue;
         }
         let Some(destination) = item.destination_relative_path.as_ref() else {
@@ -2410,30 +2460,63 @@ fn mark_intra_plan_destination_collisions(
 
     for indices in destinations.values().filter(|indices| indices.len() > 1) {
         let first_index = indices[0];
-        let first = &items[first_index];
-        let first_hash = first.sha256.as_deref().unwrap_or_default();
-        let first_size = first.size;
+        let first_hash = items[first_index].sha256.clone().unwrap_or_default();
+        let first_size = items[first_index].size;
+        let first_source_relative = items[first_index].source_relative_path.clone();
         let same_content = indices.iter().all(|index| {
             let item = &items[*index];
             item.size == first_size
                 && item
                     .sha256
                     .as_deref()
-                    .map(|hash| hash.eq_ignore_ascii_case(first_hash))
+                    .map(|hash| hash.eq_ignore_ascii_case(&first_hash))
                     .unwrap_or(false)
+                && !matches!(item.classification_status.as_str(), "preview" | "auxiliary")
         });
 
         if same_content {
-            // Keep one representative ready for the destination. Extra byte-identical
-            // sources stay in place and can later be handled from Duplicates/Quarantine.
+            // Keep one representative ready for the destination. Every other
+            // byte-identical source receives a reversible flat-quarantine move
+            // during planning, so the executor never discovers this collision
+            // only after it has started moving files.
             for index in indices.iter().skip(1) {
                 let item = &mut items[*index];
-                item.plan_status = "duplicate_skipped".to_string();
-                stats.duplicate_skipped += 1;
-                item.warnings.push(
-                    "Another selected package with identical bytes will be moved to this destination. This duplicate will be left in place."
-                        .to_string(),
-                );
+                let source = PathBuf::from(&item.source_path);
+                let hash = item.sha256.as_deref().unwrap_or_default();
+                let (quarantine_relative, quarantine_parts) = duplicate_quarantine_destination(
+                    root,
+                    language,
+                    &source,
+                    hash,
+                    reserved_duplicate_destinations,
+                )?;
+                let quarantine = root.join(&quarantine_relative);
+                if same_path_case_insensitive(&source, &quarantine) {
+                    item.plan_status = "duplicate_skipped".to_string();
+                    stats.duplicate_skipped += 1;
+                    item.warnings.push(
+                        "The byte-identical copy is already in flat #Duplicados and remains there."
+                            .to_string(),
+                    );
+                    continue;
+                }
+                add_missing_directories(root, &quarantine_parts, directories);
+                reserved_duplicate_destinations
+                    .insert(relative_key(&quarantine_relative).to_ascii_lowercase());
+                item.destination_path = Some(quarantine.to_string_lossy().to_string());
+                item.destination_relative_path = Some(relative_key(&quarantine_relative));
+                item.plan_status = "ready_duplicate_quarantine".to_string();
+                item.classification_reason = Some(format!(
+                    "{} | Exact duplicate; canonical keeper is '{}'.",
+                    item.classification_reason.clone().unwrap_or_default(),
+                    first_source_relative
+                ));
+                item.warnings.push(format!(
+                    "Byte-identical extra will move directly to flat #Duplicados as '{}'; keeper remains '{}'.",
+                    relative_key(&quarantine_relative),
+                    first_source_relative
+                ));
+                stats.duplicate_quarantine_ready += 1;
             }
         } else {
             for index in indices {
@@ -2447,6 +2530,7 @@ fn mark_intra_plan_destination_collisions(
             }
         }
     }
+    Ok(())
 }
 
 /// A frozen plan must not contain a move whose destination is another ready
@@ -2494,41 +2578,6 @@ fn mark_intra_plan_source_destination_collisions(
             "This plan contains a source/destination overlap with another selected move. No operation in the overlap will run; review the plan order or destination before retrying.".to_string(),
         );
     }
-}
-
-fn move_intra_plan_conflicts_to_review(
-    root: &Path,
-    language: AppLanguage,
-    items: &mut [PlanItem],
-    directories: &mut BTreeSet<String>,
-    stats: &mut PlanStats,
-) -> Result<(), String> {
-    for item in items.iter_mut().filter(|item| {
-        item.plan_status == "collision_different_content"
-            && !source_uses_overrides(root, Path::new(&item.source_path))
-    }) {
-        let (relative, parts) = fallback_relative_path(
-            root,
-            language,
-            &item.source_relative_path,
-            item.sha256.as_deref().unwrap_or_default(),
-        )?;
-        let destination = root.join(&relative);
-        add_missing_directories(root, &parts, directories);
-        item.destination_path = Some(destination.to_string_lossy().to_string());
-        item.destination_relative_path = Some(relative_key(&relative));
-        item.plan_status = "ready_conflict_review".to_string();
-        item.classification_reason = Some(format!(
-            "{} | Multiple selected packages had different content at the same canonical filename; moved to review fallback.",
-            item.classification_reason.clone().unwrap_or_default()
-        ));
-        item.warnings.push(
-            "The conflicting source was moved intact to #Sem Categoria; no version was overwritten or discarded.".to_string(),
-        );
-        stats.collision_different_content = stats.collision_different_content.saturating_sub(1);
-        stats.ready += 1;
-    }
-    Ok(())
 }
 
 fn is_manual_review_status(status: &str) -> bool {
@@ -2685,6 +2734,57 @@ fn projected_empty_folders_to_clean(
             !source_files_occupy && !destinations_occupy
         })
         .count()
+}
+
+fn projected_legacy_folder_counts(
+    root: &Path,
+    selected_roots: &[PathBuf],
+    items: &[PlanItem],
+    protected_relative_directories: &[String],
+) -> (usize, usize) {
+    let mut candidates = BTreeSet::<PathBuf>::new();
+    for selected_root in selected_roots {
+        if selected_root.is_dir() && selected_root.starts_with(root) {
+            candidates.insert(selected_root.clone());
+        }
+    }
+    for item in items {
+        let source = PathBuf::from(&item.source_path);
+        let Some(parent) = source.parent() else { continue };
+        if !parent.is_dir() || !parent.starts_with(root) || parent == root { continue }
+        candidates.insert(parent.to_path_buf());
+        let mut ancestor = parent.parent();
+        while let Some(folder) = ancestor {
+            if folder == root || !folder.starts_with(root) { break }
+            candidates.insert(folder.to_path_buf());
+            ancestor = folder.parent();
+        }
+    }
+
+    let mut removable = 0usize;
+    let mut retained = 0usize;
+    for folder in candidates {
+        if protected_relative_directories.iter().any(|relative| {
+            normalized_path_key(root, &folder) == normalized_path_key(root, Path::new(relative))
+        }) || !folder.is_dir()
+        {
+            continue;
+        }
+        let occupied = WalkDir::new(&folder)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.file_type().is_file())
+            .any(|entry| {
+                let path = entry.path();
+                match items.iter().find(|item| path_matches_item_source(path, item)) {
+                    Some(item) if plan_item_moves_source(item) => false,
+                    Some(_) | None => true,
+                }
+            });
+        if occupied { retained += 1; } else { removable += 1; }
+    }
+    (removable, retained)
 }
 
 fn manifest_preview(root: &Path, language: AppLanguage, ready_items: &[PlanItem]) -> String {
@@ -3211,6 +3311,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             reserved_duplicate_destinations
                 .insert(relative_key(&quarantine_relative).to_ascii_lowercase());
             stats.ready += 1;
+            stats.duplicate_quarantine_ready += 1;
             items.push(PlanItem {
                 id: item.id.clone(),
                 name: item.name.clone(),
@@ -3367,10 +3468,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             let target_name = fallback_relative
                 .file_name()
                 .ok_or_else(|| "Uncategorized fallback has no filename.".to_string())?;
-            let inactive = item
-                .name
-                .to_ascii_lowercase()
-                .ends_with(".package.disabled");
+            let inactive = is_disabled_package_path(Path::new(&item.name));
             let cfg_opt_in = update_resource_cfg
                 && (is_mods_root(&root) || is_within_packages(&root) || is_within_overrides(&root));
             let adjusted = if cfg_opt_in || inactive || item.status != "classified" {
@@ -3615,14 +3713,11 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         // the full category tree rather than compacting it to existing depth.
         let cfg_opt_in = update_resource_cfg
             && (is_mods_root(&root) || is_within_packages(&root) || is_within_overrides(&root));
-        let inactive_package = item
-            .name
-            .to_ascii_lowercase()
-            .ends_with(".package.disabled");
+        let inactive_package = is_disabled_package_path(Path::new(&item.name));
         let cfg_fit = if cfg_opt_in || inactive_package {
             // Disabled packages are never loaded by The Sims 3. Their
             // classification must not be blocked by PackedFile depth rules,
-            // and the .disabled suffix must be preserved on relocation.
+            // and the inactive suffix must be preserved on relocation.
             Ok((
                 ensure_source_loading_branch(&root, &source_canonical, &destination_parts),
                 None,
@@ -3708,7 +3803,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         }
         destination_relative.push(file_name);
 
-        let mut destination = root.join(&destination_relative);
+        let destination = root.join(&destination_relative);
         if is_mods_root(&root) {
             let branch = if source_uses_overrides(&root, &source_canonical) {
                 "Overrides"
@@ -3724,7 +3819,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                 continue;
             }
         }
-        let mut destination_relative_text = relative_key(&destination_relative);
+        let destination_relative_text = relative_key(&destination_relative);
 
         // Review fallbacks are canonical destinations too. Once a package
         // has been moved to `#Sem Categoria` with its preserved source
@@ -3805,6 +3900,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                     reserved_duplicate_destinations
                         .insert(relative_key(&quarantine_relative).to_ascii_lowercase());
                     stats.ready += 1;
+                    stats.duplicate_quarantine_ready += 1;
                     items.push(PlanItem {
                         id: item.id.clone(),
                         name: item.name.clone(),
@@ -3853,36 +3949,16 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             }
 
             if !is_override_source {
-                let (review_relative, review_parts) =
-                    fallback_relative_path(&root, language, &item.relative_path, &source_hash)?;
-                destination = root.join(&review_relative);
-                destination_relative_text = relative_key(&review_relative);
+                // A same-name/different-bytes collision is not an unknown
+                // package and must not be silently relocated to
+                // #Sem Categoria. Keep the source untouched, expose the
+                // canonical candidate for review, and let independent ready
+                // operations proceed.
                 classification_reason = Some(format!(
-                    "{} | Content conflict with canonical destination; preserved in review fallback.",
+                    "{} | Content conflict with canonical destination; source preserved for review.",
                     classification_reason.unwrap_or_default()
                 ));
-                if same_path_case_insensitive(&source_canonical, &destination) {
-                    stats.already_organized += 1;
-                    items.push(PlanItem {
-                        id: item.id.clone(),
-                        name: item.name.clone(),
-                        source_path: source_canonical.to_string_lossy().to_string(),
-                        source_relative_path: item.relative_path.clone(),
-                        destination_path: Some(destination.to_string_lossy().to_string()),
-                        destination_relative_path: Some(destination_relative_text),
-                        classification_status: item.status.clone(),
-                        classification_reason,
-                        plan_status: "already_organized_review".to_string(),
-                        sha256: Some(source_hash),
-                        size: source_size,
-                        warnings: vec![
-                            "The package is already at the exact validated review destination; no move is proposed.".to_string(),
-                        ],
-                    });
-                    continue;
-                }
-                add_missing_directories(&root, &review_parts, &mut directories);
-                stats.ready += 1;
+                stats.collision_different_content += 1;
                 items.push(PlanItem {
                     id: item.id.clone(),
                     name: item.name.clone(),
@@ -3892,11 +3968,11 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                     destination_relative_path: Some(destination_relative_text),
                     classification_status: item.status.clone(),
                     classification_reason,
-                    plan_status: "ready_conflict_review".to_string(),
+                    plan_status: "collision_different_content".to_string(),
                     sha256: Some(source_hash),
                     size: source_size,
                     warnings: vec![
-                        "The canonical destination contains different bytes with the same filename. The source was moved intact to #Sem Categoria; neither version was overwritten or discarded.".to_string(),
+                        "The canonical destination contains different bytes with the same filename. The source stays in place; no file is overwritten or sent to #Sem Categoria automatically.".to_string(),
                     ],
                 });
                 continue;
@@ -3913,18 +3989,12 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                 destination_relative_path: Some(destination_relative_text),
                 classification_status: item.status.clone(),
                 classification_reason: classification_reason.clone(),
-                plan_status: if same {
-                    "duplicate_skipped".to_string()
-                } else {
-                    "collision_different_content".to_string()
-                },
+                plan_status: "collision_different_content".to_string(),
                 sha256: Some(source_hash),
                 size: source_size,
-                warnings: vec![if same {
-                    "The categorized destination already contains a byte-identical file. This copy will stay in place; use Duplicates/Quarantine for explicit review.".to_string()
-                } else {
+                warnings: vec![
                     "The categorized destination already contains different data with the same name. This package will stay in place until the collision is reviewed.".to_string()
-                }],
+                ],
             });
             continue;
         }
@@ -3992,8 +4062,14 @@ pub(crate) fn build_organization_plan_with_cfg_core(
 
     // Detect collisions created by the plan itself before any filesystem write occurs.
     // This catches multiple selected packages that resolve to the same final path.
-    mark_intra_plan_destination_collisions(&root, &mut items, &mut stats);
-    move_intra_plan_conflicts_to_review(&root, language, &mut items, &mut directories, &mut stats)?;
+    mark_intra_plan_destination_collisions(
+        &root,
+        language,
+        &mut items,
+        &mut directories,
+        &mut reserved_duplicate_destinations,
+        &mut stats,
+    )?;
     mark_intra_plan_source_destination_collisions(&root, &mut items);
 
     for group in workspace.groups.iter().filter(|group| group.keep_together) {
@@ -4043,6 +4119,18 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         .iter()
         .filter(|item| item.plan_status.starts_with("ready"))
         .count();
+    stats.duplicate_quarantine_ready = items
+        .iter()
+        .filter(|item| item.plan_status.starts_with("ready_duplicate_quarantine"))
+        .count();
+    stats.duplicate_skipped = items
+        .iter()
+        .filter(|item| item.plan_status == "duplicate_skipped")
+        .count();
+    stats.collision_different_content = items
+        .iter()
+        .filter(|item| item.plan_status == "collision_different_content")
+        .count();
     stats.blocked = items
         .iter()
         .filter(|item| item.plan_status.starts_with("blocked"))
@@ -4067,6 +4155,13 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             &items,
             &protected_empty_directories,
         );
+    let (_, legacy_folders_retained) = projected_legacy_folder_counts(
+        &root,
+        &selected_roots,
+        &items,
+        &protected_empty_directories,
+    );
+    stats.legacy_folders_retained = legacy_folders_retained;
 
     let can_execute = plan_can_execute(&stats, workspace.read_only);
     let cfg_opt_in = update_resource_cfg
@@ -4248,7 +4343,9 @@ mod tests {
         std::fs::create_dir_all(&quarantine).unwrap();
         std::fs::write(quarantine.join("same.package"), b"existing").unwrap();
         let mut reserved = HashSet::new();
-        reserved.insert(String::from("#duplicados\\same [aaaaaaaaaaaaaaaa].package"));
+        reserved.insert(String::from(
+            "#duplicados\\same [aaaaaaaaaaaaaaaa].package.duplicated",
+        ));
         let (relative, parts) = duplicate_quarantine_destination(
             &packages,
             AppLanguage::Pt,
@@ -4261,9 +4358,82 @@ mod tests {
         assert_eq!(relative.parent(), Some(Path::new("#Duplicados")));
         assert_eq!(
             relative.file_name().unwrap(),
-            "same [AAAAAAAAAAAAAAAA-1].package"
+            "same [AAAAAAAAAAAAAAAA-1].package.duplicated"
         );
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn duplicate_quarantine_normalizes_disabled_names_without_nested_paths() {
+        assert_eq!(
+            duplicate_quarantine_file_name("ESkin-Natural+Light.package.disabled", "ABC", 0),
+            "ESkin-Natural+Light.package.duplicated"
+        );
+        assert_eq!(
+            duplicate_quarantine_file_name("ESkin-Natural+Light.package", "ABC", 1),
+            "ESkin-Natural+Light [ABC].package.duplicated"
+        );
+        assert_eq!(
+            duplicate_quarantine_file_name("ESkin-Natural+Light.package.duplicated", "ABC", 0),
+            "ESkin-Natural+Light.package.duplicated"
+        );
+    }
+
+    #[test]
+    fn eskin_same_name_different_bytes_stays_for_review() {
+        let mut items = vec![
+            PlanItem {
+                id: "eskin-a".into(),
+                name: "ESkin-Natural+Light.package".into(),
+                source_path: r"C:\Mods\#5 Skin\ESkin-Natural+Light.package".into(),
+                source_relative_path: r"#5 Skin\ESkin-Natural+Light.package".into(),
+                destination_path: Some(r"C:\Mods\Packages\Skins\ESkin-Natural+Light.package".into()),
+                destination_relative_path: Some(r"Packages\Skins\ESkin-Natural+Light.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: Some("CASP skin".into()),
+                plan_status: "ready".into(),
+                sha256: Some("A".repeat(64)),
+                size: 10,
+                warnings: vec![],
+            },
+            PlanItem {
+                id: "eskin-b".into(),
+                name: "ESkin-Natural+Light.package".into(),
+                source_path: r"C:\Mods\Skin\ESkin-Natural+Light.package".into(),
+                source_relative_path: r"Skin\ESkin-Natural+Light.package".into(),
+                destination_path: Some(r"C:\Mods\Packages\Skins\ESkin-Natural+Light.package".into()),
+                destination_relative_path: Some(r"Packages\Skins\ESkin-Natural+Light.package".into()),
+                classification_status: "classified".into(),
+                classification_reason: Some("CASP skin".into()),
+                plan_status: "ready".into(),
+                sha256: Some("B".repeat(64)),
+                size: 10,
+                warnings: vec![],
+            },
+        ];
+        let mut stats = PlanStats::default();
+        let mut directories = BTreeSet::new();
+        let mut reserved = HashSet::new();
+        mark_intra_plan_destination_collisions(
+            Path::new(r"C:\Mods"),
+            AppLanguage::En,
+            &mut items,
+            &mut directories,
+            &mut reserved,
+            &mut stats,
+        )
+        .unwrap();
+        assert_eq!(stats.collision_different_content, 2);
+        assert!(items.iter().all(|item| item.plan_status == "collision_different_content"));
+        assert!(items.iter().all(|item| {
+            item.destination_relative_path.as_deref()
+                == Some(r"Packages\Skins\ESkin-Natural+Light.package")
+        }));
+        assert!(!items.iter().any(|item| {
+            item.destination_relative_path
+                .as_deref()
+                .is_some_and(|path| path.contains("#Sem Categoria"))
+        }));
     }
 
     #[test]
@@ -5101,7 +5271,17 @@ mod tests {
         ];
         let mut stats = PlanStats::default();
 
-        mark_intra_plan_destination_collisions(Path::new(r"C:\\Mods"), &mut items, &mut stats);
+        let mut directories = BTreeSet::new();
+        let mut reserved = HashSet::new();
+        mark_intra_plan_destination_collisions(
+            Path::new(r"C:\\Mods"),
+            AppLanguage::En,
+            &mut items,
+            &mut directories,
+            &mut reserved,
+            &mut stats,
+        )
+        .unwrap();
 
         assert_eq!(stats.collision_different_content, 2);
         assert!(items
@@ -5144,11 +5324,21 @@ mod tests {
         ];
         let mut stats = PlanStats::default();
 
-        mark_intra_plan_destination_collisions(Path::new(r"C:\\Mods"), &mut items, &mut stats);
+        let mut directories = BTreeSet::new();
+        let mut reserved = HashSet::new();
+        mark_intra_plan_destination_collisions(
+            Path::new(r"C:\\Mods"),
+            AppLanguage::En,
+            &mut items,
+            &mut directories,
+            &mut reserved,
+            &mut stats,
+        )
+        .unwrap();
 
         assert_eq!(items[0].plan_status, "ready");
-        assert_eq!(items[1].plan_status, "duplicate_skipped");
-        assert_eq!(stats.duplicate_skipped, 1);
+        assert_eq!(items[1].plan_status, "ready_duplicate_quarantine");
+        assert_eq!(stats.duplicate_quarantine_ready, 1);
         assert_eq!(stats.collision_same_content, 0);
         assert_eq!(stats.collision_different_content, 0);
     }

@@ -883,12 +883,16 @@
 
         <div class="planner-summary">
           <article><b id="plan-stat-selected">0</b><span data-i18n="selected">Selected</span></article>
-          <article><b id="plan-stat-ready">0</b><span data-i18n="readyToMove">Ready</span></article>
+          <article><b id="plan-stat-ready">0</b><span data-i18n="classifiedReady">Classified CCs ready</span></article>
+          <article><b id="plan-stat-duplicates-ready">0</b><span data-i18n="exactDuplicatesReady">Exact duplicates to disable</span></article>
+          <article><b id="plan-stat-organized">0</b><span data-i18n="alreadyOrganized">Already organized</span></article>
           <article><b id="plan-stat-kept">0</b><span data-i18n="keptUncategorized">Kept in place</span></article>
           <article><b id="plan-stat-skipped">0</b><span data-i18n="duplicatesSkipped">Identical Skipped</span></article>
-          <article><b id="plan-stat-collisions">0</b><span data-i18n="planCollisionsSkipped">Collisions Skipped</span></article>
+          <article><b id="plan-stat-collisions">0</b><span data-i18n="unresolvedCollisions">Unresolved collisions</span></article>
           <article><b id="plan-stat-blocked">0</b><span data-i18n="blocked">Blocked</span></article>
           <article><b id="plan-stat-folders">0</b><span data-i18n="foldersToCreate">Folders</span></article>
+          <article><b id="plan-stat-folders-remove">0</b><span data-i18n="legacyFoldersToRemove">Legacy folders to remove</span></article>
+          <article><b id="plan-stat-folders-retained">0</b><span data-i18n="legacyFoldersRetained">Legacy folders retained</span></article>
         </div>
 
         <p id="plan-partial-notice" class="planner-partial-notice hidden" role="status" aria-live="polite"></p>
@@ -1029,6 +1033,23 @@
           <button id="catalog-import-cancel" class="secondary-btn" type="button">Cancel</button>
           <button id="catalog-import-accept" class="primary-btn" type="button">Open Catalog</button>
         </div>
+      </section>
+    </div>
+
+    <div id="loading-overlay" class="loading-overlay hidden" aria-hidden="true" aria-live="polite">
+      <section class="loading-dialog card" role="status" aria-labelledby="loading-overlay-title">
+        <div class="loading-sim-spinner" aria-hidden="true"><span></span><span></span><span></span></div>
+        <h2 id="loading-overlay-title" data-i18n="loadingTitle">Preparing your neighborhood</h2>
+        <div class="loading-meta">
+          <span id="loading-overlay-phase"></span>
+          <strong id="loading-overlay-percent">—</strong>
+        </div>
+        <div class="loading-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+          <span id="loading-overlay-bar"></span>
+        </div>
+        <div id="loading-overlay-count" class="loading-count">—</div>
+        <p id="loading-overlay-phrase"></p>
+        <button id="loading-overlay-cancel" class="secondary-btn hidden" type="button" data-i18n="cancelAnalysis">Cancel</button>
       </section>
     </div>
 

@@ -100,9 +100,10 @@ pub fn preview_resource_cfg_update(root: &Path, destinations: &[PathBuf]) -> Res
     for destination in destinations {
         // Disabled DBPF files are classified and moved with their .disabled
         // suffix, but they MUST NOT gain game loading rules or fail a preview.
-        if destination.file_name().is_some_and(|name|
-            name.to_string_lossy().to_ascii_lowercase().ends_with(".package.disabled")
-        ) {
+        if destination.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy().to_ascii_lowercase();
+            name.ends_with(".package.disabled") || name.ends_with(".package.duplicated")
+        }) {
             continue;
         }
         let relative = destination.strip_prefix(mods)

@@ -112,6 +112,25 @@ const I18N = {
   organizationPlan: "Organization Plan",
     simulationOnly: "Preflight preview. Nothing moves until you choose Organize Selected.",
     readyToMove: "Ready",
+    classifiedReady: "Classified CCs ready",
+    exactDuplicatesReady: "Exact duplicates to disable",
+    alreadyOrganized: "Already organized",
+    reviewPreserved: "Preserved for review",
+    unresolvedCollisions: "Unresolved collisions",
+    legacyFoldersToRemove: "Legacy folders to remove",
+    legacyFoldersRetained: "Legacy folders retained",
+    loadingTitle: "Preparing your neighborhood",
+    loadingPhaseIdentification: "Identifying files",
+    loadingPhaseAnalysis: "Analyzing packages",
+    loadingPhaseDuplicates: "Verifying duplicates",
+    loadingPhasePlan: "Preparing the organization plan",
+    loadingPhaseOrganization: "Organizing packages",
+    loadingPhaseIntegrity: "Checking integrity",
+    loadingPhaseCleanup: "Cleaning legacy folders",
+    loadingPhrase1: "The neighborhood is getting ready for its next story.",
+    loadingPhrase2: "Sorting the details before the next move.",
+    loadingPhrase3: "Making room for a smoother day in town.",
+    loadingPhrase4: "Checking every door before the world loads.",
     collisions: "Collisions",
     planCollisionsSkipped: "Collisions to Review",
     organizationResult: "Organization Result",
@@ -704,6 +723,25 @@ const I18N = {
   organizationPlan: "Plano de Organização",
     simulationOnly: "Preview de segurança. Nada será movido até escolher Organizar Selecionados.",
     readyToMove: "Prontos",
+    classifiedReady: "CCs classificados prontos",
+    exactDuplicatesReady: "Duplicados exatos para desativar",
+    alreadyOrganized: "Já organizados",
+    reviewPreserved: "Preservados para revisão",
+    unresolvedCollisions: "Colisões não resolvidas",
+    legacyFoldersToRemove: "Pastas legadas a remover",
+    legacyFoldersRetained: "Pastas legadas preservadas",
+    loadingTitle: "Preparando a vizinhança",
+    loadingPhaseIdentification: "Identificando arquivos",
+    loadingPhaseAnalysis: "Analisando packages",
+    loadingPhaseDuplicates: "Verificando duplicados",
+    loadingPhasePlan: "Preparando o plano de organização",
+    loadingPhaseOrganization: "Organizando packages",
+    loadingPhaseIntegrity: "Verificando integridade",
+    loadingPhaseCleanup: "Limpando pastas legadas",
+    loadingPhrase1: "A vizinhança está se preparando para a próxima história.",
+    loadingPhrase2: "Organizando os detalhes antes da próxima mudança.",
+    loadingPhrase3: "Abrindo espaço para um dia mais tranquilo na cidade.",
+    loadingPhrase4: "Conferindo cada porta antes de carregar o mundo.",
     collisions: "Colisões",
     planCollisionsSkipped: "Colisões para revisar",
     organizationResult: "Resultado da Organização",
@@ -1295,6 +1333,25 @@ const I18N = {
   organizationPlan: "Plan de Organización",
     simulationOnly: "Vista previa de seguridad. Nada se moverá hasta elegir Organizar Seleccionados.",
     readyToMove: "Listos",
+    classifiedReady: "CC clasificados listos",
+    exactDuplicatesReady: "Duplicados exactos para desactivar",
+    alreadyOrganized: "Ya organizados",
+    reviewPreserved: "Preservados para revisión",
+    unresolvedCollisions: "Colisiones sin resolver",
+    legacyFoldersToRemove: "Carpetas antiguas a eliminar",
+    legacyFoldersRetained: "Carpetas antiguas conservadas",
+    loadingTitle: "Preparando el vecindario",
+    loadingPhaseIdentification: "Identificando archivos",
+    loadingPhaseAnalysis: "Analizando packages",
+    loadingPhaseDuplicates: "Verificando duplicados",
+    loadingPhasePlan: "Preparando el plan de organización",
+    loadingPhaseOrganization: "Organizando packages",
+    loadingPhaseIntegrity: "Comprobando integridad",
+    loadingPhaseCleanup: "Limpiando carpetas antiguas",
+    loadingPhrase1: "El vecindario se prepara para su próxima historia.",
+    loadingPhrase2: "Ordenando los detalles antes del próximo cambio.",
+    loadingPhrase3: "Haciendo espacio para un día más tranquilo en la ciudad.",
+    loadingPhrase4: "Comprobando cada puerta antes de cargar el mundo.",
     collisions: "Colisiones",
     planCollisionsSkipped: "Colisiones para revisar",
     organizationResult: "Resultado de la Organización",
@@ -1945,6 +2002,9 @@ const virtualViews = {
   conflicts: { items: null, start: -1, end: -1, raf: 0 },
 };
 let conflictMarksVersion = 0;
+let loadingPhraseIndex = -1;
+let loadingPhraseAt = 0;
+let loadingPhraseKey = "";
 
 function debounce(callback, delay = SEARCH_DEBOUNCE_MS) {
   let timer = 0;
@@ -2089,11 +2149,22 @@ const el = {
   manifestPreviewText: document.querySelector("#manifest-preview-text"),
   planStatSelected: document.querySelector("#plan-stat-selected"),
   planStatReady: document.querySelector("#plan-stat-ready"),
+  planStatDuplicatesReady: document.querySelector("#plan-stat-duplicates-ready"),
+  planStatOrganized: document.querySelector("#plan-stat-organized"),
   planStatKept: document.querySelector("#plan-stat-kept"),
   planStatSkipped: document.querySelector("#plan-stat-skipped"),
   planStatCollisions: document.querySelector("#plan-stat-collisions"),
   planStatBlocked: document.querySelector("#plan-stat-blocked"),
   planStatFolders: document.querySelector("#plan-stat-folders"),
+  planStatFoldersRemove: document.querySelector("#plan-stat-folders-remove"),
+  planStatFoldersRetained: document.querySelector("#plan-stat-folders-retained"),
+  loadingOverlay: document.querySelector("#loading-overlay"),
+  loadingOverlayPhase: document.querySelector("#loading-overlay-phase"),
+  loadingOverlayPercent: document.querySelector("#loading-overlay-percent"),
+  loadingOverlayBar: document.querySelector("#loading-overlay-bar"),
+  loadingOverlayCount: document.querySelector("#loading-overlay-count"),
+  loadingOverlayPhrase: document.querySelector("#loading-overlay-phrase"),
+  loadingOverlayCancel: document.querySelector("#loading-overlay-cancel"),
   organizationReviewPanel: document.querySelector("#organization-review-panel"),
   organizationReviewSummary: document.querySelector("#organization-review-summary"),
   organizationReviewLeftovers: document.querySelector("#organization-review-leftovers"),
@@ -3168,6 +3239,8 @@ function planStatusLabel(status) {
     keep_uncategorized: t("keptUncategorized"),
     ready_uncategorized: t("moveToNotCategorized"),
     ready_duplicate: t("duplicateToReview"),
+    ready_duplicate_quarantine: t("exactDuplicatesReady"),
+    ready_duplicate_quarantine_migration: t("exactDuplicatesReady"),
     ready_collision: t("collisionToReview"),
     already_organized: t("alreadyOrganized"),
     ready_sim_export_merged_root: t("simExportRoot"),
@@ -5331,6 +5404,7 @@ function renderOrganizationProgress() {
     preparing: t("organizePreparing"),
     snapshotting: t("organizeSnapshotting"),
     moving: t("organizeMoving"),
+    integrity_check: t("loadingPhaseIntegrity"),
     cleaning: t("organizeCleaning"),
     rolling_back: t("organizeRollingBack"),
     complete: t("organizeFinishing"),
@@ -5348,6 +5422,83 @@ function renderOrganizationProgress() {
   else track.removeAttribute("aria-valuenow");
   track.setAttribute("aria-valuetext", determinate
     ? `${label} · ${pct}%` : label);
+}
+
+function loadingOverlayState() {
+  if (state.executing) {
+    const status = state.organizeProgress || {};
+    return { key: `organize:${status.phase || "planning"}`, kind: "organize", status,
+      phase: ({ moving: "loadingPhaseOrganization", integrity_check: "loadingPhaseIntegrity", cleaning: "loadingPhaseCleanup" }[status.phase] || "loadingPhaseOrganization"), blocking: true, cancelable: false };
+  }
+  if (state.planning) {
+    return { key: "planning", kind: "planning", status: {}, phase: "loadingPhasePlan", blocking: false, cancelable: false };
+  }
+  for (const kind of ["scan", "duplicates", "conflicts"]) {
+    if (!operationBusy(kind) && !state.operations[kind]?.running) continue;
+    const status = state.operations[kind] || {};
+    const scanPhase = kind === "scan"
+      ? ({ starting: "loadingPhaseIdentification", scanning: "loadingPhaseAnalysis", fingerprinting: "loadingPhaseAnalysis", indexing: "loadingPhaseAnalysis", comparing: "loadingPhaseDuplicates" }[status.phase] || "loadingPhaseAnalysis")
+      : "loadingPhaseDuplicates";
+    return {
+      key: `${kind}:${status.phase || "starting"}`,
+      kind,
+      status,
+      phase: scanPhase,
+      blocking: false,
+      cancelable: true,
+    };
+  }
+  return null;
+}
+
+function renderLoadingOverlay() {
+  if (!el.loadingOverlay) return;
+  const current = loadingOverlayState();
+  el.loadingOverlay.classList.toggle("hidden", !current);
+  if (!current) {
+    el.loadingOverlay.setAttribute("aria-hidden", "true");
+    loadingPhraseKey = "";
+    loadingPhraseAt = 0;
+    return;
+  }
+
+  el.loadingOverlay.setAttribute("aria-hidden", "false");
+  el.loadingOverlay.dataset.blocking = current.blocking ? "true" : "false";
+  const status = current.status || {};
+  const total = Number(status.total || 0);
+  const processed = Math.max(0, Math.min(Number(status.processed || 0), total || Number.MAX_SAFE_INTEGER));
+  const determinate = total > 0;
+  const percent = determinate ? Math.round(processed * 100 / total) : 0;
+  el.loadingOverlay.dataset.fluentProgress = determinate ? "determinate" : "indeterminate";
+  el.loadingOverlayPhase.textContent = current.phase ? t(current.phase) : t("loadingTitle");
+  el.loadingOverlayPercent.textContent = determinate ? `${percent}%` : "—";
+  el.loadingOverlayBar.style.width = determinate ? `${percent}%` : "";
+  el.loadingOverlayCount.textContent = determinate
+    ? `${integerLabel(processed)} / ${integerLabel(total)}` : "—";
+  const track = el.loadingOverlayBar.parentElement;
+  if (determinate) {
+    track.setAttribute("aria-valuenow", String(percent));
+    track.setAttribute("aria-valuetext", `${percent}% — ${integerLabel(processed)} / ${integerLabel(total)}`);
+  } else {
+    track.removeAttribute("aria-valuenow");
+    track.setAttribute("aria-valuetext", el.loadingOverlayPhase.textContent);
+  }
+
+  const now = Date.now();
+  if (loadingPhraseKey !== current.key || now - loadingPhraseAt > 5200) {
+    const phrases = [t("loadingPhrase1"), t("loadingPhrase2"), t("loadingPhrase3"), t("loadingPhrase4")];
+    let next = (loadingPhraseIndex + 1) % phrases.length;
+    if (phrases.length > 1 && next === loadingPhraseIndex) next = (next + 1) % phrases.length;
+    loadingPhraseIndex = next;
+    loadingPhraseAt = now;
+    loadingPhraseKey = current.key;
+    el.loadingOverlayPhrase.textContent = phrases[next];
+  }
+
+  const canCancel = current.cancelable && !status.cancelRequested;
+  el.loadingOverlayCancel.classList.toggle("hidden", !current.cancelable);
+  el.loadingOverlayCancel.disabled = !canCancel;
+  el.loadingOverlayCancel.textContent = status.cancelRequested ? t("cancelling") : t("cancelAnalysis");
 }
 
 async function monitorOrganizationProgress() {
@@ -5368,6 +5519,7 @@ function renderAllOperationProgress() {
   renderOperationProgress("duplicates");
   renderOperationProgress("conflicts");
   renderOrganizationProgress();
+  renderLoadingOverlay();
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -7762,12 +7914,18 @@ function renderPlan() {
     (stats.collisionSameContent ?? 0) + (stats.collisionDifferentContent ?? 0);
 
   el.planStatSelected.textContent = stats.selected ?? 0;
-  el.planStatReady.textContent = stats.ready ?? 0;
+  const duplicateReady = Number(stats.duplicateQuarantineReady || 0);
+  const executableReady = Number(stats.ready || 0);
+  el.planStatReady.textContent = Math.max(0, executableReady - duplicateReady);
+  if (el.planStatDuplicatesReady) el.planStatDuplicatesReady.textContent = duplicateReady;
+  if (el.planStatOrganized) el.planStatOrganized.textContent = stats.alreadyOrganized ?? 0;
   el.planStatKept.textContent = stats.keptUncategorized ?? 0;
   el.planStatSkipped.textContent = stats.duplicateSkipped ?? 0;
   el.planStatCollisions.textContent = collisions;
   el.planStatBlocked.textContent = stats.blocked ?? 0;
   el.planStatFolders.textContent = stats.directoriesToCreate ?? 0;
+  if (el.planStatFoldersRemove) el.planStatFoldersRemove.textContent = stats.emptyFoldersToClean ?? 0;
+  if (el.planStatFoldersRetained) el.planStatFoldersRetained.textContent = stats.legacyFoldersRetained ?? 0;
   el.planExecuteBtn.disabled = !planCanExecute(plan) || state.executing;
   const cfg = plan.resourceCfgUpdate;
   const cfgSupported = supportsResourceCfgUpdate(state.folder);
@@ -9039,6 +9197,10 @@ el.chooseFolderBtn.addEventListener("click", chooseFolder);
 el.scanCancelBtn.addEventListener("click", () => cancelAnalysis("scan"));
 el.duplicatesCancelBtn.addEventListener("click", () => cancelAnalysis("duplicates"));
 el.conflictsCancelBtn.addEventListener("click", () => cancelAnalysis("conflicts"));
+el.loadingOverlayCancel.addEventListener("click", () => {
+  const current = loadingOverlayState();
+  if (current?.cancelable) void cancelAnalysis(current.kind);
+});
 el.refreshRestoreHistoryBtn.addEventListener("click", loadRestoreHistory);
 el.removeRestoreHistoryBtn.addEventListener("click", () => openConfirm("remove_restore_history"));
 el.openManifestFolderBtn.addEventListener("click", () => openDirectorySafe(state.restoreManifest));

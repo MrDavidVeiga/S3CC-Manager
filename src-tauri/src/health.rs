@@ -199,6 +199,7 @@ fn dbpf_error_category(message: &str) -> &'static str {
 fn is_disabled_file(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name.ends_with(".package.disabled")
+        || name.ends_with(".package.duplicated")
         || name.ends_with(".package.off")
         || name.ends_with(".dbc.disabled")
 }

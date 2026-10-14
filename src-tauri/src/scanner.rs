@@ -231,14 +231,16 @@ pub fn invalidate_latest_scan_for(root: &Path) {
 }
 
 fn package_extension(path: &Path) -> bool {
-    // Treat .package.disabled as an inactive DBPF for ORGANIZATION only.
+    // Treat disabled duplicate markers as inactive DBPFs for organization.
     // The physical .disabled suffix is never stripped, so the game will not
     // load the package after a move. Duplicate and conflict scans have their
     // own active-package discovery rules and remain unchanged.
     let name = path.file_name()
         .map(|v| v.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    name.ends_with(".package") || name.ends_with(".package.disabled")
+    name.ends_with(".package")
+        || name.ends_with(".package.disabled")
+        || name.ends_with(".package.duplicated")
 }
 
 fn contains_ascii_case_insensitive(data: &[u8], needle: &str) -> bool {
@@ -4019,7 +4021,9 @@ pub fn scan_packages_core(
     let mut stats = ScanStats::default();
     stats.packages = items.len();
     for item in &items {
-        if item.name.to_ascii_lowercase().ends_with(".package.disabled") {
+        if item.name.to_ascii_lowercase().ends_with(".package.disabled")
+            || item.name.to_ascii_lowercase().ends_with(".package.duplicated")
+        {
             stats.disabled += 1;
         }
         stats.casp_resources += item
@@ -4138,7 +4142,9 @@ pub fn scan_selected_package_paths(
         ..ScanStats::default()
     };
     for item in &items {
-        if item.name.to_ascii_lowercase().ends_with(".package.disabled") {
+        if item.name.to_ascii_lowercase().ends_with(".package.disabled")
+            || item.name.to_ascii_lowercase().ends_with(".package.duplicated")
+        {
             stats.disabled += 1;
         }
         stats.casp_resources += item
@@ -4761,6 +4767,7 @@ mod tests {
     #[test]
     fn legacy_active_and_disabled_packages_are_organized_without_reactivating() {
         assert!(package_extension(Path::new("TMZ_CustomBodyHair.package.disabled")));
+        assert!(package_extension(Path::new("TMZ_CustomBodyHair.package.duplicated")));
         assert!(package_extension(Path::new("OneEuroMuttTip Width.package")));
         assert!(!package_extension(Path::new("OneEuroMuttTip Width.package.bak")));
         assert!(!package_extension(Path::new("Backup.zip")));
