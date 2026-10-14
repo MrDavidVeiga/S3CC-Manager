@@ -293,14 +293,17 @@ fn manual_model_index_backup_path() -> PathBuf {
     PathBuf::from(format!("{}.bak", path.to_string_lossy()))
 }
 
+fn manual_model_root_matches(reference_root: &str, canonical_root: &Path) -> bool {
+    normalized_path_key(Path::new(""), Path::new(reference_root))
+        == normalized_path_key(Path::new(""), canonical_root)
+}
+
 fn load_persistent_manual_model_index(root: &Path) -> Option<ManualModelIndex> {
     let canonical_root = root.canonicalize().ok()?;
     let text = fs::read_to_string(manual_model_index_path()).ok()?;
     let envelope = serde_json::from_str::<PersistentManualModelIndex>(&text).ok()?;
     if envelope.version != PERSISTENT_MANUAL_MODEL_INDEX_VERSION
-        || !envelope
-            .reference_root
-            .eq_ignore_ascii_case(&canonical_root.to_string_lossy())
+        || !manual_model_root_matches(&envelope.reference_root, &canonical_root)
     {
         return None;
     }
@@ -664,6 +667,18 @@ fn resolve_model_destination(
         });
     }
     let candidate = strip_packages_prefix(candidate_parts);
+    // The model index contains the selected root as an empty directory so
+    // canonical empty roots can be preserved. That directory is not a
+    // semantic destination for an unknown package, however: without an
+    // exact SHA-256 identity, resolving [] would incorrectly mark every loose
+    // root package as already organized. Route those packages through the
+    // explicit review fallback instead.
+    if candidate.is_empty() {
+        return Err(
+            "The manual model root is not a classification destination without an exact package identity."
+                .to_string(),
+        );
+    }
     let canonical_parts = index.directories.get(&model_key(&candidate)).cloned()
         .or_else(|| semantic_model_directory(index, &candidate))
         .or_else(|| unique_model_directory_ignoring_age_bucket(index, &candidate))
@@ -1806,13 +1821,99 @@ fn append_preview_image_items(
             if relative_parts.is_empty() {
                 continue;
             }
-            let origin = relative_parts.remove(0);
+            let branch_offset = usize::from(
+                relative_parts.first().is_some_and(|part| {
+                    part.eq_ignore_ascii_case("Packages")
+                        || part.eq_ignore_ascii_case("Overrides")
+                }),
+            );
+            let mut collapsed_nested_preview_bucket = false;
+            if relative_parts
+                .get(branch_offset)
+                .is_some_and(|part| part.eq_ignore_ascii_case(language.previews_folder()))
+            {
+                let duplicate_index = branch_offset + 1;
+                while relative_parts
+                    .get(duplicate_index)
+                    .is_some_and(|part| part.eq_ignore_ascii_case(language.previews_folder()))
+                {
+                    relative_parts.remove(duplicate_index);
+                    collapsed_nested_preview_bucket = true;
+                }
+            }
+            // Packages/Previews de CCs and Overrides/Previews de CCs are
+            // already canonical after the preview bucket, regardless of the
+            // preserved origin context (which may itself be "Packages").
+            // Only a repeated preview bucket is legacy nesting that must be
+            // collapsed; do not prepend the bucket on a second pass.
+            if relative_parts
+                .get(branch_offset)
+                .is_some_and(|part| part.eq_ignore_ascii_case(language.previews_folder()))
+                && !collapsed_nested_preview_bucket
+            {
+                let file_name = source
+                    .file_name()
+                    .ok_or_else(|| "Preview has no filename".to_string())?;
+                let (sha256, size) = sha256_file(&source).map_err(|error| {
+                    format!("Could not hash preview {}: {error}", source.display())
+                })?;
+                stats.already_organized += 1;
+                items.push(PlanItem {
+                    id: format!("preview:{}", sha256),
+                    name: file_name.to_string_lossy().to_string(),
+                    source_path: source.to_string_lossy().to_string(),
+                    source_relative_path: relative_key(relative),
+                    destination_path: Some(source.to_string_lossy().to_string()),
+                    destination_relative_path: Some(relative_key(relative)),
+                    classification_status: "preview".to_string(),
+                    classification_reason: Some(
+                        "Image preview is already in the canonical preview bucket.".to_string(),
+                    ),
+                    plan_status: "already_organized_preview".to_string(),
+                    sha256: Some(sha256),
+                    size,
+                    warnings: Vec::new(),
+                });
+                continue;
+            }
+            // A Mods-root scan includes the loading branch in the relative
+            // path. Remove that branch before preserving the legacy origin;
+            // otherwise ensure_packages_destination() prepends Packages (or
+            // Overrides) to an origin that already contains the same branch,
+            // producing Packages/Previews/Packages/... on the next pass.
+            let source_branch = relative_parts
+                .first()
+                .filter(|part| {
+                    part.eq_ignore_ascii_case("Packages")
+                        || part.eq_ignore_ascii_case("Overrides")
+                })
+                .cloned();
+            if source_branch.is_some() {
+                relative_parts.remove(0);
+            }
+            if relative_parts
+                .first()
+                .is_some_and(|part| part.eq_ignore_ascii_case(language.previews_folder()))
+            {
+                relative_parts.remove(0);
+            }
+            let Some(origin) = relative_parts.first().cloned() else {
+                continue;
+            };
+            relative_parts.remove(0);
             // The filename is appended by destination_path; keep only its
             // parent directories in destination_parts.
             relative_parts.pop();
             let mut destination_parts = vec![language.previews_folder().to_string(), origin];
             destination_parts.extend(relative_parts.iter().cloned());
-            destination_parts = ensure_packages_destination(root, &destination_parts);
+            destination_parts = if source_branch
+                .as_deref()
+                .is_some_and(|branch| branch.eq_ignore_ascii_case("Overrides"))
+            {
+                ensure_source_loading_branch(root, &source, &destination_parts)
+            } else {
+                ensure_packages_destination(root, &destination_parts)
+            };
             let file_name = source
                 .file_name()
                 .ok_or_else(|| "Preview has no filename".to_string())?;
@@ -1962,6 +2063,46 @@ fn append_auxiliary_items(
                     || part.eq_ignore_ascii_case(duplicate_folder)
                     || part.eq_ignore_ascii_case(uncategorized_folder)
             }) {
+                continue;
+            }
+
+            // A previous execution may already have placed a companion under
+            // the canonical Packages/#Sem Categoria/Arquivos Auxiliares
+            // bucket. The selected Mods root includes the loading branch in
+            // relative_parts, so recognize that complete physical prefix
+            // before constructing a new destination. This is intentionally
+            // exact: an Overrides companion still follows the normal
+            // migration path, while a canonical Packages companion is
+            // idempotent even when its preserved origin is named Packages.
+            if relative_parts.len() >= 4
+                && relative_parts[0].eq_ignore_ascii_case("Packages")
+                && relative_parts[1].eq_ignore_ascii_case(uncategorized_folder)
+                && relative_parts[2].eq_ignore_ascii_case("Arquivos Auxiliares")
+            {
+                let file_name = source
+                    .file_name()
+                    .ok_or_else(|| "Auxiliary file has no filename".to_string())?;
+                let (sha256, size) = sha256_file(&source).map_err(|error| {
+                    format!("Could not hash auxiliary file {}: {error}", source.display())
+                })?;
+                stats.already_organized += 1;
+                items.push(PlanItem {
+                    id: format!("auxiliary:{sha256}"),
+                    name: file_name.to_string_lossy().to_string(),
+                    source_path: source.to_string_lossy().to_string(),
+                    source_relative_path: relative_key(relative),
+                    destination_path: Some(source.to_string_lossy().to_string()),
+                    destination_relative_path: Some(relative_key(relative)),
+                    classification_status: "auxiliary".to_string(),
+                    classification_reason: Some(
+                        "Auxiliary file is already in the canonical preservation bucket."
+                            .to_string(),
+                    ),
+                    plan_status: "already_organized_auxiliary".to_string(),
+                    sha256: Some(sha256),
+                    size,
+                    warnings: Vec::new(),
+                });
                 continue;
             }
 
@@ -3741,10 +3882,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         // review area; their complete source path remains in the manifest and
         // history. Do not redirect Overrides or invalid/mixed packages without
         // a manual decision.
-        if item.status != "classified"
-            && !is_override_source
-            && !(item.status == "unknown" && matches!(hash_model_destination.as_ref(), Some(Ok(_))))
-        {
+        if item.status != "classified" && !is_override_source {
             let (fallback_relative, fallback_parts) =
                 fallback_relative_path(&root, language, &item.relative_path, &source_hash)?;
             // The fallback may choose a unique SHA-named file if its normal
@@ -4561,6 +4699,25 @@ pub async fn build_organization_plan_with_cfg(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn persistent_model_index_accepts_windows_verbatim_path_identity() {
+        let canonical = std::path::Path::new(
+            r"C:\Users\David\Downloads\Mods - ESTRUTURA MODELO\Packages",
+        );
+        assert!(manual_model_root_matches(
+            r"\\?\C:\Users\David\Downloads\Mods - ESTRUTURA MODELO\Packages",
+            canonical
+        ));
+        assert!(manual_model_root_matches(
+            r"c:/users/david/downloads/mods - estrutura modelo/packages",
+            canonical
+        ));
+        assert!(!manual_model_root_matches(
+            r"C:\Users\David\Downloads\Mods - ESTRUTURA MODELO\Packages\Legacy",
+            canonical
+        ));
+    }
+
+    #[test]
     fn copied_mods_root_preserves_packages_overrides_and_safe_destinations() {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nonce = SystemTime::now()
@@ -5064,6 +5221,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn empty_manual_model_root_is_not_a_destination_for_unknown_content() {
+        let mut directories = BTreeMap::new();
+        directories.insert(String::new(), Vec::new());
+        let index = ManualModelIndex {
+            directories,
+            files_by_sha256: HashMap::new(),
+        };
+        let result = resolve_model_destination(
+            &index,
+            Path::new("Mods - Copia"),
+            Path::new("Mods - Copia/Packages/unknown.package"),
+            "UNKNOWN",
+            &[],
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("not a classification destination"));
+    }
 
     fn synthetic_scan_item(
         root: &Path,
