@@ -165,13 +165,15 @@ pub(crate) fn reconcile_organization_moves(
     root: &Path,
     language: AppLanguage,
     moves: &[(PathBuf, PathBuf)],
-) -> Result<bool, String> {
+) -> Result<Option<UnifiedAnalysis>, String> {
     if moves.is_empty() {
-        return Ok(true);
+        return Ok(None);
     }
     let root = stable_path(root);
     cache::relocate_cached_entries(&root, moves)?;
-    let scanner_reconciled = reconcile_latest_scan_moves(&root, language, moves);
+    // Keep the standalone scanner cache aligned too. The full reconciled
+    // analysis below remains authoritative for the frontend response.
+    let _ = reconcile_latest_scan_moves(&root, language, moves);
 
     let mut cached = {
         let mut slot = latest_slot()
@@ -180,14 +182,14 @@ pub(crate) fn reconcile_organization_moves(
         slot.take()
     };
     let Some(mut cached_value) = cached.take() else {
-        return Ok(false);
+        return Ok(None);
     };
     if cached_value.root != root || cached_value.language != language {
         let mut slot = latest_slot()
             .lock()
             .map_err(|_| "Unified analysis cache lock is poisoned.")?;
         *slot = Some(cached_value);
-        return Ok(false);
+        return Ok(None);
     }
 
     let reconcile_result = (|| -> Result<(), String> {
@@ -210,9 +212,10 @@ pub(crate) fn reconcile_organization_moves(
     let mut slot = latest_slot()
         .lock()
         .map_err(|_| "Unified analysis cache lock is poisoned.")?;
+    let response = cached_value.result.clone();
     *slot = Some(cached_value);
     reconcile_result?;
-    Ok(scanner_reconciled)
+    Ok(Some(response))
 }
 
 pub(crate) fn analyze_unified_core(
@@ -355,11 +358,23 @@ mod tests {
     };
 
     fn minimal_dbpf(seed: u8) -> Vec<u8> {
-        let mut bytes = vec![0u8; 96];
+        // One real S3SA entry keeps the fixture small while exercising the
+        // shared resource index used by duplicates and conflicts.
+        const DATA_OFFSET: u32 = 96;
+        const INDEX_OFFSET: u32 = DATA_OFFSET + 1;
+        let mut bytes = vec![0u8; DATA_OFFSET as usize];
         bytes[0..4].copy_from_slice(b"DBPF");
         bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
-        bytes[8] = seed;
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[36..40].copy_from_slice(&1u32.to_le_bytes());
+        bytes[44..48].copy_from_slice(&36u32.to_le_bytes());
         bytes[60..64].copy_from_slice(&3u32.to_le_bytes());
+        bytes[64..68].copy_from_slice(&INDEX_OFFSET.to_le_bytes());
+        bytes.push(seed);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for value in [0x073F_AA07u32, 0, 0, 0, DATA_OFFSET, 1, 1, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
         bytes
     }
 
@@ -374,6 +389,11 @@ mod tests {
             .join("target")
             .join(format!("s3cc-unified-analysis-{nonce}"));
         fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("Resource.cfg"),
+            "Priority 500\nPackedFile *.package\nPriority 600\nPackedFile Sliders/*.package\n",
+        )
+        .unwrap();
         fs::write(root.join("a.package"), minimal_dbpf(7)).unwrap();
         fs::write(root.join("b.package"), minimal_dbpf(7)).unwrap();
 
@@ -409,12 +429,37 @@ mod tests {
         let moved = root.join("Sliders").join("a.package");
         fs::create_dir_all(moved.parent().unwrap()).unwrap();
         fs::rename(root.join("a.package"), &moved).unwrap();
-        assert!(reconcile_organization_moves(
+        let reconciled = reconcile_organization_moves(
             &root,
             AppLanguage::Pt,
             &[(root.join("a.package"), moved.clone())],
         )
-        .expect("reconcile verified rename"));
+        .expect("reconcile verified rename")
+        .expect("reconciled unified result");
+        assert!(reconciled
+            .scan
+            .items
+            .iter()
+            .any(|item| item.relative_path == "Sliders\\a.package"));
+        assert!(reconciled.duplicates.groups.iter().any(|group| {
+            group
+                .members
+                .iter()
+                .any(|member| member.relative_path == "Sliders\\a.package")
+        }));
+        assert!(!reconciled.conflicts.findings.is_empty());
+        assert!(reconciled.conflicts.findings.iter().all(|finding| {
+            // Every derived package reference in the returned result is the
+            // post-rename reference the frontend must render.
+            !finding.left.relative_path.eq_ignore_ascii_case("a.package")
+                && !finding.right.relative_path.eq_ignore_ascii_case("a.package")
+        }));
+        assert!(reconciled.conflicts.findings.iter().any(|finding| {
+            [&finding.left, &finding.right].into_iter().any(|package| {
+                package.relative_path == "Sliders\\a.package"
+                    && package.load_priority == Some(600)
+            })
+        }));
         let after_move =
             analyze_unified_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
                 .expect("reused unified analysis after move");

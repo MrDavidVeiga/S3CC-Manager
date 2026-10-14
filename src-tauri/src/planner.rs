@@ -3667,6 +3667,49 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             continue;
         }
 
+        // A package can be structurally unreadable or lack enough metadata
+        // for a new classification while still being an exact, known model
+        // asset already placed at its complete canonical destination. Do not
+        // send that canonical copy back to #Sem Categoria on a later pass.
+        // This is intentionally stricter than a category-name comparison:
+        // it requires both the model's full SHA-256 identity and the exact
+        // relative destination path. A legacy `Creator\\Sliders` copy can
+        // therefore never qualify as already organized here.
+        if item.status != "classified" {
+            if let Some(Ok(model_destination)) = hash_model_destination.as_ref() {
+                let mut expected_relative = PathBuf::new();
+                for part in &model_destination.parts {
+                    expected_relative.push(part);
+                }
+                expected_relative.push(
+                    source
+                        .file_name()
+                        .ok_or_else(|| format!("Source has no filename: {}", source.display()))?,
+                );
+                let expected_destination = root.join(&expected_relative);
+                if same_path_case_insensitive(&source_canonical, &expected_destination) {
+                    stats.already_organized += 1;
+                    items.push(PlanItem {
+                        id: item.id.clone(),
+                        name: item.name.clone(),
+                        source_path: source_canonical.to_string_lossy().to_string(),
+                        source_relative_path: item.relative_path.clone(),
+                        destination_path: Some(expected_destination.to_string_lossy().to_string()),
+                        destination_relative_path: Some(relative_key(&expected_relative)),
+                        classification_status: item.status.clone(),
+                        classification_reason: item.classification_reason.clone(),
+                        plan_status: "already_organized".to_string(),
+                        sha256: Some(source_hash),
+                        size: item.file_size,
+                        warnings: vec![
+                            "Exact SHA-256 model identity is already at the complete canonical path; no fallback move is proposed.".to_string(),
+                        ],
+                    });
+                    continue;
+                }
+            }
+        }
+
         // A manual-review result is a protected decision state, not an
         // invitation to move the package into a guessed fallback. Unknown
         // packages may still use #Sem Categoria when the user explicitly

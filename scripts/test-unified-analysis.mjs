@@ -42,6 +42,9 @@ assert.doesNotMatch(app, /runAutomaticAnalyses/);
 assert.match(app, /showOperationResult/);
 assert.match(html, /id="operation-result-modal"/);
 assert.match(app, /sharedAnalysisReconciled = result\.analysisReconciled === true/);
+assert.match(app, /const reconciledAnalysis = result\.reconciledAnalysis/);
+assert.match(app, /state\.duplicatesAnalysis = reconciledAnalysis\.duplicates/);
+assert.match(app, /state\.conflictsAnalysis = reconciledAnalysis\.conflicts/);
 assert.match(app, /state\.analysisStatus\.duplicates = sharedAnalysisReconciled \? "completed" : "stale"/);
 
 const functionSlice = (name) => {

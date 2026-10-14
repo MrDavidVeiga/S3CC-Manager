@@ -46,6 +46,11 @@ pub struct ExecutionResult {
     pub analysis_current: Option<OrganizationAnalysisSnapshot>,
     #[serde(default)]
     pub analysis_reconciled: bool,
+    /// Complete post-rename views from the shared analysis. Returning this
+    /// prevents the frontend from retaining stale priority, severity or
+    /// relation IDs while avoiding a second DBPF scan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciled_analysis: Option<unified_analysis::UnifiedAnalysis>,
     #[serde(default)]
     pub timings: ExecutionTimings,
 }
@@ -449,11 +454,14 @@ fn cleanup_empty_directories_after_organization_with_protected(
     scope_roots: Option<&[PathBuf]>,
     protected_relative_directories: &[String],
 ) -> (usize, usize, Vec<String>) {
-    let is_reserved_branch = |path: &Path| {
-        path.components().any(|component| {
-            let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+    let is_reserved_root = |path: &Path| {
+        // Protect the special-folder roots themselves, not every descendant.
+        // Older Manager versions created hash/category/source-path buckets
+        // inside #Duplicados and #Sem Categoria. Once those buckets become
+        // empty, keeping them would recreate the legacy hierarchy forever.
+        path.file_name().is_some_and(|name| {
             matches!(
-                value.as_str(),
+                name.to_string_lossy().to_ascii_lowercase().as_str(),
                 "#duplicados"
                     | "#duplicates"
                     | "#sem categoria"
@@ -466,7 +474,7 @@ fn cleanup_empty_directories_after_organization_with_protected(
         })
     };
     let is_protected_empty_directory = |path: &Path| {
-        is_reserved_branch(path)
+        is_reserved_root(path)
             || protected_relative_directories.iter().any(|relative| {
                 normalized_path_key(root, path) == normalized_path_key(root, Path::new(relative))
             })
@@ -943,6 +951,7 @@ fn execute_organization_plan_core(
                 .with_plan(&plan.stats, remaining_legacy_files),
             analysis_current,
             analysis_reconciled: true,
+            reconciled_analysis: None,
             timings,
         });
     }
@@ -1230,6 +1239,7 @@ fn execute_organization_plan_core(
             execution: plan.analysis_before.clone().with_plan(&plan.stats, 0),
             analysis_current: None,
             analysis_reconciled: false,
+            reconciled_analysis: None,
             timings: ExecutionTimings {
                 total_ms: total_started.elapsed().as_millis(),
                 ..timings
@@ -1267,7 +1277,7 @@ fn execute_organization_plan_core(
         .iter()
         .map(|(source, destination, _, _)| (source.clone(), destination.clone()))
         .collect::<Vec<_>>();
-    let analysis_reconciled = match unified_analysis::reconcile_organization_moves(
+    let reconciled_analysis = match unified_analysis::reconcile_organization_moves(
         &root,
         language,
         &moved_path_pairs,
@@ -1277,9 +1287,10 @@ fn execute_organization_plan_core(
             errors.push(format!(
                 "Organization completed, but shared analysis needs refresh: {error}"
             ));
-            false
+            None
         }
     };
+    let analysis_reconciled = moved_path_pairs.is_empty() || reconciled_analysis.is_some();
     timings.cache_reconcile_ms = cache_reconcile_started.elapsed().as_millis();
     timings.total_ms = total_started.elapsed().as_millis();
     let analysis_current = Some(incremental_current_snapshot(&plan, remaining_legacy_files));
@@ -1320,6 +1331,7 @@ fn execute_organization_plan_core(
             .with_plan(&plan.stats, remaining_legacy_files),
         analysis_current,
         analysis_reconciled,
+        reconciled_analysis,
         timings,
     })
 }
@@ -2054,6 +2066,31 @@ mod tests {
             fs::write(path, minimal_dbpf(seed)).unwrap();
         }
 
+        // A minimal valid DBPF containing S3SA. It is deliberately placed at
+        // the Packages root so this end-to-end fixture proves that a package
+        // with real internal classification evidence is not mistaken for an
+        // intentional root asset such as sim_export_merged.
+        fn write_script_package(path: &Path, seed: u8) {
+            const TYPE_S3SA: u32 = 0x073F_AA07;
+            const DATA_OFFSET: u32 = 96;
+            const INDEX_OFFSET: u32 = DATA_OFFSET + 1;
+            let mut bytes = vec![0u8; DATA_OFFSET as usize];
+            bytes[0..4].copy_from_slice(b"DBPF");
+            bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+            bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+            bytes[36..40].copy_from_slice(&1u32.to_le_bytes());
+            bytes[44..48].copy_from_slice(&36u32.to_le_bytes());
+            bytes[60..64].copy_from_slice(&3u32.to_le_bytes());
+            bytes[64..68].copy_from_slice(&INDEX_OFFSET.to_le_bytes());
+            bytes.push(seed);
+            bytes.extend_from_slice(&0u32.to_le_bytes()); // index type: no shared fields
+            for value in [TYPE_S3SA, 0, 0, seed as u32, DATA_OFFSET, 1, 1, 0] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+
         fn inventory(root: &Path) -> BTreeMap<String, usize> {
             let mut result = BTreeMap::new();
             for entry in walkdir::WalkDir::new(root)
@@ -2116,6 +2153,7 @@ mod tests {
         let conflicting_a = packages.join("Legacy").join("Same.package");
         let conflicting_b = packages.join("Other").join("Same.package");
         let auxiliary = packages.join("Legacy").join("readme.txt");
+        let root_script = packages.join("RootGameplay.package");
         let old_empty = packages.join("#6 Sliders").join("Empty").join("Nested");
         let official_empty = packages.join("Sliders").join("Chapéus");
         let root_string = packages.to_string_lossy().into_owned();
@@ -2127,10 +2165,11 @@ mod tests {
             packages.join("Legacy"),
             packages.join("Other"),
         ];
-        let selected = selected_roots
+        let mut selected = selected_roots
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        selected.push(root_script.to_string_lossy().into_owned());
 
         let test_result =
             catch_unwind(AssertUnwindSafe(|| {
@@ -2138,6 +2177,7 @@ mod tests {
                 fs::create_dir_all(&packages).unwrap();
                 fs::create_dir_all(&official_empty).unwrap();
                 fs::create_dir_all(model.join("Sliders").join("Chapéus")).unwrap();
+                fs::create_dir_all(model.join("Scripts").join("Jogabilidade")).unwrap();
                 fs::create_dir_all(model.join("#Sem Categoria")).unwrap();
                 fs::create_dir_all(model.join("#Duplicados")).unwrap();
                 write_package(&canonical_model, 0);
@@ -2147,6 +2187,7 @@ mod tests {
                 write_package(&disabled, 1);
                 write_package(&conflicting_a, 2);
                 write_package(&conflicting_b, 3);
+                write_script_package(&root_script, 9);
                 fs::write(&auxiliary, b"fixture auxiliary").unwrap();
                 fs::create_dir_all(&old_empty).unwrap();
 
@@ -2159,8 +2200,8 @@ mod tests {
                     AppLanguage::Pt,
                 ))
                 .expect("physical fixture scan");
-                assert_eq!(scan.stats.packages, 6);
-                assert!(scan.stats.package_reads >= 6);
+                assert_eq!(scan.stats.packages, 7);
+                assert!(scan.stats.package_reads >= 7);
                 let cached_before = crate::scanner::cached_scan_for(&packages, AppLanguage::Pt)
                     .expect("scanner cache after application scan");
 
@@ -2190,6 +2231,13 @@ mod tests {
                     item.source_path.ends_with("Other\\Same.package")
                         && item.plan_status == "collision_different_content"
                 }));
+                assert!(plan.items.iter().any(|item| {
+                    normalized_path_key(&packages, Path::new(&item.source_path))
+                        == normalized_path_key(&packages, &root_script)
+                        && item.plan_status == "ready"
+                        && item.destination_relative_path.as_deref()
+                            == Some("Scripts\\Jogabilidade\\RootGameplay.package")
+                }), "a classified root package must be routed to its canonical category: {plan:?}");
                 // This is the same data path used by Visualizar Plano: a second
                 // preview must consume the valid scan cache instead of reopening
                 // the DBPF corpus.
@@ -2214,10 +2262,19 @@ mod tests {
                 assert_unique_ready_paths(&packages, &second_plan);
 
                 let before_inventory = inventory(&packages);
+                let planning_ms = plan.stats.planning_ms;
                 let result =
                     execute_organization_plan_core(plan, AppLanguage::Pt, false, None, Vec::new())
                         .expect("physical fixture organization");
                 assert_eq!(result.status, "COMPLETE");
+                println!(
+                    "physical fixture timing: planning={}ms moving={}ms cleanup={}ms integrity={}ms total={}ms",
+                    planning_ms,
+                    result.timings.moving_ms,
+                    result.timings.cleanup_ms,
+                    result.timings.integrity_ms,
+                    result.timings.total_ms,
+                );
                 assert!(
                     result.errors.is_empty(),
                     "unexpected execution warnings: {:?}",
@@ -2250,9 +2307,20 @@ mod tests {
                     .join("Canonical.package")
                     .is_file());
                 assert!(packages
+                    .join("Scripts")
+                    .join("Jogabilidade")
+                    .join("RootGameplay.package")
+                    .is_file(), "classified package was left at Packages root");
+                assert!(!root_script.exists());
+                assert!(packages
                     .join("#Duplicados")
                     .join("Canonical.package.duplicated")
                     .is_file());
+                assert!(packages.join("#Duplicados").is_dir());
+                assert!(
+                    !packages.join("#Duplicados").join("OldBucket").exists(),
+                    "empty legacy bucket below #Duplicados was retained"
+                );
                 assert!(walkdir::WalkDir::new(packages.join("#Duplicados"))
                     .follow_links(false)
                     .into_iter()
@@ -2273,11 +2341,7 @@ mod tests {
                 ))
                 .expect("post-organization scan");
                 assert!(second_scan.stats.packages >= 5);
-                let idempotent_selected = selected
-                    .iter()
-                    .filter(|path| Path::new(path).is_dir())
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let idempotent_selected = vec![root_string.clone()];
                 let idempotent_plan = crate::planner::build_organization_plan_with_cfg_core(
                     root_string.clone(),
                     AppLanguage::Pt,

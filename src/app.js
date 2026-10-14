@@ -9079,8 +9079,20 @@ function reconcileSuccessfulOrganization(result) {
     member.relativePath = move.destinationRelativePath;
     member.name = String(move.destinationPath || "").split(/[\\/]/).pop() || member.name;
   };
+  const reconciledAnalysis = result.reconciledAnalysis;
   const sharedAnalysisReconciled = result.analysisReconciled === true;
-  if (sharedAnalysisReconciled) {
+  if (reconciledAnalysis?.scan && reconciledAnalysis?.duplicates && reconciledAnalysis?.conflicts) {
+    // The backend recalculates conflict load priority, severity, finding IDs,
+    // duplicate relation IDs and scan paths after verified renames. Replace
+    // whole views rather than attempting to mirror those derived fields in
+    // JavaScript.
+    state.items = reconciledAnalysis.scan.items || state.items;
+    state.stats = reconciledAnalysis.scan.stats || state.stats;
+    state.duplicatesAnalysis = reconciledAnalysis.duplicates;
+    state.conflictsAnalysis = reconciledAnalysis.conflicts;
+  } else if (sharedAnalysisReconciled) {
+    // Cleanup-only execution has no renamed package. Keep the existing view;
+    // there are no priorities or relationships to recalculate.
     for (const group of state.duplicatesAnalysis?.groups || []) {
       for (const member of group.members || []) reconcileMember(member);
     }
