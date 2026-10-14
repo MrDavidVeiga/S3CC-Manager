@@ -1,17 +1,18 @@
 use crate::{
-    workspace::ensure_writable,
     i18n::AppLanguage,
     manifest::{
         replace_manifest_atomic, sha256_file, write_manifest_atomic, RestoreEntry, RestoreManifest,
     },
+    operation,
     planner::{
         build_organization_plan_with_cfg_core, normalized_path_key, OrganizationAnalysisSnapshot,
         OrganizationPlan, PlanItem,
     },
-    scanner::{invalidate_latest_scan_for, scan_packages_core},
-    operation,
-    resource_cfg::{parse_resource_cfg, package_priority},
+    resource_cfg::{package_priority, parse_resource_cfg},
     resource_cfg_update::{apply_resource_cfg_update, rollback_resource_cfg_update},
+    scanner::invalidate_latest_scan_for,
+    unified_analysis,
+    workspace::ensure_writable,
 };
 use chrono::{Local, SecondsFormat};
 use serde::Serialize;
@@ -69,25 +70,34 @@ fn organized_parent(root: &Path, pairs: &[(PathBuf, PathBuf, String, u64)]) -> P
     let mut common = first.parent().unwrap_or(root).to_path_buf();
     for (_, destination, _, _) in pairs.iter().skip(1) {
         while !destination.starts_with(&common) {
-            let Some(parent) = common.parent() else { return root.to_path_buf() };
+            let Some(parent) = common.parent() else {
+                return root.to_path_buf();
+            };
             common = parent.to_path_buf();
         }
     }
-    if !common.starts_with(root) { return root.to_path_buf(); }
+    if !common.starts_with(root) {
+        return root.to_path_buf();
+    }
     common
 }
 
 fn make_manifest_path(root: &Path) -> Result<PathBuf, String> {
     let base = std::env::var_os("S3CC_RESTORE_MANIFEST_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| root
-            .parent()
-            .unwrap_or(root)
-            .join("S3CC Manager")
-            .join("Restore Manifests"));
+        .unwrap_or_else(|| {
+            root.parent()
+                .unwrap_or(root)
+                .join("S3CC Manager")
+                .join("Restore Manifests")
+        });
 
-    fs::create_dir_all(&base)
-        .map_err(|error| format!("Could not create restore manifest directory {}: {error}", base.display()))?;
+    fs::create_dir_all(&base).map_err(|error| {
+        format!(
+            "Could not create restore manifest directory {}: {error}",
+            base.display()
+        )
+    })?;
 
     let stamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
     for suffix in 0..10_000usize {
@@ -130,10 +140,7 @@ fn validate_ready_execution_paths(root: &Path, ready: &[&PlanItem]) -> Result<()
         let source_key = normalized_path_key(root, source);
         let destination_key = normalized_path_key(root, destination);
 
-        sources
-            .entry(source_key)
-            .or_default()
-            .push(*item);
+        sources.entry(source_key).or_default().push(*item);
 
         if let Some(other) = destinations.get(&destination_key) {
             return Err(format!(
@@ -161,10 +168,9 @@ fn validate_ready_execution_paths(root: &Path, ready: &[&PlanItem]) -> Result<()
         let destination = Path::new(item.destination_path.as_deref().unwrap());
         let destination_key = normalized_path_key(root, destination);
         if let Some(peers) = sources.get(&destination_key) {
-            if peers
-                .iter()
-                .any(|peer| normalized_path_key(root, Path::new(&peer.source_path)) != destination_key)
-            {
+            if peers.iter().any(|peer| {
+                normalized_path_key(root, Path::new(&peer.source_path)) != destination_key
+            }) {
                 let names = peers
                     .iter()
                     .map(|peer| peer.name.as_str())
@@ -190,17 +196,6 @@ fn validate_ready_execution_paths(root: &Path, ready: &[&PlanItem]) -> Result<()
     Ok(())
 }
 
-fn requires_post_execution_package_scan(plan: &OrganizationPlan) -> bool {
-    // A plan built from an explicit residual selection must not turn into a
-    // second full DBPF scan merely because one of its items is a package.
-    // The planner uses the same threshold as `scan_selected_roots`: below
-    // 512 selected packages it has already produced a focused scan and the
-    // executor can derive its post-state from the frozen plan.  Full plans
-    // retain the historical scan so the UI receives a complete current
-    // inventory after a broad organization.
-    plan.stats.selected >= 512
-}
-
 fn incremental_current_snapshot(
     plan: &OrganizationPlan,
     remaining_legacy_files: usize,
@@ -211,7 +206,9 @@ fn incremental_current_snapshot(
 }
 
 fn package_extension(path: &Path) -> bool {
-    let lower = path.file_name().map(|v| v.to_string_lossy().to_ascii_lowercase())
+    let lower = path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     lower.ends_with(".package")
         || lower.ends_with(".package.disabled")
@@ -219,10 +216,17 @@ fn package_extension(path: &Path) -> bool {
 }
 
 fn snapshot_extension(path: &Path) -> bool {
-    if package_extension(path) { return true; }
-    path.extension().and_then(|value| value.to_str()).is_some_and(|value| {
-        matches!(value.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff")
-    })
+    if package_extension(path) {
+        return true;
+    }
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff"
+            )
+        })
 }
 
 fn snapshot_entries(
@@ -235,7 +239,12 @@ fn snapshot_entries(
     for &item in ready {
         let source = PathBuf::from(&item.source_path)
             .canonicalize()
-            .map_err(|error| format!("Could not resolve planned source {}: {error}", item.source_path))?;
+            .map_err(|error| {
+                format!(
+                    "Could not resolve planned source {}: {error}",
+                    item.source_path
+                )
+            })?;
         let destination = item
             .destination_relative_path
             .as_ref()
@@ -259,7 +268,8 @@ fn snapshot_entries(
     };
     if !targeted_only {
         for entry in WalkDir::new(root).follow_links(false).into_iter() {
-            let entry = entry.map_err(|error| format!("Could not snapshot package tree: {error}"))?;
+            let entry =
+                entry.map_err(|error| format!("Could not snapshot package tree: {error}"))?;
             if entry.file_type().is_file() && snapshot_extension(entry.path()) {
                 package_paths.push(entry.path().to_path_buf());
             }
@@ -280,8 +290,12 @@ fn snapshot_entries(
             .map_err(|_| format!("Snapshot file escaped root: {}", absolute.display()))?
             .to_path_buf();
 
-        let (sha256, size) = sha256_file(&absolute)
-            .map_err(|error| format!("Could not hash snapshot file {}: {error}", absolute.display()))?;
+        let (sha256, size) = sha256_file(&absolute).map_err(|error| {
+            format!(
+                "Could not hash snapshot file {}: {error}",
+                absolute.display()
+            )
+        })?;
 
         let organized_relative = if let Some((item, destination)) = planned.get(&absolute) {
             let expected_hash = item
@@ -337,8 +351,8 @@ fn manifest_from_snapshot(
 }
 
 fn verify_identity(path: &Path, expected_hash: &str, expected_size: u64) -> Result<(), String> {
-    let (hash, size) = sha256_file(path)
-        .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let (hash, size) =
+        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
     if size != expected_size || !hash.eq_ignore_ascii_case(expected_hash) {
         return Err(format!(
             "Identity changed for {} (expected size/hash {} / {}, got {} / {}).",
@@ -379,12 +393,7 @@ pub(crate) fn cleanup_empty_directories_after_organization(
     root: &Path,
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
 ) -> (usize, usize, Vec<String>) {
-    cleanup_empty_directories_after_organization_with_protected(
-        root,
-        moved_pairs,
-        None,
-        &[],
-    )
+    cleanup_empty_directories_after_organization_with_protected(root, moved_pairs, None, &[])
 }
 
 fn cleanup_empty_directories_after_organization_scoped(
@@ -392,31 +401,43 @@ fn cleanup_empty_directories_after_organization_scoped(
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
     scope_roots: Option<&[PathBuf]>,
 ) -> (usize, usize, Vec<String>) {
-    cleanup_empty_directories_after_organization_with_protected(
-        root,
-        moved_pairs,
-        scope_roots,
-        &[],
-    )
+    cleanup_empty_directories_after_organization_with_protected(root, moved_pairs, scope_roots, &[])
 }
 
 fn cleanup_empty_directories_after_organization_with_protected(
     root: &Path,
-    moved_pairs: &[(PathBuf, PathBuf, String, u64)],
+    _moved_pairs: &[(PathBuf, PathBuf, String, u64)],
     scope_roots: Option<&[PathBuf]>,
     protected_relative_directories: &[String],
 ) -> (usize, usize, Vec<String>) {
-    let is_protected_empty_directory = |path: &Path| {
-        protected_relative_directories.iter().any(|relative| {
-            normalized_path_key(root, path)
-                == normalized_path_key(root, Path::new(relative))
+    let is_reserved_branch = |path: &Path| {
+        path.components().any(|component| {
+            let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+            matches!(
+                value.as_str(),
+                "#duplicados"
+                    | "#duplicates"
+                    | "#sem categoria"
+                    | "#not categorized"
+                    | "#sin categorizar"
+                    | "previews de ccs"
+                    | "cc previews"
+                    | "vistas previas de cc"
+            )
         })
     };
+    let is_protected_empty_directory = |path: &Path| {
+        is_reserved_branch(path)
+            || protected_relative_directories.iter().any(|relative| {
+                normalized_path_key(root, path) == normalized_path_key(root, Path::new(relative))
+            })
+    };
     let is_loading_branch_root = |path: &Path| {
-        (path == root || path.parent() == Some(root)) && path.file_name().is_some_and(|name| {
-            name.to_string_lossy().eq_ignore_ascii_case("Packages")
-                || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
-        })
+        (path == root || path.parent() == Some(root))
+            && path.file_name().is_some_and(|name| {
+                name.to_string_lossy().eq_ignore_ascii_case("Packages")
+                    || name.to_string_lossy().eq_ignore_ascii_case("Overrides")
+            })
     };
     let mut candidates = Vec::<PathBuf>::new();
     let mut warnings = Vec::<String>::new();
@@ -431,8 +452,7 @@ fn cleanup_empty_directories_after_organization_with_protected(
         }
         let full_tree_scope = scope_roots.is_some_and(|roots| {
             roots.iter().any(|root_path| {
-                normalized_path_key(root, root_path)
-                    == normalized_path_key(root, &walk_root)
+                normalized_path_key(root, root_path) == normalized_path_key(root, &walk_root)
             })
         });
         if scope_roots.is_none() || full_tree_scope {
@@ -443,7 +463,7 @@ fn cleanup_empty_directories_after_organization_with_protected(
                 .into_iter()
             {
                 match entry {
-                    Ok(entry) if entry.file_type().is_dir() => {
+                    Ok(entry) if entry.file_type().is_dir() && !entry.file_type().is_symlink() => {
                         let path = entry.path();
                         if is_protected_empty_directory(path) {
                             continue;
@@ -499,8 +519,27 @@ fn cleanup_empty_directories_after_organization_with_protected(
     candidates.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     candidates.dedup();
     let mut removed = 0;
+    let mut retained_candidates = candidates.clone();
     for folder in candidates {
         if is_protected_empty_directory(&folder) {
+            continue;
+        }
+        // Do not retain a ReadDir handle while calling remove_dir. Windows
+        // can otherwise report AccessDenied for a directory the Manager has
+        // itself just enumerated. The second check also prevents deletion if
+        // another process placed a file in the folder after planning.
+        let empty_now = match fs::read_dir(&folder) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warnings.push(format!(
+                    "Could not inspect legacy folder {} before cleanup: {error}",
+                    folder.display()
+                ));
+                continue;
+            }
+        };
+        if !empty_now {
             continue;
         }
         match fs::remove_dir(&folder) {
@@ -512,16 +551,18 @@ fn cleanup_empty_directories_after_organization_with_protected(
             }
             Err(error) => {
                 // A nonempty directory is expected and must be kept intact.
-                // Surface only failures concerning an actually empty folder.
+                // Surface only failures concerning an actually empty folder,
+                // including a genuine Windows AccessDenied after the handle
+                // from the preflight was released.
                 match fs::read_dir(&folder) {
                     Ok(mut contents) => {
                         if contents.next().is_none() {
                             warnings.push(format!(
-                                "Could not remove empty folder {}: {error}",
+                                "Could not remove verified-empty legacy folder {}: {error}",
                                 folder.display()
                             ));
                         }
-                    },
+                    }
                     Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
                         // A concurrent/earlier removal is also expected while
                         // walking ancestors in the same cleanup pass.
@@ -535,63 +576,29 @@ fn cleanup_empty_directories_after_organization_with_protected(
         }
     }
 
-    let mut old_folders = BTreeSet::<PathBuf>::new();
-    for (source, _, _, _) in moved_pairs {
-        let mut current = source.parent();
-        while let Some(folder) = current {
-            if folder == root || !folder.starts_with(root) {
-                break;
-            }
-            // The branch roots are intentionally kept, not "occupied".
-            let protected = is_loading_branch_root(folder);
-            if !protected {
-                old_folders.insert(folder.to_path_buf());
-            }
-            current = folder.parent();
-        }
-    }
-    let retained = old_folders
+    retained_candidates.sort();
+    retained_candidates.dedup();
+    let retained = retained_candidates
         .into_iter()
-        .filter(|path| path.is_dir() && !is_protected_empty_directory(path))
+        .filter(|path| {
+            path.is_dir() && !is_protected_empty_directory(path) && !is_loading_branch_root(path)
+        })
         .count();
     (removed, retained, warnings)
 }
 
-fn cleanup_scope_roots(root: &Path, plan: &OrganizationPlan) -> Vec<PathBuf> {
-    let mut roots = BTreeSet::new();
-    for relative in &plan.cleanup_roots {
-        let candidate = if relative == "." {
-            root.to_path_buf()
-        } else {
-            root.join(relative)
-        };
-        let canonical = candidate
-            .canonicalize()
-            .unwrap_or_else(|_| candidate.clone());
-        let root_key = normalized_path_key(root, root);
-        let canonical_key = normalized_path_key(root, &canonical);
-        let is_within_root = canonical_key == root_key
-            || canonical_key.starts_with(&(root_key.clone() + "\\"));
-        if canonical.is_dir() && is_within_root {
-            roots.insert(canonical);
-        }
+/// Full legacy cleanup is directory-only and never opens DBPF files.  For a
+/// Mods root it is intentionally limited to the two game loading branches;
+/// DCCache, logs and unrelated sibling folders are outside Organizer scope.
+fn universal_cleanup_roots(root: &Path) -> Vec<PathBuf> {
+    let mut roots = [root.join("Packages"), root.join("Overrides")]
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        roots.push(root.to_path_buf());
     }
-    for item in &plan.items {
-        let source = PathBuf::from(&item.source_path);
-        let Ok(_) = source.strip_prefix(root) else {
-            continue;
-        };
-        let Some(parent) = source.parent() else {
-            continue;
-        };
-        // Scope cleanup to the actual old-source branches.  Using only the
-        // first component (for example `Packages\Cabelos`) made a residual
-        // plan walk an entire category tree even when it contained one file.
-        if parent.is_dir() && parent != root && parent.starts_with(root) {
-            roots.insert(parent.to_path_buf());
-        }
-    }
-    roots.into_iter().collect()
+    roots
 }
 
 // An empty-folder cleanup cannot remove folders that still contain
@@ -640,9 +647,14 @@ fn remaining_legacy_details(
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
     plan_items: &[PlanItem],
 ) -> Vec<LegacyRemainder> {
-    let moved_destinations = moved_pairs.iter()
+    let moved_destinations = moved_pairs
+        .iter()
         .filter_map(|(_, destination, _, _)| destination.strip_prefix(root).ok())
-        .map(|path| path.to_string_lossy().replace('/', "\\").to_ascii_lowercase())
+        .map(|path| {
+            path.to_string_lossy()
+                .replace('/', "\\")
+                .to_ascii_lowercase()
+        })
         .collect::<BTreeSet<_>>();
     let mut folders = BTreeSet::new();
     for (source, _, _, _) in moved_pairs {
@@ -655,12 +667,16 @@ fn remaining_legacy_details(
 
     for item in plan_items {
         let source = PathBuf::from(&item.source_path);
-        let Some(parent) = source.parent() else { continue; };
+        let Some(parent) = source.parent() else {
+            continue;
+        };
         if !source.is_file() || !parent.starts_with(root) || parent == root {
             continue;
         }
         let source_relative = item.source_relative_path.replace('/', "\\");
-        let destination_same = item.destination_relative_path.as_ref()
+        let destination_same = item
+            .destination_relative_path
+            .as_ref()
             .is_some_and(|destination| same_relative_path(&source_relative, destination));
         if !destination_same {
             folders.insert(parent.to_path_buf());
@@ -670,7 +686,11 @@ fn remaining_legacy_details(
     let mut remaining = BTreeSet::new();
     let mut details = Vec::new();
     for folder in folders {
-        for entry in WalkDir::new(folder).follow_links(false).into_iter().flatten() {
+        for entry in WalkDir::new(folder)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
             if entry.file_type().is_file() {
                 if let Ok(relative) = entry.path().strip_prefix(root) {
                     let relative = relative.to_string_lossy().replace('/', "\\");
@@ -684,9 +704,9 @@ fn remaining_legacy_details(
                     if !remaining.insert(relative.clone()) {
                         continue;
                     }
-                    let plan = plan_items.iter().find(|item| {
-                        same_relative_path(&item.source_relative_path, &relative)
-                    });
+                    let plan = plan_items
+                        .iter()
+                        .find(|item| same_relative_path(&item.source_relative_path, &relative));
                     let (reason, plan_status, warning) = if let Some(item) = plan {
                         (
                             remaining_reason(item),
@@ -739,16 +759,21 @@ pub async fn execute_organization_with_cfg(
     let operation_run = operation::begin_mutating("organize", "planning")?;
     let result = tauri::async_runtime::spawn_blocking(move || {
         execute_organization_core(
-            folder, language, selected_paths, update_resource_cfg,
-            expected_cfg_hash, expected_cfg_rules,
+            folder,
+            language,
+            selected_paths,
+            update_resource_cfg,
+            expected_cfg_hash,
+            expected_cfg_rules,
         )
     })
     .await
     .map_err(|error| format!("Organization worker failed: {error}"))
     .and_then(|output| output);
     match &result {
-        Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" =>
-            operation::finish(&operation_run, "complete", None),
+        Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" => {
+            operation::finish(&operation_run, "complete", None)
+        }
         Ok(output) => operation::finish(&operation_run, "failed", Some(output.status.clone())),
         Err(error) => operation::finish(&operation_run, "failed", Some(error.clone())),
     }
@@ -763,7 +788,12 @@ fn execute_organization_core(
     expected_cfg_hash: Option<String>,
     expected_cfg_rules: Vec<String>,
 ) -> Result<ExecutionResult, String> {
-    let plan = build_organization_plan_with_cfg_core(folder, language, selected_paths, update_resource_cfg)?;
+    let plan = build_organization_plan_with_cfg_core(
+        folder,
+        language,
+        selected_paths,
+        update_resource_cfg,
+    )?;
     execute_organization_plan_core(
         plan,
         language,
@@ -791,15 +821,20 @@ pub async fn execute_organization_plan_with_cfg(
     let operation_run = operation::begin_mutating("organize", "executing_plan")?;
     let result = tauri::async_runtime::spawn_blocking(move || {
         execute_organization_plan_core(
-            plan, language, update_resource_cfg, expected_cfg_hash, expected_cfg_rules,
+            plan,
+            language,
+            update_resource_cfg,
+            expected_cfg_hash,
+            expected_cfg_rules,
         )
     })
     .await
     .map_err(|error| format!("Organization worker failed: {error}"))
     .and_then(|output| output);
     match &result {
-        Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" =>
-            operation::finish(&operation_run, "complete", None),
+        Ok(output) if output.status == "COMPLETE" || output.status == "NO_CHANGES" => {
+            operation::finish(&operation_run, "complete", None)
+        }
         Ok(output) => operation::finish(&operation_run, "failed", Some(output.status.clone())),
         Err(error) => operation::finish(&operation_run, "failed", Some(error.clone())),
     }
@@ -813,7 +848,6 @@ fn execute_organization_plan_core(
     expected_cfg_hash: Option<String>,
     expected_cfg_rules: Vec<String>,
 ) -> Result<ExecutionResult, String> {
-
     // Only explicitly ready items will be moved. Keep every blocked item,
     // duplicate and conflicting destination in place for later manual review.
     // The plan and file SHA-256 identities are rebuilt immediately before
@@ -829,22 +863,14 @@ fn execute_organization_plan_core(
         // A previous organization may already have emptied legacy category
         // directories. Clean only genuinely empty ones, even if no new move
         // was necessary. Never remove files or the Packages/Overrides roots.
-        let focused_cleanup_roots = cleanup_scope_roots(&root, &plan);
-        let (removed, retained, cleanup_warnings) = if requires_post_execution_package_scan(&plan) {
+        let cleanup_roots = universal_cleanup_roots(&root);
+        let (removed, retained, cleanup_warnings) =
             cleanup_empty_directories_after_organization_with_protected(
                 &root,
                 &[],
-                None,
+                Some(&cleanup_roots),
                 &plan.protected_empty_directories,
-            )
-        } else {
-            cleanup_empty_directories_after_organization_with_protected(
-                &root,
-                &[],
-                Some(&focused_cleanup_roots),
-                &plan.protected_empty_directories,
-            )
-        };
+            );
         let remaining_legacy_details = remaining_legacy_details(&root, &[], &plan.items);
         let remaining_legacy_files = remaining_legacy_details.len();
         let remaining_legacy_examples = remaining_legacy_details
@@ -852,13 +878,7 @@ fn execute_organization_plan_core(
             .take(12)
             .map(|detail| detail.relative_path.clone())
             .collect();
-        let analysis_current = if requires_post_execution_package_scan(&plan) {
-            scan_packages_core(root.to_string_lossy().to_string(), language, None)
-                .ok()
-                .map(|scan| OrganizationAnalysisSnapshot::from_scan("analysis_current", &scan.stats))
-        } else {
-            Some(incremental_current_snapshot(&plan, remaining_legacy_files))
-        };
+        let analysis_current = Some(incremental_current_snapshot(&plan, remaining_legacy_files));
         return Ok(ExecutionResult {
             status: "NO_CHANGES".to_string(),
             moved_files: Vec::new(),
@@ -874,37 +894,40 @@ fn execute_organization_plan_core(
             remaining_legacy_details,
             errors: cleanup_warnings,
             analysis_before: plan.analysis_before.clone(),
-            execution: plan.analysis_before.clone().with_plan(&plan.stats, remaining_legacy_files),
+            execution: plan
+                .analysis_before
+                .clone()
+                .with_plan(&plan.stats, remaining_legacy_files),
             analysis_current,
         });
     }
 
     let manifest_path = make_manifest_path(&root)?;
-    let snapshot = snapshot_entries(
-        &root,
-        &ready,
-        !requires_post_execution_package_scan(&plan),
-    )?;
-     operation::set_total("organize", move_total);
+    // The verified plan already carries every ready source identity. A
+    // transaction needs a durable rollback record for files it can mutate,
+    // not a second full-library hash pass before the first rename.
+    let snapshot = snapshot_entries(&root, &ready, true)?;
+    operation::set_total("organize", move_total);
     operation::update("organize", 0, None, "preparing");
-    let mut manifest = manifest_from_snapshot(
-        &root,
-        language,
-        snapshot,
-        &plan.directories_to_create,
-    );
+    let mut manifest =
+        manifest_from_snapshot(&root, language, snapshot, &plan.directories_to_create);
     // Persist recovery information before touching Resource.cfg or CC files.
     write_manifest_atomic(&manifest_path, &manifest)?;
 
     let mut applied_cfg = None;
     if update_resource_cfg {
-        let change = plan.resource_cfg_update.as_ref()
+        let change = plan
+            .resource_cfg_update
+            .as_ref()
             .ok_or("Resource.cfg opt-in requires a valid Mods/Packages or Mods/Overrides root.")?;
         if expected_cfg_hash.as_deref() != Some(change.original_hash.as_str())
-            || expected_cfg_rules != change.added_rules {
+            || expected_cfg_rules != change.added_rules
+        {
             manifest.status = "ROLLED_BACK".to_string();
             let _ = replace_manifest_atomic(&manifest_path, &manifest);
-            return Err("Resource.cfg preview is stale; review the new plan before organizing.".into());
+            return Err(
+                "Resource.cfg preview is stale; review the new plan before organizing.".into(),
+            );
         }
         applied_cfg = apply_resource_cfg_update(change)?;
 
@@ -914,16 +937,22 @@ fn execute_organization_plan_core(
             let cfg_path = PathBuf::from(&change.path);
             let parsed = parse_resource_cfg(&cfg_path)?;
             let cfg_dir = cfg_path.parent().ok_or("Resource.cfg parent missing")?;
-            let uncovered = ready.iter().filter(|item| {
-                // .package.disabled remains disabled even after relocation;
-                // Resource.cfg intentionally has no PackedFile rule for it.
-                package_extension(Path::new(&item.source_path))
-                    && item.source_path.to_ascii_lowercase().ends_with(".package")
-                    && item.destination_path.as_ref()
-                        .is_none_or(|path| package_priority(&parsed, cfg_dir, Path::new(path)).is_none())
-            }).count();
+            let uncovered = ready
+                .iter()
+                .filter(|item| {
+                    // .package.disabled remains disabled even after relocation;
+                    // Resource.cfg intentionally has no PackedFile rule for it.
+                    package_extension(Path::new(&item.source_path))
+                        && item.source_path.to_ascii_lowercase().ends_with(".package")
+                        && item.destination_path.as_ref().is_none_or(|path| {
+                            package_priority(&parsed, cfg_dir, Path::new(path)).is_none()
+                        })
+                })
+                .count();
             if uncovered != 0 {
-                return Err(format!("Updated Resource.cfg misses {uncovered} planned packages."));
+                return Err(format!(
+                    "Updated Resource.cfg misses {uncovered} planned packages."
+                ));
             }
             Ok(())
         })();
@@ -933,7 +962,9 @@ fn execute_organization_plan_core(
             }
             manifest.status = "ROLLED_BACK".to_string();
             let _ = replace_manifest_atomic(&manifest_path, &manifest);
-            return Err(format!("{error} No packages were moved; Resource.cfg was restored."));
+            return Err(format!(
+                "{error} No packages were moved; Resource.cfg was restored."
+            ));
         }
 
         if let Some(applied) = &applied_cfg {
@@ -942,7 +973,9 @@ fn execute_organization_plan_core(
                 if let Some(applied) = applied_cfg.take() {
                     rollback_resource_cfg_update(applied)?;
                 }
-                return Err(format!("Could not persist Resource.cfg recovery metadata: {error}"));
+                return Err(format!(
+                    "Could not persist Resource.cfg recovery metadata: {error}"
+                ));
             }
         }
     }
@@ -966,7 +999,10 @@ fn execute_organization_plan_core(
 
         let step_result = (|| -> Result<(), String> {
             if !source.is_file() {
-                return Err(format!("Source disappeared before move: {}", source.display()));
+                return Err(format!(
+                    "Source disappeared before move: {}",
+                    source.display()
+                ));
             }
             if destination.exists() {
                 return Err(format!(
@@ -1001,12 +1037,7 @@ fn execute_organization_plan_core(
 
         match step_result {
             Ok(()) => {
-                moved_pairs.push((
-                    source,
-                    destination,
-                    expected_hash.clone(),
-                    item.size,
-                ));
+                moved_pairs.push((source, destination, expected_hash.clone(), item.size));
                 operation::update("organize", moved_pairs.len(), None, "moving");
                 #[cfg(test)]
                 if moved_pairs.len() == 1
@@ -1015,7 +1046,7 @@ fn execute_organization_plan_core(
                     errors.push("test-injected failure after first move".to_string());
                     break;
                 }
-            },
+            }
             Err(error) => {
                 errors.push(error);
                 break;
@@ -1030,7 +1061,9 @@ fn execute_organization_plan_core(
     if errors.is_empty() {
         operation::set_total("organize", moved_pairs.len().max(1));
         operation::update("organize", 0, None, "integrity_check");
-        for (index, (_, destination, expected_hash, expected_size)) in moved_pairs.iter().enumerate() {
+        for (index, (_, destination, expected_hash, expected_size)) in
+            moved_pairs.iter().enumerate()
+        {
             if let Err(error) = verify_identity(destination, expected_hash, *expected_size) {
                 errors.push(format!(
                     "Post-move integrity verification failed for {}: {error}",
@@ -1067,7 +1100,10 @@ fn execute_organization_plan_core(
 
                 if let Some(parent) = source.parent() {
                     fs::create_dir_all(parent).map_err(|error| {
-                        format!("Could not recreate original folder {}: {error}", parent.display())
+                        format!(
+                            "Could not recreate original folder {}: {error}",
+                            parent.display()
+                        )
                     })?;
                 }
 
@@ -1145,26 +1181,16 @@ fn execute_organization_plan_core(
 
     operation::set_total("organize", 1);
     operation::update("organize", 0, None, "cleaning");
-    let focused_cleanup_roots = cleanup_scope_roots(&root, &plan);
+    let cleanup_roots = universal_cleanup_roots(&root);
     let (old_folders_removed, old_folders_retained, cleanup_warnings) =
-        if requires_post_execution_package_scan(&plan) {
-            cleanup_empty_directories_after_organization_with_protected(
-                &root,
-                &moved_pairs,
-                None,
-                &plan.protected_empty_directories,
-            )
-        } else {
-            cleanup_empty_directories_after_organization_with_protected(
-                &root,
-                &moved_pairs,
-                Some(&focused_cleanup_roots),
-                &plan.protected_empty_directories,
-            )
-        };
+        cleanup_empty_directories_after_organization_with_protected(
+            &root,
+            &moved_pairs,
+            Some(&cleanup_roots),
+            &plan.protected_empty_directories,
+        );
 
-    let remaining_legacy_details =
-        remaining_legacy_details(&root, &moved_pairs, &plan.items);
+    let remaining_legacy_details = remaining_legacy_details(&root, &moved_pairs, &plan.items);
     let remaining_legacy_files = remaining_legacy_details.len();
     let remaining_legacy_examples = remaining_legacy_details
         .iter()
@@ -1179,24 +1205,23 @@ fn execute_organization_plan_core(
     // Invalidate the Rust scan cache before any later plan preview: the
     // cache contains pre-move absolute paths and must never be reused.
     invalidate_latest_scan_for(&root);
-    let analysis_current = if requires_post_execution_package_scan(&plan) {
-        scan_packages_core(root.to_string_lossy().to_string(), language, None)
-            .ok()
-            .map(|scan| OrganizationAnalysisSnapshot::from_scan("analysis_current", &scan.stats))
-    } else {
-        Some(incremental_current_snapshot(&plan, remaining_legacy_files))
-    };
-    let moved_files = moved_pairs.iter().map(|(source, destination, _, _)| {
-        OrganizationMove {
+    unified_analysis::invalidate_for(&root);
+    let analysis_current = Some(incremental_current_snapshot(&plan, remaining_legacy_files));
+    let moved_files = moved_pairs
+        .iter()
+        .map(|(source, destination, _, _)| OrganizationMove {
             source_path: source.to_string_lossy().to_string(),
             destination_path: destination.to_string_lossy().to_string(),
-            destination_relative_path: destination.strip_prefix(&root)
+            destination_relative_path: destination
+                .strip_prefix(&root)
                 .unwrap_or(destination)
-                .to_string_lossy().to_string(),
-        }
-    }).collect();
+                .to_string_lossy()
+                .to_string(),
+        })
+        .collect();
     let organized_directory = organized_parent(&root, &moved_pairs)
-        .to_string_lossy().to_string();
+        .to_string_lossy()
+        .to_string();
 
     Ok(ExecutionResult {
         status: "COMPLETE".to_string(),
@@ -1213,7 +1238,10 @@ fn execute_organization_plan_core(
         remaining_legacy_details,
         errors: cleanup_warnings,
         analysis_before: plan.analysis_before.clone(),
-        execution: plan.analysis_before.clone().with_plan(&plan.stats, remaining_legacy_files),
+        execution: plan
+            .analysis_before
+            .clone()
+            .with_plan(&plan.stats, remaining_legacy_files),
         analysis_current,
     })
 }
@@ -1226,17 +1254,26 @@ mod tests {
     fn organized_folder_is_common_parent_of_actual_destinations() {
         let root = std::env::temp_dir().join("S3CC-Test-Mods");
         let packages = root.join("Packages");
-        let a = (root.join("Old/a.package"),
-                 packages.join("CAS/Hair/a.package"),
-                 "a".repeat(64), 10u64);
-        let b = (root.join("Old/b.package"),
-                 packages.join("Scripts/Jogabilidade/Author/b.package"),
-                 "b".repeat(64), 20u64);
+        let a = (
+            root.join("Old/a.package"),
+            packages.join("CAS/Hair/a.package"),
+            "a".repeat(64),
+            10u64,
+        );
+        let b = (
+            root.join("Old/b.package"),
+            packages.join("Scripts/Jogabilidade/Author/b.package"),
+            "b".repeat(64),
+            20u64,
+        );
         assert_eq!(organized_parent(&root, &[a.clone(), b.clone()]), packages);
         assert_eq!(organized_parent(&root, &[a]), packages.join("CAS/Hair"));
-        let overrides = (root.join("Overrides/x.package"),
-                         root.join("Overrides/Scripts/x.package"),
-                         "c".repeat(64), 10u64);
+        let overrides = (
+            root.join("Overrides/x.package"),
+            root.join("Overrides/Scripts/x.package"),
+            "c".repeat(64),
+            10u64,
+        );
         assert_eq!(organized_parent(&root, &[b, overrides]), root);
     }
 
@@ -1316,9 +1353,15 @@ mod tests {
             std::process::id(),
             Local::now().timestamp_nanos_opt().unwrap()
         ));
-        let source = root.join("Packages").join("#Duplicados").join("legacy.package");
+        let source = root
+            .join("Packages")
+            .join("#Duplicados")
+            .join("legacy.package");
         let destination_a = root.join("Packages").join("Sliders").join("legacy.package");
-        let destination_b = root.join("Packages").join("#Duplicados").join("legacy.package.duplicated");
+        let destination_b = root
+            .join("Packages")
+            .join("#Duplicados")
+            .join("legacy.package.duplicated");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, b"source bytes").unwrap();
 
@@ -1343,7 +1386,9 @@ mod tests {
                 source_path: format!(r"\\?\{}", source.display()),
                 source_relative_path: "Packages\\#Duplicados\\legacy.package".into(),
                 destination_path: Some(destination_b.to_string_lossy().into_owned()),
-                destination_relative_path: Some("Packages\\#Duplicados\\legacy.package.duplicated".into()),
+                destination_relative_path: Some(
+                    "Packages\\#Duplicados\\legacy.package.duplicated".into(),
+                ),
                 classification_status: "duplicate_quarantine".into(),
                 classification_reason: None,
                 plan_status: "ready_duplicate_quarantine_migration".into(),
@@ -1416,7 +1461,8 @@ mod tests {
     #[test]
     fn reports_leftover_sidecars_without_deleting_them() {
         let root = std::env::temp_dir().join(format!(
-            "s3cc-legacy-remaining-{}-{}", std::process::id(),
+            "s3cc-legacy-remaining-{}-{}",
+            std::process::id(),
             Local::now().timestamp_nanos_opt().unwrap()
         ));
         let old = root.join("Packages").join("Legacy");
@@ -1425,18 +1471,27 @@ mod tests {
         fs::write(old.join("extra.package.disabled"), b"preserve").unwrap();
         fs::create_dir_all(old.join("Nested Legacy").join("Sliders")).unwrap();
         fs::write(
-            old.join("Nested Legacy").join("Sliders").join("nested.package"),
+            old.join("Nested Legacy")
+                .join("Sliders")
+                .join("nested.package"),
             b"preserve nested content",
         )
         .unwrap();
         let source = old.join("original.package");
-        let moved = vec![(source, root.join("Packages/Sliders/original.package"), String::new(), 0)];
+        let moved = vec![(
+            source,
+            root.join("Packages/Sliders/original.package"),
+            String::new(),
+            0,
+        )];
         let (count, examples) = remaining_legacy_sources(&root, &moved);
         assert_eq!(count, 3);
         assert_eq!(examples.len(), 3);
         assert!(old.join("picture.png").exists());
         assert!(old.join("extra.package.disabled").exists());
-        assert!(examples.iter().any(|path| path.ends_with("Nested Legacy\\Sliders\\nested.package")));
+        assert!(examples
+            .iter()
+            .any(|path| path.ends_with("Nested Legacy\\Sliders\\nested.package")));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1454,14 +1509,20 @@ mod tests {
         let source = old.join("replacement.package");
         let moved = vec![(source, destination, String::new(), 5u64)];
         let details = remaining_legacy_details(&root, &moved, &[]);
-        assert!(details.is_empty(), "destination must not be counted as legacy content: {details:?}");
+        assert!(
+            details.is_empty(),
+            "destination must not be counted as legacy content: {details:?}"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn removes_every_empty_subfolder_after_organization_and_preserves_nonempty_ones() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let mods = std::env::temp_dir()
             .join(format!("s3cc-empty-folders-{}-{nonce}", std::process::id()))
             .join("Mods");
@@ -1480,10 +1541,30 @@ mod tests {
         // non-package sidecars and scripts.
         std::fs::write(packages.join("keep.txt"), b"never delete content").unwrap();
         let moved = vec![
-            (old.join("moved.package"), packages.join("Sliders/moved.package"), String::new(), 0),
-            (retained.join("moved.package"), packages.join("Sliders/other.package"), String::new(), 0),
-            (legacy.join("moved.package"), packages.join("Sliders/migrated.package"), String::new(), 0),
-            (override_old.join("patch.package"), overrides.join("Tuning/patch.package"), String::new(), 0),
+            (
+                old.join("moved.package"),
+                packages.join("Sliders/moved.package"),
+                String::new(),
+                0,
+            ),
+            (
+                retained.join("moved.package"),
+                packages.join("Sliders/other.package"),
+                String::new(),
+                0,
+            ),
+            (
+                legacy.join("moved.package"),
+                packages.join("Sliders/migrated.package"),
+                String::new(),
+                0,
+            ),
+            (
+                override_old.join("patch.package"),
+                overrides.join("Tuning/patch.package"),
+                String::new(),
+                0,
+            ),
         ];
 
         let (removed, preserved, warnings) =
@@ -1502,18 +1583,27 @@ mod tests {
     #[test]
     fn copied_mods_root_keeps_loading_branches_while_cleaning_empty_legacy() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir()
-            .join(format!("s3cc-copied-cleanup-{}-{nonce}",std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-copied-cleanup-{}-{nonce}",
+            std::process::id()
+        ));
         let root = base.join("Mods - Copia");
         let packages = root.join("Packages");
         let overrides = root.join("Overrides");
         let legacy = root.join("#+18").join("Rigged");
         let old = packages.join("Old Categorization").join("Empty");
-        for path in [&packages,&overrides,&legacy,&old] {
+        for path in [&packages, &overrides, &legacy, &old] {
             std::fs::create_dir_all(path).unwrap();
         }
-        std::fs::write(root.join("Resource.cfg"), b"Priority 500\nPackedFile Packages/*.package\n").unwrap();
+        std::fs::write(
+            root.join("Resource.cfg"),
+            b"Priority 500\nPackedFile Packages/*.package\n",
+        )
+        .unwrap();
         let (removed, _, warnings) = cleanup_empty_directories_after_organization(&root, &[]);
         assert!(removed >= 4, "removed only {removed}");
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -1525,9 +1615,14 @@ mod tests {
     #[test]
     fn cleanup_preserves_empty_manual_model_directories() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir()
-            .join(format!("s3cc-protected-empty-{}-{nonce}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-protected-empty-{}-{nonce}",
+            std::process::id()
+        ));
         let root = base.join("Mods - Copia");
         let canonical = root.join("Packages").join("Cabelos e Pêlos");
         let legacy = root.join("Packages").join("#6 Hair").join("Old");
@@ -1552,11 +1647,17 @@ mod tests {
     #[test]
     fn no_move_plan_cleans_selected_legacy_root_but_keeps_canonical_empty_tree() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let base = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("s3cc-no-move-cleanup-{}-{nonce}", std::process::id()));
+            .join(format!(
+                "s3cc-no-move-cleanup-{}-{nonce}",
+                std::process::id()
+            ));
         let root = base.join("Packages");
         let legacy = root.join("#6 Sliders").join("Old");
         let canonical = root.join("Sliders");
@@ -1591,7 +1692,10 @@ mod tests {
     #[test]
     fn selected_branch_root_survives_and_only_its_empty_descendants_are_removed() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let mods = std::env::temp_dir()
             .join(format!("s3cc-selected-root-{}-{nonce}", std::process::id()))
             .join("Mods");
@@ -1612,9 +1716,14 @@ mod tests {
     #[test]
     fn cleanup_ignores_expected_missing_directory_after_duplicate_scope_visit() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir()
-            .join(format!("s3cc-cleanup-missing-{}-{nonce}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-cleanup-missing-{}-{nonce}",
+            std::process::id()
+        ));
         let root = base.join("Packages");
         let legacy = root.join("Jonas").join("Empty");
         std::fs::create_dir_all(&legacy).unwrap();
@@ -1634,16 +1743,24 @@ mod tests {
     fn empty_folder_cleanup_never_follows_directory_symlinks() {
         use std::os::unix::fs::symlink;
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let base = std::env::temp_dir()
-            .join(format!("s3cc-cleanup-symlink-{}-{nonce}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-cleanup-symlink-{}-{nonce}",
+            std::process::id()
+        ));
         let mods = base.join("Mods");
         let target = base.join("External").join("Preserve");
         std::fs::create_dir_all(mods.join("Packages")).unwrap();
         std::fs::create_dir_all(&target).unwrap();
-        symlink(base.join("External"), mods.join("Packages").join("External Link")).unwrap();
-        let (removed, _, warnings) =
-            cleanup_empty_directories_after_organization(&mods, &[]);
+        symlink(
+            base.join("External"),
+            mods.join("Packages").join("External Link"),
+        )
+        .unwrap();
+        let (removed, _, warnings) = cleanup_empty_directories_after_organization(&mods, &[]);
         assert_eq!(removed, 0);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(target.is_dir());
@@ -1691,11 +1808,14 @@ mod tests {
 
     #[test]
     fn fixture_organization_moves_once_and_removes_empty_legacy_tree() {
-        let base = std::env::current_dir().unwrap().join("target").join(format!(
-            "s3cc-fixture-organization-{}-{}",
-            std::process::id(),
-            Local::now().timestamp_nanos_opt().unwrap()
-        ));
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "s3cc-fixture-organization-{}-{}",
+                std::process::id(),
+                Local::now().timestamp_nanos_opt().unwrap()
+            ));
         let root = base.join("Packages");
         let source = root.join("Legacy").join("one.package");
         let destination = root.join("Sliders").join("one.package");
@@ -1755,11 +1875,14 @@ mod tests {
 
     #[test]
     fn stale_fixture_source_is_rejected_before_any_move() {
-        let base = std::env::current_dir().unwrap().join("target").join(format!(
-            "s3cc-fixture-stale-source-{}-{}",
-            std::process::id(),
-            Local::now().timestamp_nanos_opt().unwrap()
-        ));
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "s3cc-fixture-stale-source-{}-{}",
+                std::process::id(),
+                Local::now().timestamp_nanos_opt().unwrap()
+            ));
         let root = base.join("Packages");
         let source = root.join("Legacy").join("changed.package");
         let destination = root.join("Sliders").join("changed.package");
@@ -1786,7 +1909,11 @@ mod tests {
                 size: expected_size,
                 warnings: Vec::new(),
             }],
-            stats: crate::planner::PlanStats { selected: 1, ready: 1, ..Default::default() },
+            stats: crate::planner::PlanStats {
+                selected: 1,
+                ready: 1,
+                ..Default::default()
+            },
             directories_to_create: vec!["Sliders".into()],
             protected_empty_directories: vec!["Sliders".into()],
             cleanup_roots: vec!["Legacy".into()],
@@ -1869,13 +1996,15 @@ mod tests {
         fn assert_unique_ready_paths(root: &Path, plan: &OrganizationPlan) {
             let mut sources = BTreeSet::new();
             let mut destinations = BTreeSet::new();
-            for item in plan.items.iter().filter(|item| item.plan_status.starts_with("ready")) {
+            for item in plan
+                .items
+                .iter()
+                .filter(|item| item.plan_status.starts_with("ready"))
+            {
                 let source = normalized_path_key(root, Path::new(&item.source_path));
                 assert!(sources.insert(source), "duplicate ready source: {item:?}");
-                let destination = normalized_path_key(
-                    root,
-                    Path::new(item.destination_path.as_deref().unwrap()),
-                );
+                let destination =
+                    normalized_path_key(root, Path::new(item.destination_path.as_deref().unwrap()));
                 assert!(
                     destinations.insert(destination),
                     "duplicate ready destination: {item:?}"
@@ -1925,247 +2054,279 @@ mod tests {
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        let test_result = catch_unwind(AssertUnwindSafe(|| {
-            fs::create_dir_all(&model).unwrap();
-            fs::create_dir_all(&packages).unwrap();
-            fs::create_dir_all(&official_empty).unwrap();
-            fs::create_dir_all(model.join("Sliders").join("Chapéus")).unwrap();
-            fs::create_dir_all(model.join("#Sem Categoria")).unwrap();
-            fs::create_dir_all(model.join("#Duplicados")).unwrap();
-            write_package(&canonical_model, 0);
-            write_package(&canonical_fixture, 0);
-            write_package(&legacy_duplicate, 0);
-            write_package(&nested_duplicate, 0);
-            write_package(&disabled, 1);
-            write_package(&conflicting_a, 2);
-            write_package(&conflicting_b, 3);
-            fs::write(&auxiliary, b"fixture auxiliary").unwrap();
-            fs::create_dir_all(&old_empty).unwrap();
+        let test_result =
+            catch_unwind(AssertUnwindSafe(|| {
+                fs::create_dir_all(&model).unwrap();
+                fs::create_dir_all(&packages).unwrap();
+                fs::create_dir_all(&official_empty).unwrap();
+                fs::create_dir_all(model.join("Sliders").join("Chapéus")).unwrap();
+                fs::create_dir_all(model.join("#Sem Categoria")).unwrap();
+                fs::create_dir_all(model.join("#Duplicados")).unwrap();
+                write_package(&canonical_model, 0);
+                write_package(&canonical_fixture, 0);
+                write_package(&legacy_duplicate, 0);
+                write_package(&nested_duplicate, 0);
+                write_package(&disabled, 1);
+                write_package(&conflicting_a, 2);
+                write_package(&conflicting_b, 3);
+                fs::write(&auxiliary, b"fixture auxiliary").unwrap();
+                fs::create_dir_all(&old_empty).unwrap();
 
-            std::env::set_var("S3CC_MANUAL_MODEL_PACKAGES", &model_string);
-            std::env::set_var("S3CC_MANUAL_MODEL_INDEX", &index_path);
-            std::env::set_var("S3CC_REFRESH_MANUAL_MODEL", "1");
+                std::env::set_var("S3CC_MANUAL_MODEL_PACKAGES", &model_string);
+                std::env::set_var("S3CC_MANUAL_MODEL_INDEX", &index_path);
+                std::env::set_var("S3CC_REFRESH_MANUAL_MODEL", "1");
 
-            let scan = tauri::async_runtime::block_on(crate::scanner::scan_packages(
-                root_string.clone(),
-                AppLanguage::Pt,
-            ))
-            .expect("physical fixture scan");
-            assert_eq!(scan.stats.packages, 6);
-            assert!(scan.stats.package_reads >= 6);
-            let cached_before = crate::scanner::cached_scan_for(&packages, AppLanguage::Pt)
-                .expect("scanner cache after application scan");
+                let scan = tauri::async_runtime::block_on(crate::scanner::scan_packages(
+                    root_string.clone(),
+                    AppLanguage::Pt,
+                ))
+                .expect("physical fixture scan");
+                assert_eq!(scan.stats.packages, 6);
+                assert!(scan.stats.package_reads >= 6);
+                let cached_before = crate::scanner::cached_scan_for(&packages, AppLanguage::Pt)
+                    .expect("scanner cache after application scan");
 
-            let plan = crate::planner::build_organization_plan_with_cfg_core(
-                root_string.clone(),
-                AppLanguage::Pt,
-                selected.clone(),
-                false,
-            )
-            .expect("physical fixture organization plan");
-            assert!(plan.can_execute, "plan unexpectedly blocked: {plan:?}");
-            assert_unique_ready_paths(&packages, &plan);
-            let nested_source_key = normalized_path_key(&packages, &nested_duplicate);
-            assert_eq!(
-                plan.items
+                let plan = crate::planner::build_organization_plan_with_cfg_core(
+                    root_string.clone(),
+                    AppLanguage::Pt,
+                    selected.clone(),
+                    false,
+                )
+                .expect("physical fixture organization plan");
+                assert!(plan.can_execute, "plan unexpectedly blocked: {plan:?}");
+                assert_unique_ready_paths(&packages, &plan);
+                let nested_source_key = normalized_path_key(&packages, &nested_duplicate);
+                assert_eq!(
+                    plan.items
+                        .iter()
+                        .filter(|item| {
+                            item.plan_status.starts_with("ready")
+                                && normalized_path_key(&packages, Path::new(&item.source_path))
+                                    == nested_source_key
+                        })
+                        .count(),
+                    1,
+                    "nested duplicate source must be executable once"
+                );
+                assert!(plan.items.iter().any(|item| {
+                    item.source_path.ends_with("Other\\Same.package")
+                        && item.plan_status == "collision_different_content"
+                }));
+                // This is the same data path used by Visualizar Plano: a second
+                // preview must consume the valid scan cache instead of reopening
+                // the DBPF corpus.
+                std::env::remove_var("S3CC_REFRESH_MANUAL_MODEL");
+                let second_plan = crate::planner::build_organization_plan_with_cfg_core(
+                    root_string.clone(),
+                    AppLanguage::Pt,
+                    selected.clone(),
+                    false,
+                )
+                .expect("second physical fixture plan");
+                let cached_after = crate::scanner::cached_scan_for(&packages, AppLanguage::Pt)
+                    .expect("scanner cache after two previews");
+                assert_eq!(
+                    cached_before.stats.package_reads,
+                    cached_after.stats.package_reads
+                );
+                assert_eq!(
+                    cached_before.stats.dbpf_load_ms,
+                    cached_after.stats.dbpf_load_ms
+                );
+                assert_unique_ready_paths(&packages, &second_plan);
+
+                let before_inventory = inventory(&packages);
+                let result =
+                    execute_organization_plan_core(plan, AppLanguage::Pt, false, None, Vec::new())
+                        .expect("physical fixture organization");
+                assert_eq!(result.status, "COMPLETE");
+                assert!(
+                    result.errors.is_empty(),
+                    "unexpected execution warnings: {:?}",
+                    result.errors
+                );
+                assert!(result.moved > 0);
+                assert!(!packages.join("#6 Sliders").exists());
+                assert!(
+                    official_empty.is_dir(),
+                    "canonical empty directory was removed"
+                );
+                assert!(
+                    conflicting_b.is_file(),
+                    "different-content collision was overwritten"
+                );
+                assert!(packages
+                    .join("#Sem Categoria")
+                    .join("Review.package.disabled")
+                    .is_file());
+                assert!(packages
+                    .join("#Sem Categoria")
+                    .join("Arquivos Auxiliares")
+                    .join("Legacy")
+                    .join("readme.txt")
+                    .is_file());
+                assert!(packages
+                    .join("Sliders")
+                    .join("Rosto")
+                    .join("Sobrancelhas")
+                    .join("Canonical.package")
+                    .is_file());
+                assert!(packages
+                    .join("#Duplicados")
+                    .join("Canonical.package.duplicated")
+                    .is_file());
+                assert!(walkdir::WalkDir::new(packages.join("#Duplicados"))
+                    .follow_links(false)
+                    .into_iter()
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_file())
+                    .all(|entry| entry.path().parent()
+                        == Some(packages.join("#Duplicados").as_path())));
+                assert_eq!(
+                    before_inventory.values().sum::<usize>(),
+                    inventory(&packages).values().sum::<usize>()
+                );
+
+                // No second organization should propose a new executable move.
+                crate::scanner::invalidate_latest_scan_for(&packages);
+                let second_scan = tauri::async_runtime::block_on(crate::scanner::scan_packages(
+                    root_string.clone(),
+                    AppLanguage::Pt,
+                ))
+                .expect("post-organization scan");
+                assert!(second_scan.stats.packages >= 5);
+                let idempotent_selected = selected
                     .iter()
-                    .filter(|item| {
-                        item.plan_status.starts_with("ready")
-                            && normalized_path_key(&packages, Path::new(&item.source_path))
-                                == nested_source_key
-                    })
-                    .count(),
-                1,
-                "nested duplicate source must be executable once"
-            );
-            assert!(plan.items.iter().any(|item| {
-                item.source_path.ends_with("Other\\Same.package")
-                    && item.plan_status == "collision_different_content"
-            }));
-            // This is the same data path used by Visualizar Plano: a second
-            // preview must consume the valid scan cache instead of reopening
-            // the DBPF corpus.
-            std::env::remove_var("S3CC_REFRESH_MANUAL_MODEL");
-            let second_plan = crate::planner::build_organization_plan_with_cfg_core(
-                root_string.clone(),
-                AppLanguage::Pt,
-                selected.clone(),
-                false,
-            )
-            .expect("second physical fixture plan");
-            let cached_after = crate::scanner::cached_scan_for(&packages, AppLanguage::Pt)
-                .expect("scanner cache after two previews");
-            assert_eq!(cached_before.stats.package_reads, cached_after.stats.package_reads);
-            assert_eq!(cached_before.stats.dbpf_load_ms, cached_after.stats.dbpf_load_ms);
-            assert_unique_ready_paths(&packages, &second_plan);
+                    .filter(|path| Path::new(path).is_dir())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let idempotent_plan = crate::planner::build_organization_plan_with_cfg_core(
+                    root_string.clone(),
+                    AppLanguage::Pt,
+                    idempotent_selected,
+                    false,
+                )
+                .expect("idempotent physical fixture plan");
+                assert_eq!(
+                    idempotent_plan
+                        .items
+                        .iter()
+                        .filter(|item| item.plan_status.starts_with("ready"))
+                        .count(),
+                    0,
+                    "second organization proposed new moves: {idempotent_plan:?}"
+                );
+                assert!(idempotent_plan.items.iter().any(|item| {
+                    item.plan_status == "collision_different_content"
+                        && item.source_path.ends_with("Other\\Same.package")
+                }));
 
-            let before_inventory = inventory(&packages);
-            let result = execute_organization_plan_core(
-                plan,
-                AppLanguage::Pt,
-                false,
-                None,
-                Vec::new(),
-            )
-            .expect("physical fixture organization");
-            assert_eq!(result.status, "COMPLETE");
-            assert!(result.errors.is_empty(), "unexpected execution warnings: {:?}", result.errors);
-            assert!(result.moved > 0);
-            assert!(!packages.join("#6 Sliders").exists());
-            assert!(official_empty.is_dir(), "canonical empty directory was removed");
-            assert!(conflicting_b.is_file(), "different-content collision was overwritten");
-            assert!(packages
-                .join("#Sem Categoria")
-                .join("Review.package.disabled")
-                .is_file());
-            assert!(packages
-                .join("#Sem Categoria")
-                .join("Arquivos Auxiliares")
-                .join("Legacy")
-                .join("readme.txt")
-                .is_file());
-            assert!(packages.join("Sliders").join("Rosto").join("Sobrancelhas").join("Canonical.package").is_file());
-            assert!(packages.join("#Duplicados").join("Canonical.package.duplicated").is_file());
-            assert!(walkdir::WalkDir::new(packages.join("#Duplicados"))
-                .follow_links(false)
-                .into_iter()
-                .flatten()
-                .filter(|entry| entry.file_type().is_file())
-                .all(|entry| entry.path().parent() == Some(packages.join("#Duplicados").as_path())));
-            assert_eq!(before_inventory.values().sum::<usize>(), inventory(&packages).values().sum::<usize>());
+                let manifest = result.manifest_path.clone().expect("restore manifest");
+                let restore_preview = crate::restore::preview_restore(
+                    manifest.clone(),
+                    AppLanguage::Pt,
+                    Some(root_string.clone()),
+                )
+                .expect("physical fixture restore preview");
+                assert!(restore_preview.can_execute);
+                let restored = crate::restore::execute_restore(
+                    manifest,
+                    AppLanguage::Pt,
+                    Some(root_string.clone()),
+                    true,
+                )
+                .expect("physical fixture restore");
+                assert_eq!(restored.status, "RESTORED");
+                assert_eq!(before_inventory, inventory(&packages));
+                assert!(legacy_duplicate.is_file());
+                assert!(nested_duplicate.is_file());
+                assert!(disabled.is_file());
+                assert!(auxiliary.is_file());
+                assert!(legacy_duplicate.parent().unwrap().is_dir());
+                assert!(nested_duplicate.parent().unwrap().is_dir());
 
-            // No second organization should propose a new executable move.
-            crate::scanner::invalidate_latest_scan_for(&packages);
-            let second_scan = tauri::async_runtime::block_on(crate::scanner::scan_packages(
-                root_string.clone(),
-                AppLanguage::Pt,
-            ))
-            .expect("post-organization scan");
-            assert!(second_scan.stats.packages >= 5);
-            let idempotent_selected = selected
-                .iter()
-                .filter(|path| Path::new(path).is_dir())
-                .cloned()
-                .collect::<Vec<_>>();
-            let idempotent_plan = crate::planner::build_organization_plan_with_cfg_core(
-                root_string.clone(),
-                AppLanguage::Pt,
-                idempotent_selected,
-                false,
-            )
-            .expect("idempotent physical fixture plan");
-            assert_eq!(
-                idempotent_plan
-                    .items
-                    .iter()
-                    .filter(|item| item.plan_status.starts_with("ready"))
-                    .count(),
-                0,
-                "second organization proposed new moves: {idempotent_plan:?}"
-            );
-            assert!(idempotent_plan.items.iter().any(|item| {
-                item.plan_status == "collision_different_content"
-                    && item.source_path.ends_with("Other\\Same.package")
-            }));
-
-            let manifest = result.manifest_path.clone().expect("restore manifest");
-            let restore_preview = crate::restore::preview_restore(
-                manifest.clone(),
-                AppLanguage::Pt,
-                Some(root_string.clone()),
-            )
-            .expect("physical fixture restore preview");
-            assert!(restore_preview.can_execute);
-            let restored = crate::restore::execute_restore(
-                manifest,
-                AppLanguage::Pt,
-                Some(root_string.clone()),
-                true,
-            )
-            .expect("physical fixture restore");
-            assert_eq!(restored.status, "RESTORED");
-            assert_eq!(before_inventory, inventory(&packages));
-            assert!(legacy_duplicate.is_file());
-            assert!(nested_duplicate.is_file());
-            assert!(disabled.is_file());
-            assert!(auxiliary.is_file());
-            assert!(legacy_duplicate.parent().unwrap().is_dir());
-            assert!(nested_duplicate.parent().unwrap().is_dir());
-
-            // Reproduce a failure after one real rename. The hook is compiled
-            // only into tests; production builds retain the normal executor.
-            let rollback_source_a = packages.join("Rollback A").join("a.package");
-            let rollback_source_b = packages.join("Rollback B").join("b.package");
-            write_package(&rollback_source_a, 7);
-            write_package(&rollback_source_b, 8);
-            let rollback_root = packages.canonicalize().unwrap();
-            let rollback_source_a = rollback_source_a.canonicalize().unwrap();
-            let rollback_source_b = rollback_source_b.canonicalize().unwrap();
-            let rollback_destination_a = rollback_root.join("Rollback Dest").join("a.package");
-            let rollback_destination_b = rollback_root.join("Rollback Dest").join("b.package");
-            let (hash_a, size_a) = sha256_file(&rollback_source_a).unwrap();
-            let (hash_b, size_b) = sha256_file(&rollback_source_b).unwrap();
-            let rollback_plan = OrganizationPlan {
-                root: rollback_root.to_string_lossy().into_owned(),
-                items: vec![
-                    PlanItem {
-                        id: "rollback-a".into(),
-                        name: "a.package".into(),
-                        source_path: rollback_source_a.to_string_lossy().into_owned(),
-                        source_relative_path: "Rollback A\\a.package".into(),
-                        destination_path: Some(rollback_destination_a.to_string_lossy().into_owned()),
-                        destination_relative_path: Some("Rollback Dest\\a.package".into()),
-                        classification_status: "classified".into(),
-                        classification_reason: None,
-                        plan_status: "ready".into(),
-                        sha256: Some(hash_a),
-                        size: size_a,
-                        warnings: Vec::new(),
+                // Reproduce a failure after one real rename. The hook is compiled
+                // only into tests; production builds retain the normal executor.
+                let rollback_source_a = packages.join("Rollback A").join("a.package");
+                let rollback_source_b = packages.join("Rollback B").join("b.package");
+                write_package(&rollback_source_a, 7);
+                write_package(&rollback_source_b, 8);
+                let rollback_root = packages.canonicalize().unwrap();
+                let rollback_source_a = rollback_source_a.canonicalize().unwrap();
+                let rollback_source_b = rollback_source_b.canonicalize().unwrap();
+                let rollback_destination_a = rollback_root.join("Rollback Dest").join("a.package");
+                let rollback_destination_b = rollback_root.join("Rollback Dest").join("b.package");
+                let (hash_a, size_a) = sha256_file(&rollback_source_a).unwrap();
+                let (hash_b, size_b) = sha256_file(&rollback_source_b).unwrap();
+                let rollback_plan = OrganizationPlan {
+                    root: rollback_root.to_string_lossy().into_owned(),
+                    items: vec![
+                        PlanItem {
+                            id: "rollback-a".into(),
+                            name: "a.package".into(),
+                            source_path: rollback_source_a.to_string_lossy().into_owned(),
+                            source_relative_path: "Rollback A\\a.package".into(),
+                            destination_path: Some(
+                                rollback_destination_a.to_string_lossy().into_owned(),
+                            ),
+                            destination_relative_path: Some("Rollback Dest\\a.package".into()),
+                            classification_status: "classified".into(),
+                            classification_reason: None,
+                            plan_status: "ready".into(),
+                            sha256: Some(hash_a),
+                            size: size_a,
+                            warnings: Vec::new(),
+                        },
+                        PlanItem {
+                            id: "rollback-b".into(),
+                            name: "b.package".into(),
+                            source_path: rollback_source_b.to_string_lossy().into_owned(),
+                            source_relative_path: "Rollback B\\b.package".into(),
+                            destination_path: Some(
+                                rollback_destination_b.to_string_lossy().into_owned(),
+                            ),
+                            destination_relative_path: Some("Rollback Dest\\b.package".into()),
+                            classification_status: "classified".into(),
+                            classification_reason: None,
+                            plan_status: "ready".into(),
+                            sha256: Some(hash_b),
+                            size: size_b,
+                            warnings: Vec::new(),
+                        },
+                    ],
+                    stats: crate::planner::PlanStats {
+                        selected: 2,
+                        ready: 2,
+                        ..Default::default()
                     },
-                    PlanItem {
-                        id: "rollback-b".into(),
-                        name: "b.package".into(),
-                        source_path: rollback_source_b.to_string_lossy().into_owned(),
-                        source_relative_path: "Rollback B\\b.package".into(),
-                        destination_path: Some(rollback_destination_b.to_string_lossy().into_owned()),
-                        destination_relative_path: Some("Rollback Dest\\b.package".into()),
-                        classification_status: "classified".into(),
-                        classification_reason: None,
-                        plan_status: "ready".into(),
-                        sha256: Some(hash_b),
-                        size: size_b,
-                        warnings: Vec::new(),
-                    },
-                ],
-                stats: crate::planner::PlanStats { selected: 2, ready: 2, ..Default::default() },
-                directories_to_create: vec!["Rollback Dest".into()],
-                protected_empty_directories: Vec::new(),
-                cleanup_roots: vec!["Rollback A".into(), "Rollback B".into()],
-                resource_cfg_update: None,
-                manifest_preview: String::new(),
-                can_execute: true,
-                analysis_before: OrganizationAnalysisSnapshot::from_scan(
-                    "analysis_before",
-                    &crate::scanner::ScanStats::default(),
-                ),
-            };
-            std::env::set_var("S3CC_TEST_ABORT_AFTER_FIRST_MOVE", "1");
-            let rolled_back = execute_organization_plan_core(
-                rollback_plan,
-                AppLanguage::Pt,
-                false,
-                None,
-                Vec::new(),
-            )
-            .expect("injected rollback should return a transaction result");
-            std::env::remove_var("S3CC_TEST_ABORT_AFTER_FIRST_MOVE");
-            assert_eq!(rolled_back.status, "ROLLED_BACK");
-            assert_eq!(rolled_back.rolled_back, 1);
-            assert!(rollback_source_a.is_file() && rollback_source_b.is_file());
-            assert!(!rollback_destination_a.exists() && !rollback_destination_b.exists());
-            assert_eq!(sha256_file(&rollback_source_a).unwrap().1, size_a);
-            assert_eq!(sha256_file(&rollback_source_b).unwrap().1, size_b);
-        }));
+                    directories_to_create: vec!["Rollback Dest".into()],
+                    protected_empty_directories: Vec::new(),
+                    cleanup_roots: vec!["Rollback A".into(), "Rollback B".into()],
+                    resource_cfg_update: None,
+                    manifest_preview: String::new(),
+                    can_execute: true,
+                    analysis_before: OrganizationAnalysisSnapshot::from_scan(
+                        "analysis_before",
+                        &crate::scanner::ScanStats::default(),
+                    ),
+                };
+                std::env::set_var("S3CC_TEST_ABORT_AFTER_FIRST_MOVE", "1");
+                let rolled_back = execute_organization_plan_core(
+                    rollback_plan,
+                    AppLanguage::Pt,
+                    false,
+                    None,
+                    Vec::new(),
+                )
+                .expect("injected rollback should return a transaction result");
+                std::env::remove_var("S3CC_TEST_ABORT_AFTER_FIRST_MOVE");
+                assert_eq!(rolled_back.status, "ROLLED_BACK");
+                assert_eq!(rolled_back.rolled_back, 1);
+                assert!(rollback_source_a.is_file() && rollback_source_b.is_file());
+                assert!(!rollback_destination_a.exists() && !rollback_destination_b.exists());
+                assert_eq!(sha256_file(&rollback_source_a).unwrap().1, size_a);
+                assert_eq!(sha256_file(&rollback_source_b).unwrap().1, size_b);
+            }));
 
         std::env::remove_var("S3CC_MANUAL_MODEL_PACKAGES");
         std::env::remove_var("S3CC_MANUAL_MODEL_INDEX");

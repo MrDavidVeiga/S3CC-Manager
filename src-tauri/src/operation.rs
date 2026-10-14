@@ -61,6 +61,49 @@ fn active_runs() -> &'static Mutex<HashMap<String, u64>> {
     RUNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// A long operation may consist of several real phases owned by different
+/// modules.  Keep their counters on one monotonic scale so the UI never has
+/// to reset from 100% to 0% merely because it moved from scanning to a
+/// duplicate or conflict pass.
+#[derive(Debug, Clone, Copy)]
+struct ProgressSegment {
+    offset: usize,
+    span: usize,
+    overall_total: usize,
+}
+
+fn progress_segments() -> &'static Mutex<HashMap<String, ProgressSegment>> {
+    static SEGMENTS: OnceLock<Mutex<HashMap<String, ProgressSegment>>> = OnceLock::new();
+    SEGMENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn set_progress_segment(kind: &str, offset: usize, span: usize, overall_total: usize) {
+    let mut segments = progress_segments()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    segments.insert(
+        kind.to_string(),
+        ProgressSegment {
+            offset,
+            span,
+            overall_total: overall_total.max(1),
+        },
+    );
+}
+
+pub fn clear_progress_segment(kind: &str) {
+    if let Ok(mut segments) = progress_segments().lock() {
+        segments.remove(kind);
+    }
+}
+
+fn progress_segment(kind: &str) -> Option<ProgressSegment> {
+    progress_segments()
+        .lock()
+        .ok()
+        .and_then(|segments| segments.get(kind).copied())
+}
+
 fn next_generation() -> u64 {
     static NEXT: OnceLock<Mutex<u64>> = OnceLock::new();
     let mut next = NEXT
@@ -75,11 +118,15 @@ fn with_status<F>(kind: &str, mut f: F)
 where
     F: FnMut(&mut OperationStatus),
 {
-    let mut map = registry().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let status = map.entry(kind.to_string()).or_insert_with(|| OperationStatus {
-        kind: kind.to_string(),
-        ..OperationStatus::default()
-    });
+    let mut map = registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let status = map
+        .entry(kind.to_string())
+        .or_insert_with(|| OperationStatus {
+            kind: kind.to_string(),
+            ..OperationStatus::default()
+        });
     f(status);
 }
 
@@ -162,8 +209,15 @@ pub fn begin_mutating_scoped(
 }
 
 fn normalize_scope(scope: &str) -> String {
-    let normalized = scope.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase();
-    if normalized.is_empty() { "*".to_string() } else { normalized }
+    let normalized = scope
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        "*".to_string()
+    } else {
+        normalized
+    }
 }
 
 fn scopes_conflict(left: &[String], right: &[String]) -> bool {
@@ -185,12 +239,7 @@ fn release_mutation(run: &OperationRun) {
     mutations.retain(|active| active.run != *run);
 }
 
-fn release_run(
-    run: &OperationRun,
-    phase: &str,
-    message: Option<String>,
-    cancelled: bool,
-) -> bool {
+fn release_run(run: &OperationRun, phase: &str, message: Option<String>, cancelled: bool) -> bool {
     let _lifecycle = lifecycle_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -206,6 +255,7 @@ fn release_run(
     #[cfg(test)]
     pause_after_active_release(&run.kind);
     release_mutation(run);
+    clear_progress_segment(&run.kind);
     with_status(&run.kind, |status| {
         status.running = false;
         status.cancel_requested = cancelled;
@@ -219,10 +269,8 @@ fn release_run(
 
 #[cfg(test)]
 fn completion_pause() -> &'static Mutex<Option<(String, std::sync::Arc<std::sync::Barrier>)>> {
-    static PAUSE: OnceLock<Mutex<Option<(
-        String,
-        std::sync::Arc<std::sync::Barrier>,
-    )>>> = OnceLock::new();
+    static PAUSE: OnceLock<Mutex<Option<(String, std::sync::Arc<std::sync::Barrier>)>>> =
+        OnceLock::new();
     PAUSE.get_or_init(|| Mutex::new(None))
 }
 
@@ -241,10 +289,16 @@ fn pause_after_active_release(kind: &str) {
 }
 
 pub fn set_total(kind: &str, total: usize) {
+    let total = progress_segment(kind)
+        .map(|segment| segment.overall_total)
+        .unwrap_or(total);
     with_status(kind, |status| status.total = total);
 }
 
 pub fn update(kind: &str, processed: usize, current: Option<String>, phase: &str) {
+    let processed = progress_segment(kind)
+        .map(|segment| segment.offset.saturating_add(processed.min(segment.span)))
+        .unwrap_or(processed);
     with_status(kind, |status| {
         status.processed = processed;
         status.current = current.clone();
@@ -257,7 +311,9 @@ pub fn set_message(kind: &str, message: Option<String>) {
 }
 
 pub fn is_cancelled(kind: &str) -> bool {
-    let map = registry().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let map = registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     map.get(kind)
         .map(|status| status.cancel_requested)
         .unwrap_or(false)
@@ -278,7 +334,11 @@ pub fn mark_cancelled(run: &OperationRun) {
 
 /// Run CPU/I/O-heavy read-only work on Tauri's blocking pool and keep the
 /// operation status consistent for polling and cancellation.
-pub async fn run_blocking<T, F>(kind: &'static str, phase: &'static str, work: F) -> Result<T, String>
+pub async fn run_blocking<T, F>(
+    kind: &'static str,
+    phase: &'static str,
+    work: F,
+) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -299,7 +359,11 @@ where
 
 /// Variant used by commands that copy/move/delete files.  It combines the
 /// same worker-pool behavior with a backend mutation lock.
-pub async fn run_mutating_blocking<T, F>(kind: &'static str, phase: &'static str, work: F) -> Result<T, String>
+pub async fn run_mutating_blocking<T, F>(
+    kind: &'static str,
+    phase: &'static str,
+    work: F,
+) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -333,7 +397,9 @@ where
 
 #[tauri::command]
 pub fn get_operation_status(kind: String) -> OperationStatus {
-    let map = registry().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let map = registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut status = map.get(&kind).cloned().unwrap_or_else(|| OperationStatus {
         kind,
         phase: "idle".to_string(),
@@ -449,9 +515,7 @@ mod tests {
             }
         });
 
-        let blocked_until_completion = started_rx
-            .recv_timeout(Duration::from_millis(50))
-            .is_err();
+        let blocked_until_completion = started_rx.recv_timeout(Duration::from_millis(50)).is_err();
 
         // Publish the first terminal state and release the lifecycle lock.
         pause.wait();
@@ -470,8 +534,10 @@ mod tests {
 
     #[test]
     fn mutation_scopes_allow_independent_writes_but_block_overlaps() {
-        let first = begin_mutating_scoped("catalog-a", "saving", &["C:/s3cc-operation-test/a.csv"]).unwrap();
-        let independent = begin_mutating_scoped("catalog-b", "saving", &["C:/s3cc-operation-test/b.csv"]);
+        let first = begin_mutating_scoped("catalog-a", "saving", &["C:/s3cc-operation-test/a.csv"])
+            .unwrap();
+        let independent =
+            begin_mutating_scoped("catalog-b", "saving", &["C:/s3cc-operation-test/b.csv"]);
         assert!(independent.is_ok());
         let independent = independent.unwrap();
         assert!(begin_mutating_scoped("catalog-c", "saving", &["C:/s3cc-operation-test"]).is_err());
@@ -481,9 +547,19 @@ mod tests {
 
     #[test]
     fn failed_mutation_releases_scope_for_retry() {
-        let first = begin_mutating_scoped("failed-write", "saving", &["C:/s3cc-operation-test/failure.csv"]).unwrap();
+        let first = begin_mutating_scoped(
+            "failed-write",
+            "saving",
+            &["C:/s3cc-operation-test/failure.csv"],
+        )
+        .unwrap();
         finish(&first, "error", Some("simulated write failure".into()));
-        let retry = begin_mutating_scoped("failed-write-retry", "saving", &["C:/s3cc-operation-test/failure.csv"]).unwrap();
+        let retry = begin_mutating_scoped(
+            "failed-write-retry",
+            "saving",
+            &["C:/s3cc-operation-test/failure.csv"],
+        )
+        .unwrap();
         finish(&retry, "complete", None);
     }
 }

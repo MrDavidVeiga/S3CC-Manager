@@ -1,5 +1,8 @@
 use crate::{
-    cache::{get_or_build_with_metrics, load_cache, retain_existing, save_cache, CacheBuildMetrics, FingerprintCache},
+    cache::{
+        get_or_build_analysis_with_metrics, get_or_build_with_metrics, load_cache, retain_existing,
+        save_cache, CacheBuildMetrics, FingerprintCache,
+    },
     catalog::{TYPE_CASP, TYPE_OBJD},
     operation::{self, CANCELLED_ERROR},
 };
@@ -252,8 +255,13 @@ fn build_package_fingerprint(
     root: &Path,
     path: &Path,
     cache: &mut FingerprintCache,
+    reuse_shared_index: bool,
 ) -> Result<(PackageFingerprint, CacheBuildMetrics), String> {
-    let (cached, metrics) = get_or_build_with_metrics(path, cache)?;
+    let (cached, metrics) = if reuse_shared_index {
+        get_or_build_analysis_with_metrics(path, cache)?
+    } else {
+        get_or_build_with_metrics(path, cache)?
+    };
 
     let relative_path = path
         .strip_prefix(root)
@@ -595,6 +603,27 @@ pub fn analyze_duplicates_core(
     selected_paths: Option<Vec<String>>,
     operation_kind: Option<&str>,
 ) -> Result<DuplicateAnalysis, String> {
+    analyze_duplicates_core_with_index(folder, selected_paths, operation_kind, false)
+}
+
+/// Uses resource fingerprints produced by the scanner in the same unified
+/// read-only analysis. The bounded probe validates that files have not changed
+/// since that scan; exact SHA-256 is still rechecked immediately before every
+/// write by planner/executor.
+pub(crate) fn analyze_duplicates_core_from_shared_index(
+    folder: String,
+    selected_paths: Option<Vec<String>>,
+    operation_kind: Option<&str>,
+) -> Result<DuplicateAnalysis, String> {
+    analyze_duplicates_core_with_index(folder, selected_paths, operation_kind, true)
+}
+
+fn analyze_duplicates_core_with_index(
+    folder: String,
+    selected_paths: Option<Vec<String>>,
+    operation_kind: Option<&str>,
+    reuse_shared_index: bool,
+) -> Result<DuplicateAnalysis, String> {
     let total_started = Instant::now();
     let root_input = PathBuf::from(folder.trim());
     if folder.trim().is_empty() {
@@ -669,7 +698,7 @@ pub fn analyze_duplicates_core(
             }
         }
 
-        match build_package_fingerprint(&root, path, &mut cache) {
+        match build_package_fingerprint(&root, path, &mut cache, reuse_shared_index) {
             Ok((package, metrics)) => {
                 if metrics.cache_hit {
                     cache_hits += 1;

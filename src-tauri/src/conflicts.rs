@@ -1,8 +1,13 @@
 use crate::{
-    cache::{get_or_build_with_metrics, load_cache, retain_existing, save_cache, CachedResource},
+    cache::{
+        get_or_build_analysis_with_metrics, load_cache, retain_existing, save_cache, CachedResource,
+    },
     catalog::{TYPE_CASP, TYPE_OBJD},
     operation::{self, CANCELLED_ERROR},
-    resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, relative_package_path, ResourceCfgInfo},
+    resource_cfg::{
+        find_resource_cfg, package_priority, parse_resource_cfg, relative_package_path,
+        ResourceCfgInfo,
+    },
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -281,7 +286,17 @@ fn resource_label(type_id: u32) -> String {
 fn is_visual(type_id: u32) -> bool {
     matches!(
         type_id,
-        TYPE_IMG | TYPE_PNG | TYPE_GEOM | TYPE_MODL | TYPE_MLOD | TYPE_VPXY | TYPE_MATD | TYPE_TXTC | TYPE_TXTF | TYPE_OBJK | TYPE_LAYO
+        TYPE_IMG
+            | TYPE_PNG
+            | TYPE_GEOM
+            | TYPE_MODL
+            | TYPE_MLOD
+            | TYPE_VPXY
+            | TYPE_MATD
+            | TYPE_TXTC
+            | TYPE_TXTF
+            | TYPE_OBJK
+            | TYPE_LAYO
     )
 }
 
@@ -308,7 +323,10 @@ fn is_gameplay(type_id: u32) -> bool {
 }
 
 fn is_cas_morph(type_id: u32) -> bool {
-    matches!(type_id, TYPE_FACE | TYPE_CBLN | TYPE_BGEO | TYPE_BOND | TYPE_BUNIT)
+    matches!(
+        type_id,
+        TYPE_FACE | TYPE_CBLN | TYPE_BGEO | TYPE_BOND | TYPE_BUNIT
+    )
 }
 
 fn resource_class(type_id: u32) -> &'static str {
@@ -413,9 +431,7 @@ fn finding_severity(
     }
     // Resource conflicts require both packages to be loaded. Keep evidence
     // for diagnostics, but do not warn about a pair not loaded by these rules.
-    if reliable_resource_cfg
-        && matches!(load_order_status, "unmatched" | "partially_matched")
-    {
+    if reliable_resource_cfg && matches!(load_order_status, "unmatched" | "partially_matched") {
         return "info";
     }
 
@@ -513,7 +529,10 @@ fn pair_id(left: &PackageInfo, right: &PackageInfo) -> String {
         right.relative_path.to_string_lossy().to_string(),
     ];
     paths.sort();
-    let digest = format!("{:X}", Sha256::digest(format!("{}|{}", paths[0], paths[1]).as_bytes()));
+    let digest = format!(
+        "{:X}",
+        Sha256::digest(format!("{}|{}", paths[0], paths[1]).as_bytes())
+    );
     format!("conflict:{}", &digest[..16])
 }
 
@@ -574,7 +593,9 @@ pub fn analyze_conflicts_core(
                 .canonicalize()
                 .map_err(|error| format!("Could not resolve selected package {raw}: {error}"))?;
             if !canonical.starts_with(&root) || !is_package(&canonical) {
-                return Err(format!("Selected package is outside the current library: {raw}"));
+                return Err(format!(
+                    "Selected package is outside the current library: {raw}"
+                ));
             }
             selected.insert(canonical);
         }
@@ -597,8 +618,7 @@ pub fn analyze_conflicts_core(
     retain_existing(&mut cache, &all_paths);
 
     let mut packages = Vec::<PackageInfo>::with_capacity(paths.len());
-    let mut resource_index =
-        BTreeMap::<(u32, u32, u64), Vec<ResourceOccurrence>>::new();
+    let mut resource_index = BTreeMap::<(u32, u32, u64), Vec<ResourceOccurrence>>::new();
     let mut errors = Vec::new();
     let mut cache_hits = 0usize;
     let mut cache_misses = 0usize;
@@ -641,7 +661,11 @@ pub fn analyze_conflicts_core(
         let load_priority = priority.as_ref().map(|value| value.priority);
         let load_rule = priority.map(|value| value.rule);
 
-        let (cached, metrics) = match get_or_build_with_metrics(path, &mut cache) {
+        // Conflict presentation can reuse a bounded-valid cached resource
+        // index. Exact SHA-256 identities are still recomputed by duplicate
+        // and mutating flows; a read-only conflict view must not hash the
+        // full library a second time after the unified duplicate phase.
+        let (cached, metrics) = match get_or_build_analysis_with_metrics(path, &mut cache) {
             Ok(value) => value,
             Err(error) => {
                 packages.push(PackageInfo {
@@ -745,7 +769,9 @@ pub fn analyze_conflicts_core(
         }
         let mut per_package = BTreeMap::<usize, &ResourceOccurrence>::new();
         for occurrence in occurrences {
-            per_package.entry(occurrence.package_index).or_insert(occurrence);
+            per_package
+                .entry(occurrence.package_index)
+                .or_insert(occurrence);
         }
 
         let unique = per_package.values().copied().collect::<Vec<_>>();
@@ -794,20 +820,20 @@ pub fn analyze_conflicts_core(
                 accumulator.impact_kinds.insert(impact.clone());
 
                 let evidence = ConflictEvidence {
-                        resource_type: left.type_id,
-                        resource_type_hex: format!("0x{:08X}", left.type_id),
-                        resource_label: resource_label(left.type_id),
-                        resource_class: resource_class(left.type_id).to_string(),
-                        group: left.group,
-                        group_hex: format!("0x{:08X}", left.group),
-                        instance: left.instance,
-                        instance_hex: format!("0x{:016X}", left.instance),
-                        same_payload,
-                        left_payload_sha256: left.payload_hash.clone(),
-                        right_payload_sha256: right.payload_hash.clone(),
-                        left_payload_size: left.payload_size,
-                        right_payload_size: right.payload_size,
-                        impact_kind: impact,
+                    resource_type: left.type_id,
+                    resource_type_hex: format!("0x{:08X}", left.type_id),
+                    resource_label: resource_label(left.type_id),
+                    resource_class: resource_class(left.type_id).to_string(),
+                    group: left.group,
+                    group_hex: format!("0x{:08X}", left.group),
+                    instance: left.instance,
+                    instance_hex: format!("0x{:016X}", left.instance),
+                    same_payload,
+                    left_payload_sha256: left.payload_hash.clone(),
+                    right_payload_sha256: right.payload_hash.clone(),
+                    left_payload_size: left.payload_size,
+                    right_payload_size: right.payload_size,
+                    impact_kind: impact,
                 };
                 // Keep divergent evidence visible even when a heavily shared
                 // package pair exceeds the preview limit. The old first-64
@@ -818,7 +844,11 @@ pub fn analyze_conflicts_core(
                 } else {
                     accumulator.evidence_truncated = true;
                     if !evidence.same_payload {
-                        if let Some(index) = accumulator.evidence.iter().position(|item| item.same_payload) {
+                        if let Some(index) = accumulator
+                            .evidence
+                            .iter()
+                            .position(|item| item.same_payload)
+                        {
                             accumulator.evidence[index] = evidence;
                         }
                     }
@@ -845,17 +875,25 @@ pub fn analyze_conflicts_core(
     let mut ordered_pairs = pairs.into_iter().collect::<Vec<_>>();
     ordered_pairs.sort_by_key(|((left, right), _)| {
         (
-            packages[*left].relative_path.to_string_lossy().to_ascii_lowercase(),
-            packages[*right].relative_path.to_string_lossy().to_ascii_lowercase(),
+            packages[*left]
+                .relative_path
+                .to_string_lossy()
+                .to_ascii_lowercase(),
+            packages[*right]
+                .relative_path
+                .to_string_lossy()
+                .to_ascii_lowercase(),
         )
     });
 
     for ((left_index, right_index), accumulator) in ordered_pairs {
-        let kind = if accumulator.filename_collision && accumulator.different_payload_count == 0
-        {
+        let kind = if accumulator.filename_collision && accumulator.different_payload_count == 0 {
             "filename_collision_review".to_string()
         } else {
-            primary_kind(&accumulator.impact_kinds, accumulator.different_payload_count)
+            primary_kind(
+                &accumulator.impact_kinds,
+                accumulator.different_payload_count,
+            )
         };
 
         match kind.as_str() {
@@ -879,29 +917,38 @@ pub fn analyze_conflicts_core(
             impact_kinds.push("filename_collision_review".to_string());
         }
 
-        let (load_order_status, higher_priority_path, load_order_explanation_key) =
-            load_order_info(
-                left,
-                right,
-                resource_cfg.is_some(),
-                resource_cfg
-                    .as_ref()
-                    .map(|cfg| cfg.precedence_reliable)
-                    .unwrap_or(false),
-            );
+        let (load_order_status, higher_priority_path, load_order_explanation_key) = load_order_info(
+            left,
+            right,
+            resource_cfg.is_some(),
+            resource_cfg
+                .as_ref()
+                .map(|cfg| cfg.precedence_reliable)
+                .unwrap_or(false),
+        );
 
         let reliable_resource_cfg = resource_cfg
             .as_ref()
             .map(|cfg| cfg.precedence_reliable)
             .unwrap_or(false);
         if reliable_resource_cfg
-            && matches!(load_order_status.as_str(), "unmatched" | "partially_matched")
+            && matches!(
+                load_order_status.as_str(),
+                "unmatched" | "partially_matched"
+            )
         {
             stats.inactive_pairs += 1;
         }
 
         let mut evidence = accumulator.evidence;
-        evidence.sort_by_key(|item| (item.same_payload, item.resource_type, item.group, item.instance));
+        evidence.sort_by_key(|item| {
+            (
+                item.same_payload,
+                item.resource_type,
+                item.group,
+                item.instance,
+            )
+        });
 
         findings.push(ConflictFinding {
             id: pair_id(left, right),
@@ -911,7 +958,8 @@ pub fn analyze_conflicts_core(
                 &accumulator.impact_kinds,
                 &load_order_status,
                 reliable_resource_cfg,
-            ).to_string(),
+            )
+            .to_string(),
             explanation_key: explanation_key(&kind).to_string(),
             kind,
             impact_kinds,
@@ -949,7 +997,10 @@ pub fn analyze_conflicts_core(
 }
 
 #[tauri::command]
-pub async fn analyze_conflicts(folder: String, selected_paths: Option<Vec<String>>) -> Result<ConflictAnalysis, String> {
+pub async fn analyze_conflicts(
+    folder: String,
+    selected_paths: Option<Vec<String>>,
+) -> Result<ConflictAnalysis, String> {
     const KIND: &str = "conflicts";
     operation::run_blocking(KIND, "starting", move || {
         analyze_conflicts_core(folder, selected_paths, Some(KIND))
@@ -961,12 +1012,14 @@ pub async fn analyze_conflicts(folder: String, selected_paths: Option<Vec<String
 mod tests {
     use super::*;
 
-
     #[test]
     fn mixed_text_and_unknown_overlap_requires_review_not_high_warning() {
-        let impacts = ["potential_conflict".to_string(), "text_override".to_string()]
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let impacts = [
+            "potential_conflict".to_string(),
+            "text_override".to_string(),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
         assert_eq!(
             finding_severity("mixed_override", &impacts, "same_priority", true),
             "review"
@@ -1010,8 +1063,12 @@ mod tests {
             load_rule: Some("Packages/*.package".to_string()),
         };
 
-        let (status, winner, _) =
-            load_order_info(&package("a.package", 1000), &package("b.package", 500), true, false);
+        let (status, winner, _) = load_order_info(
+            &package("a.package", 1000),
+            &package("b.package", 500),
+            true,
+            false,
+        );
 
         assert_eq!(status, "advanced_cfg_unresolved");
         assert!(winner.is_none());
@@ -1065,8 +1122,8 @@ mod tests {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let analysis = analyze_conflicts_core(root, Some(selected), None)
-            .expect("directed conflict analysis");
+        let analysis =
+            analyze_conflicts_core(root, Some(selected), None).expect("directed conflict analysis");
         if let Ok(output) = std::env::var("S3CC_CONFLICT_OUTPUT") {
             let output = PathBuf::from(output);
             if let Some(parent) = output.parent() {
@@ -1107,9 +1164,12 @@ mod tests {
 
     #[test]
     fn multiple_different_override_classes_are_mixed() {
-        let kinds = ["visual_override".to_string(), "gameplay_override".to_string()]
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let kinds = [
+            "visual_override".to_string(),
+            "gameplay_override".to_string(),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
         assert_eq!(primary_kind(&kinds, 2), "mixed_override");
     }
 

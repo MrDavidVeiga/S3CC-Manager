@@ -5,6 +5,7 @@ const operation = read("src-tauri/src/operation.rs");
 const scanner = read("src-tauri/src/scanner.rs");
 const cache = read("src-tauri/src/cache.rs");
 const planner = read("src-tauri/src/planner.rs");
+const unified = read("src-tauri/src/unified_analysis.rs");
 const app = read("src/app.js");
 const html = read("index.html");
 
@@ -23,6 +24,9 @@ assert(cache.includes("quick_fingerprint") && cache.includes("integrity_verified
 assert(read("src-tauri/src/cc_catalog.rs").includes('rename = "save_cc_catalog"'), "Catalog writes need mutation coordination.");
 assert(read("src-tauri/src/health.rs").includes('rename = "remove_empty_folder"'), "Empty-folder removal needs mutation coordination.");
 assert(scanner.includes("file_signatures") && scanner.includes("latest_scan_is_current"), "In-memory scans must validate external changes.");
+assert(scanner.includes("PersistentScan") && cache.includes("analysis-snapshot-v1.json"), "Scanner classifications must survive restarts only when their signatures remain current.");
+assert(unified.includes("analyze_duplicates_core") && unified.includes("analyze_conflicts_core"), "Organizer, Duplicates and Conflicts must share a coordinated backend analysis.");
+assert(planner.includes("get_or_build_analysis_with_metrics"), "Plan preview must reuse the bounded analysis cache before execution revalidates SHA-256.");
 assert(planner.includes("pub async fn build_organization_plan_with_cfg"), "Planner command must be asynchronous.");
 assert(app.includes("beginToolsOperation") && app.includes("cancelToolsOperation"), "Tools operations need progress and cancellation wiring.");
 assert(html.includes('id="tools-cancel"'), "Tools cancellation control is missing.");
@@ -35,6 +39,7 @@ console.log(JSON.stringify({
     "mutation-serialization",
     "sha256-cache-invalidation",
     "scan-cache-external-change-validation",
+    "unified-analysis",
     "async-planner",
     "tools-progress-cancellation",
     "virtualized-rendering",

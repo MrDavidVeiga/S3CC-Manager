@@ -1,43 +1,44 @@
 pub mod analyzer;
 pub mod audit_report;
+pub mod cache;
 pub mod catalog;
 pub mod cc_catalog;
-pub mod cache;
 pub mod compression;
 pub mod conflicts;
 pub mod dbpf;
+pub mod dependencies;
 pub mod duplicates;
 pub mod executor;
+pub mod fix_signatures;
+pub mod health;
+pub mod history;
 pub mod i18n;
+pub mod inbox;
 pub mod manifest;
 pub mod mesh_info;
 pub mod navigation;
 pub mod operation;
-pub mod package_family;
+pub mod package_compare;
 pub mod package_details;
+pub mod package_family;
 pub mod planner;
 pub mod quarantine;
+pub mod resource_cfg;
+pub mod resource_cfg_update;
 pub mod restore;
 pub mod restore_history;
 pub mod review_store;
-pub mod resource_cfg;
-pub mod resource_cfg_update;
 pub mod scanner;
+pub mod selection_export;
 pub mod sims3pack_converter;
 pub mod slider;
-pub mod structure_manager;
-pub mod workspace;
 pub mod snapshots;
-pub mod health;
-pub mod dependencies;
-pub mod fix_signatures;
-pub mod technical_search;
-pub mod package_compare;
-pub mod inbox;
-pub mod selection_export;
-pub mod history;
-pub mod taxonomy;
+pub mod structure_manager;
 pub mod system_appearance;
+pub mod taxonomy;
+pub mod technical_search;
+pub mod unified_analysis;
+pub mod workspace;
 
 #[cfg(target_os = "windows")]
 fn apply_runtime_window_icon(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,6 +69,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             system_appearance::get_system_appearance,
             scanner::scan_packages,
+            unified_analysis::analyze_unified,
             sims3pack_converter::inspect_sims3packs,
             sims3pack_converter::convert_sims3packs,
             cc_catalog::open_cc_catalog,

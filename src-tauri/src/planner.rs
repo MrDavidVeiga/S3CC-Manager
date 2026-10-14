@@ -1,10 +1,13 @@
 use crate::{
-    cache::load_cache,
+    cache::{get_or_build_analysis_with_metrics, load_cache, save_cache},
     i18n::AppLanguage,
     manifest::sha256_file,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     resource_cfg_update::{preview_resource_cfg_update, ResourceCfgUpdate},
-    scanner::{cached_scan_for, scan_packages_core, scan_selected_package_paths, ScanPackageItem, ScanResult, ScanStats},
+    scanner::{
+        cached_scan_for, scan_packages_core, scan_selected_package_paths, ScanPackageItem,
+        ScanResult, ScanStats,
+    },
     workspace::{
         active_profile, is_protected, load_workspace_for_root, matching_rule, split_destination,
     },
@@ -1178,10 +1181,7 @@ pub(crate) fn normalized_path_key(root: &Path, path: &Path) -> String {
         if let Some(rest) = value.strip_prefix("\\\\?\\UNC\\") {
             return format!("\\\\{rest}");
         }
-        value
-            .strip_prefix("\\\\?\\")
-            .unwrap_or(&value)
-            .to_string()
+        value.strip_prefix("\\\\?\\").unwrap_or(&value).to_string()
     }
 
     let raw = strip_verbatim_prefix(path.to_string_lossy().replace('/', "\\"));
@@ -1217,10 +1217,7 @@ fn canonical_model_directories_for_root(
     root: &Path,
     manual_model: &ManualModelIndex,
 ) -> Vec<String> {
-    if !(is_mods_root(root)
-        || is_packages_root(root)
-        || is_within_packages(root))
-    {
+    if !(is_mods_root(root) || is_packages_root(root) || is_within_packages(root)) {
         return Vec::new();
     }
 
@@ -1458,13 +1455,13 @@ fn duplicate_quarantine_destination(
 fn duplicate_logical_name(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy();
     let lower = name.to_ascii_lowercase();
-    let stem = [
-        ".package.disabled",
-        ".package.duplicated",
-        ".package",
-    ]
-    .into_iter()
-    .find_map(|suffix| lower.strip_suffix(suffix).map(|_| &name[..name.len() - suffix.len()]))?;
+    let stem = [".package.disabled", ".package.duplicated", ".package"]
+        .into_iter()
+        .find_map(|suffix| {
+            lower
+                .strip_suffix(suffix)
+                .map(|_| &name[..name.len() - suffix.len()])
+        })?;
     Some(stem.to_ascii_lowercase())
 }
 
@@ -1624,13 +1621,8 @@ fn append_nested_duplicate_quarantine_items(
                 source.display()
             )
         })?;
-        let keeper = confirmed_quarantine_keeper(
-            root,
-            &quarantine,
-            &source_canonical,
-            &hash,
-            manual_model,
-        );
+        let keeper =
+            confirmed_quarantine_keeper(root, &quarantine, &source_canonical, &hash, manual_model);
         if keeper.is_none() {
             let relative = source_canonical
                 .strip_prefix(root)
@@ -2073,8 +2065,7 @@ fn append_auxiliary_items(
 }
 
 fn same_path_case_insensitive(left: &Path, right: &Path) -> bool {
-    normalized_path_key(Path::new(""), left)
-        == normalized_path_key(Path::new(""), right)
+    normalized_path_key(Path::new(""), left) == normalized_path_key(Path::new(""), right)
 }
 
 fn retarget_item_to_not_categorized(
@@ -2207,7 +2198,10 @@ fn add_existing_model_peer_paths(
     manual_model: &ManualModelIndex,
     candidate_paths: &mut BTreeSet<PathBuf>,
 ) {
-    if let Some(files) = manual_model.files_by_sha256.get(&sha256.to_ascii_uppercase()) {
+    if let Some(files) = manual_model
+        .files_by_sha256
+        .get(&sha256.to_ascii_uppercase())
+    {
         for file in files {
             let path = root.join(&file.relative_path);
             if path.is_file() && is_disabled_package_path(&path) == inactive {
@@ -2241,13 +2235,7 @@ fn is_selected_content_keeper_for_scan(
             candidate_paths.insert(path);
         }
     }
-    add_existing_model_peer_paths(
-        root,
-        sha256,
-        inactive,
-        manual_model,
-        &mut candidate_paths,
-    );
+    add_existing_model_peer_paths(root, sha256, inactive, manual_model, &mut candidate_paths);
     let mut candidates = candidate_paths
         .into_iter()
         .map(|path| {
@@ -2304,13 +2292,7 @@ fn selected_content_keeper_relative_path(
             candidate_paths.insert(path);
         }
     }
-    add_existing_model_peer_paths(
-        root,
-        sha256,
-        inactive,
-        manual_model,
-        &mut candidate_paths,
-    );
+    add_existing_model_peer_paths(root, sha256, inactive, manual_model, &mut candidate_paths);
     let mut candidates = candidate_paths
         .into_iter()
         .map(|path| {
@@ -2680,10 +2662,7 @@ fn mark_intra_plan_destination_collisions(
 /// overlap before any filesystem write so the old
 /// `Destination appeared after preflight` protection remains meaningful for
 /// external changes, not for a flaw already present in the plan.
-fn mark_intra_plan_source_destination_collisions(
-    root: &Path,
-    items: &mut [PlanItem],
-) {
+fn mark_intra_plan_source_destination_collisions(root: &Path, items: &mut [PlanItem]) {
     let mut sources = HashMap::<String, Vec<usize>>::new();
     for (index, item) in items.iter().enumerate() {
         if !item.plan_status.starts_with("ready") {
@@ -2887,24 +2866,26 @@ fn projected_remaining_legacy_files(
 
     files
         .into_iter()
-        .filter(|path| match items.iter().find(|item| path_matches_item_source(path, item)) {
-            Some(item) => {
-                let destination_is_same = item
-                    .destination_path
-                    .as_deref()
-                    .is_some_and(|destination| {
-                        same_path_case_insensitive(path, Path::new(destination))
-                    }) || item
-                        .destination_relative_path
-                        .as_deref()
-                        .is_some_and(|destination| {
-                            same_relative_path(&item.source_relative_path, destination)
-                        });
-                !plan_item_moves_source(item)
-                    && !item.plan_status.starts_with("already_")
-                    && !destination_is_same
+        .filter(|path| {
+            match items
+                .iter()
+                .find(|item| path_matches_item_source(path, item))
+            {
+                Some(item) => {
+                    let destination_is_same =
+                        item.destination_path.as_deref().is_some_and(|destination| {
+                            same_path_case_insensitive(path, Path::new(destination))
+                        }) || item.destination_relative_path.as_deref().is_some_and(
+                            |destination| {
+                                same_relative_path(&item.source_relative_path, destination)
+                            },
+                        );
+                    !plan_item_moves_source(item)
+                        && !item.plan_status.starts_with("already_")
+                        && !destination_is_same
+                }
+                None => !is_stable_review_or_quarantine_path(path),
             }
-            None => !is_stable_review_or_quarantine_path(path),
         })
         .count()
 }
@@ -2916,6 +2897,19 @@ fn projected_empty_folders_to_clean(
     protected_relative_directories: &[String],
 ) -> usize {
     let mut candidates = BTreeSet::<PathBuf>::new();
+    // Residual cleanup is global to the selected Packages root.  It is a
+    // directory-only inventory: no DBPF is opened here, and it allows a
+    // cleanup-only plan after a prior organization has already moved files.
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
+        .flatten()
+    {
+        if entry.file_type().is_dir() && !entry.file_type().is_symlink() {
+            candidates.insert(entry.path().to_path_buf());
+        }
+    }
     for selected_root in selected_roots {
         if selected_root.is_dir() && selected_root.starts_with(root) {
             candidates.insert(selected_root.clone());
@@ -2944,9 +2938,9 @@ fn projected_empty_folders_to_clean(
         .into_iter()
         .filter(|folder| {
             if protected_relative_directories.iter().any(|relative| {
-                normalized_path_key(root, folder)
-                    == normalized_path_key(root, Path::new(relative))
-            }) {
+                normalized_path_key(root, folder) == normalized_path_key(root, Path::new(relative))
+            }) || is_stable_review_or_quarantine_path(folder)
+            {
                 return false;
             }
             if !folder.is_dir() {
@@ -2959,7 +2953,10 @@ fn projected_empty_folders_to_clean(
                 .filter(|entry| entry.file_type().is_file())
                 .any(|entry| {
                     let source = entry.path();
-                    match items.iter().find(|item| path_matches_item_source(source, item)) {
+                    match items
+                        .iter()
+                        .find(|item| path_matches_item_source(source, item))
+                    {
                         Some(item) if plan_item_moves_source(item) => item
                             .destination_path
                             .as_deref()
@@ -2988,6 +2985,16 @@ fn projected_legacy_folder_counts(
     protected_relative_directories: &[String],
 ) -> (usize, usize) {
     let mut candidates = BTreeSet::<PathBuf>::new();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
+        .flatten()
+    {
+        if entry.file_type().is_dir() && !entry.file_type().is_symlink() {
+            candidates.insert(entry.path().to_path_buf());
+        }
+    }
     for selected_root in selected_roots {
         if selected_root.is_dir() && selected_root.starts_with(root) {
             candidates.insert(selected_root.clone());
@@ -2995,12 +3002,18 @@ fn projected_legacy_folder_counts(
     }
     for item in items {
         let source = PathBuf::from(&item.source_path);
-        let Some(parent) = source.parent() else { continue };
-        if !parent.is_dir() || !parent.starts_with(root) || parent == root { continue }
+        let Some(parent) = source.parent() else {
+            continue;
+        };
+        if !parent.is_dir() || !parent.starts_with(root) || parent == root {
+            continue;
+        }
         candidates.insert(parent.to_path_buf());
         let mut ancestor = parent.parent();
         while let Some(folder) = ancestor {
-            if folder == root || !folder.starts_with(root) { break }
+            if folder == root || !folder.starts_with(root) {
+                break;
+            }
             candidates.insert(folder.to_path_buf());
             ancestor = folder.parent();
         }
@@ -3011,7 +3024,8 @@ fn projected_legacy_folder_counts(
     for folder in candidates {
         if protected_relative_directories.iter().any(|relative| {
             normalized_path_key(root, &folder) == normalized_path_key(root, Path::new(relative))
-        }) || !folder.is_dir()
+        }) || is_stable_review_or_quarantine_path(&folder)
+            || !folder.is_dir()
         {
             continue;
         }
@@ -3022,12 +3036,19 @@ fn projected_legacy_folder_counts(
             .filter(|entry| entry.file_type().is_file())
             .any(|entry| {
                 let path = entry.path();
-                match items.iter().find(|item| path_matches_item_source(path, item)) {
+                match items
+                    .iter()
+                    .find(|item| path_matches_item_source(path, item))
+                {
                     Some(item) if plan_item_moves_source(item) => false,
                     Some(_) | None => true,
                 }
             });
-        if occupied { retained += 1; } else { removable += 1; }
+        if occupied {
+            retained += 1;
+        } else {
+            removable += 1;
+        }
     }
     (removable, retained)
 }
@@ -3105,7 +3126,11 @@ fn scan_selected_roots(
         });
     }
     if selected.len() >= 512 {
-        return scan_packages_core(root.to_string_lossy().to_string(), language, Some("planning"));
+        return scan_packages_core(
+            root.to_string_lossy().to_string(),
+            language,
+            Some("planning"),
+        );
     }
     let mut paths = selected.iter().cloned().collect::<Vec<_>>();
     paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
@@ -3114,10 +3139,7 @@ fn scan_selected_roots(
 
 fn resource_cfg_destinations_for_plan(plan: &OrganizationPlan) -> Vec<PathBuf> {
     let root = PathBuf::from(&plan.root);
-    let Some(mods) = root
-        .ancestors()
-        .find(|ancestor| is_mods_root(ancestor))
-    else {
+    let Some(mods) = root.ancestors().find(|ancestor| is_mods_root(ancestor)) else {
         return Vec::new();
     };
 
@@ -3171,10 +3193,6 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     selected_paths: Vec<String>,
     update_resource_cfg: bool,
 ) -> Result<OrganizationPlan, String> {
-    if selected_paths.is_empty() {
-        return Err("No packages were selected.".to_string());
-    }
-
     let root_input = PathBuf::from(folder.trim());
     let root = root_input
         .canonicalize()
@@ -3187,8 +3205,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     // like categories are never enough to mark a package organized.
     let manual_model_root = manual_model_packages_root()?;
     let manual_model = load_or_build_manual_model_index(&manual_model_root)?;
-    let protected_empty_directories =
-        canonical_model_directories_for_root(&root, &manual_model);
+    let protected_empty_directories = canonical_model_directories_for_root(&root, &manual_model);
     // The selected root can be Mods, any Packages/Overrides subfolder, or a
     // self-contained CC staging library elsewhere. All moves remain inside
     // this canonical root. Never invent an out-of-root destination.
@@ -3244,7 +3261,11 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         .filter_map(|path| path.strip_prefix(&root).ok())
         .map(|relative| {
             let key = relative_key(relative);
-            if key.is_empty() { ".".to_string() } else { key }
+            if key.is_empty() {
+                ".".to_string()
+            } else {
+                key
+            }
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -3291,18 +3312,28 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         ));
     }
 
+    // The unified analysis has already populated this resource cache.  The
+    // plan preview needs a current planning identity, not a mutation-grade
+    // integrity proof, so validate with the bounded fingerprint instead of
+    // reading every selected package a second time.  Execution still hashes
+    // every ready source before its first write.
+    let mut planning_cache = load_cache(&root);
     let mut selected_hashes = HashMap::<PathBuf, String>::new();
     let mut selected_hash_set = HashSet::<String>::new();
     for path in &selected {
-        let (hash, _) = sha256_file(path).map_err(|error| {
-            format!(
-                "Could not hash selected package {}: {error}",
-                path.display()
-            )
-        })?;
-        selected_hashes.insert(path.clone(), hash.clone());
-        selected_hash_set.insert(hash);
+        let (cached, _) =
+            get_or_build_analysis_with_metrics(path, &mut planning_cache).map_err(|error| {
+                format!(
+                    "Could not validate selected package {} for planning: {error}",
+                    path.display()
+                )
+            })?;
+        selected_hashes.insert(path.clone(), cached.file_sha256.clone());
+        selected_hash_set.insert(cached.file_sha256);
     }
+    // Persist a one-off cache miss, but ignore a write failure here: it must
+    // never invalidate a safe, read-only plan preview.
+    let _ = save_cache(&root, &planning_cache);
 
     let duplicate_peers = index_exact_duplicates(&root, &scan.items, &selected_hashes);
     let possible_merged_peers = index_suspected_merged_sliders(&root, &scan.items);
@@ -3496,7 +3527,9 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                     &root,
                     &source_canonical,
                     peers,
-                    hash_model_destination.as_ref().and_then(|result| result.as_ref().ok()),
+                    hash_model_destination
+                        .as_ref()
+                        .and_then(|result| result.as_ref().ok()),
                     &item.destination_parts,
                 )
             })
@@ -3520,23 +3553,24 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                 // The confirmed keeper remains in its canonical location and
                 // continues through normal classification/idempotence checks.
             } else {
-            // A confirmed byte-identical extra copy is not silently stranded
-            // in a legacy folder. Move it to a reversible quarantine bucket;
-            // the keeper continues through normal canonical-model handling.
-            // Suspected merged packages are handled separately below and are
-            // intentionally never auto-quarantined.
-            let (quarantine_relative, quarantine_parts) = duplicate_quarantine_destination(
-                &root,
-                language,
-                &source_canonical,
-                &source_hash,
-                &reserved_duplicate_destinations,
-            )?;
-            let quarantine = root.join(&quarantine_relative);
-            let already_quarantined = same_path_case_insensitive(&source_canonical, &quarantine);
-            if already_quarantined {
-                stats.already_organized += 1;
-                items.push(PlanItem {
+                // A confirmed byte-identical extra copy is not silently stranded
+                // in a legacy folder. Move it to a reversible quarantine bucket;
+                // the keeper continues through normal canonical-model handling.
+                // Suspected merged packages are handled separately below and are
+                // intentionally never auto-quarantined.
+                let (quarantine_relative, quarantine_parts) = duplicate_quarantine_destination(
+                    &root,
+                    language,
+                    &source_canonical,
+                    &source_hash,
+                    &reserved_duplicate_destinations,
+                )?;
+                let quarantine = root.join(&quarantine_relative);
+                let already_quarantined =
+                    same_path_case_insensitive(&source_canonical, &quarantine);
+                if already_quarantined {
+                    stats.already_organized += 1;
+                    items.push(PlanItem {
                     id: item.id.clone(),
                     name: item.name.clone(),
                     source_path: source_canonical.to_string_lossy().to_string(),
@@ -3550,14 +3584,14 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                     size: item.file_size,
                     warnings: vec!["Confirmed byte-identical duplicate is already in the reversible #Duplicados quarantine.".to_string()],
                 });
-                continue;
-            }
-            add_missing_directories(&root, &quarantine_parts, &mut directories);
-            reserved_duplicate_destinations
-                .insert(relative_key(&quarantine_relative).to_ascii_lowercase());
-            stats.ready += 1;
-            stats.duplicate_quarantine_ready += 1;
-            items.push(PlanItem {
+                    continue;
+                }
+                add_missing_directories(&root, &quarantine_parts, &mut directories);
+                reserved_duplicate_destinations
+                    .insert(relative_key(&quarantine_relative).to_ascii_lowercase());
+                stats.ready += 1;
+                stats.duplicate_quarantine_ready += 1;
+                items.push(PlanItem {
                 id: item.id.clone(),
                 name: item.name.clone(),
                 source_path: source_canonical.to_string_lossy().to_string(),
@@ -3594,7 +3628,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                     peers.iter().take(4).cloned().collect::<Vec<_>>().join(" | ")
                 )],
             });
-            continue;
+                continue;
             }
         }
 
@@ -4131,14 +4165,13 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                 // already occupied. Move the extra copy to the flat,
                 // reversible quarantine instead; the canonical destination is
                 // retained byte-for-byte and no overwrite is attempted.
-                let (quarantine_relative, quarantine_parts) =
-                    duplicate_quarantine_destination(
-                        &root,
-                        language,
-                        &source_canonical,
-                        &source_hash,
-                        &reserved_duplicate_destinations,
-                    )?;
+                let (quarantine_relative, quarantine_parts) = duplicate_quarantine_destination(
+                    &root,
+                    language,
+                    &source_canonical,
+                    &source_hash,
+                    &reserved_duplicate_destinations,
+                )?;
                 let quarantine = root.join(&quarantine_relative);
                 if !same_path_case_insensitive(&source_canonical, &quarantine) {
                     add_missing_directories(&root, &quarantine_parts, &mut directories);
@@ -4395,13 +4428,12 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     // with the focused branches the executor is actually allowed to visit.
     stats.remaining_legacy_files =
         projected_remaining_legacy_files(&selected, &selected_roots, &items);
-    stats.empty_folders_to_clean =
-        projected_empty_folders_to_clean(
-            &root,
-            &selected_roots,
-            &items,
-            &protected_empty_directories,
-        );
+    stats.empty_folders_to_clean = projected_empty_folders_to_clean(
+        &root,
+        &selected_roots,
+        &items,
+        &protected_empty_directories,
+    );
     let (_, legacy_folders_retained) = projected_legacy_folder_counts(
         &root,
         &selected_roots,
@@ -4589,7 +4621,11 @@ mod tests {
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::create_dir_all(&quarantine).unwrap();
         std::fs::write(quarantine.join("same.package"), b"existing").unwrap();
-        std::fs::write(quarantine.join("same.package.duplicated"), b"existing marker").unwrap();
+        std::fs::write(
+            quarantine.join("same.package.duplicated"),
+            b"existing marker",
+        )
+        .unwrap();
         let mut reserved = HashSet::new();
         reserved.insert(String::from(
             "#duplicados\\same [aaaaaaaaaaaaaaaa].package.duplicated",
@@ -4635,8 +4671,12 @@ mod tests {
                 name: "ESkin-Natural+Light.package".into(),
                 source_path: r"C:\Mods\#5 Skin\ESkin-Natural+Light.package".into(),
                 source_relative_path: r"#5 Skin\ESkin-Natural+Light.package".into(),
-                destination_path: Some(r"C:\Mods\Packages\Skins\ESkin-Natural+Light.package".into()),
-                destination_relative_path: Some(r"Packages\Skins\ESkin-Natural+Light.package".into()),
+                destination_path: Some(
+                    r"C:\Mods\Packages\Skins\ESkin-Natural+Light.package".into(),
+                ),
+                destination_relative_path: Some(
+                    r"Packages\Skins\ESkin-Natural+Light.package".into(),
+                ),
                 classification_status: "classified".into(),
                 classification_reason: Some("CASP skin".into()),
                 plan_status: "ready".into(),
@@ -4649,8 +4689,12 @@ mod tests {
                 name: "ESkin-Natural+Light.package".into(),
                 source_path: r"C:\Mods\Skin\ESkin-Natural+Light.package".into(),
                 source_relative_path: r"Skin\ESkin-Natural+Light.package".into(),
-                destination_path: Some(r"C:\Mods\Packages\Skins\ESkin-Natural+Light.package".into()),
-                destination_relative_path: Some(r"Packages\Skins\ESkin-Natural+Light.package".into()),
+                destination_path: Some(
+                    r"C:\Mods\Packages\Skins\ESkin-Natural+Light.package".into(),
+                ),
+                destination_relative_path: Some(
+                    r"Packages\Skins\ESkin-Natural+Light.package".into(),
+                ),
                 classification_status: "classified".into(),
                 classification_reason: Some("CASP skin".into()),
                 plan_status: "ready".into(),
@@ -4672,7 +4716,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stats.collision_different_content, 2);
-        assert!(items.iter().all(|item| item.plan_status == "collision_different_content"));
+        assert!(items
+            .iter()
+            .all(|item| item.plan_status == "collision_different_content"));
         assert!(items.iter().all(|item| {
             item.destination_relative_path.as_deref()
                 == Some(r"Packages\Skins\ESkin-Natural+Light.package")
@@ -4796,7 +4842,9 @@ mod tests {
         let base = std::env::temp_dir().join(format!(
             "s3cc-duplicate-no-keeper-{}-{}",
             std::process::id(),
-            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
         ));
         let packages = base.join("Packages");
         let nested = packages.join("#Duplicados").join("legacy");
@@ -4836,7 +4884,9 @@ mod tests {
         let base = std::env::temp_dir().join(format!(
             "s3cc-duplicate-disabled-{}-{}",
             std::process::id(),
-            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
         ));
         let packages = base.join("Packages");
         let nested = packages.join("#Duplicados").join("legacy");
@@ -5700,7 +5750,8 @@ mod tests {
     #[test]
     fn normalized_plan_paths_match_verbatim_case_and_relative_variants() {
         let root = Path::new(r"C:\Mods");
-        let canonical = normalized_path_key(root, Path::new(r"Packages\#Sem Categoria\item.package"));
+        let canonical =
+            normalized_path_key(root, Path::new(r"Packages\#Sem Categoria\item.package"));
         let verbatim = normalized_path_key(
             root,
             Path::new(r"\\?\c:\mods\.\Packages\#SEM CATEGORIA\item.package"),
@@ -6380,16 +6431,10 @@ mod tests {
         std::fs::write(stable.join("Jonas_Scott.sim"), b"stable").unwrap();
         std::fs::write(legacy.join("pending.txt"), b"pending").unwrap();
 
-        let stable_count = projected_remaining_legacy_files(
-            &HashSet::new(),
-            &[stable.clone()],
-            &[],
-        );
-        let legacy_count = projected_remaining_legacy_files(
-            &HashSet::new(),
-            &[legacy.clone()],
-            &[],
-        );
+        let stable_count =
+            projected_remaining_legacy_files(&HashSet::new(), &[stable.clone()], &[]);
+        let legacy_count =
+            projected_remaining_legacy_files(&HashSet::new(), &[legacy.clone()], &[]);
         assert_eq!(stable_count, 0);
         assert_eq!(legacy_count, 1);
         std::fs::remove_dir_all(base).unwrap();
@@ -6410,7 +6455,11 @@ mod tests {
             std::process::id(),
             Local::now().timestamp_nanos_opt().unwrap_or_default()
         ));
-        let source = root.join("Packages").join("#Duplicados").join("legacy").join("eruwen.package");
+        let source = root
+            .join("Packages")
+            .join("#Duplicados")
+            .join("legacy")
+            .join("eruwen.package");
         let source_text = source.to_string_lossy().into_owned();
         let mut items = vec![
             PlanItem {
@@ -6418,7 +6467,11 @@ mod tests {
                 name: "eruwen.package".into(),
                 source_path: source_text.clone(),
                 source_relative_path: "Packages\\#Duplicados\\legacy\\eruwen.package".into(),
-                destination_path: Some(root.join("Packages\\Genética\\eruwen.package").to_string_lossy().into_owned()),
+                destination_path: Some(
+                    root.join("Packages\\Genética\\eruwen.package")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 destination_relative_path: Some("Packages\\Genética\\eruwen.package".into()),
                 classification_status: "classified".into(),
                 classification_reason: None,
@@ -6432,8 +6485,14 @@ mod tests {
                 name: "eruwen.package".into(),
                 source_path: format!(r"\\?\{}", source.display()),
                 source_relative_path: "Packages\\#Duplicados\\legacy\\eruwen.package".into(),
-                destination_path: Some(root.join("Packages\\#Duplicados\\eruwen.package.package.duplicated").to_string_lossy().into_owned()),
-                destination_relative_path: Some("Packages\\#Duplicados\\eruwen.package.package.duplicated".into()),
+                destination_path: Some(
+                    root.join("Packages\\#Duplicados\\eruwen.package.package.duplicated")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                destination_relative_path: Some(
+                    "Packages\\#Duplicados\\eruwen.package.package.duplicated".into(),
+                ),
                 classification_status: "duplicate_quarantine".into(),
                 classification_reason: Some("confirmed keeper".into()),
                 plan_status: "ready_duplicate_quarantine_migration".into(),
@@ -6446,7 +6505,10 @@ mod tests {
         resolve_intra_plan_source_conflicts(&root, &mut items);
 
         assert_eq!(
-            items.iter().filter(|item| item.plan_status.starts_with("ready")).count(),
+            items
+                .iter()
+                .filter(|item| item.plan_status.starts_with("ready"))
+                .count(),
             1
         );
         assert_eq!(items[1].plan_status, "ready_duplicate_quarantine_migration");

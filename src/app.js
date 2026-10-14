@@ -129,6 +129,7 @@ const I18N = {
     loadingPhaseCleanup: "Cleaning legacy folders",
     loadingPhaseRestore: "Restoring files",
     loadingPhaseTools: "Working in the background",
+    loadingPhaseFinishing: "Finalizing results",
     continueInBackground: "Continue in Background",
     loadingPhrase1: "Reading the files selected in the Manager.",
     loadingPhrase2: "Comparing details before preparing the next step.",
@@ -295,6 +296,7 @@ const I18N = {
     analysisStatus_running: "In progress",
     analysisStatus_queued: "Queued",
     analysisStatus_completed: "Completed",
+    analysisStatus_stale: "Needs refresh",
     analysisStatus_cancelled: "Cancelled",
     analysisStatus_failed: "Failed",
     analysisStatus_cleared: "Cleared from list",
@@ -743,6 +745,7 @@ const I18N = {
     loadingPhaseCleanup: "Limpando pastas legadas",
     loadingPhaseRestore: "Restaurando arquivos",
     loadingPhaseTools: "Trabalhando em segundo plano",
+    loadingPhaseFinishing: "Finalizando resultados",
     continueInBackground: "Continuar em Segundo Plano",
     loadingPhrase1: "Lendo os arquivos selecionados no Manager.",
     loadingPhrase2: "Comparando os detalhes antes de preparar a próxima etapa.",
@@ -909,6 +912,7 @@ const I18N = {
     analysisStatus_running: "Em andamento",
     analysisStatus_queued: "Na fila",
     analysisStatus_completed: "Concluída",
+    analysisStatus_stale: "Precisa atualizar",
     analysisStatus_cancelled: "Cancelada",
     analysisStatus_failed: "Falhou",
     analysisStatus_cleared: "Removida da lista",
@@ -1356,6 +1360,7 @@ const I18N = {
     loadingPhaseCleanup: "Limpiando carpetas antiguas",
     loadingPhaseRestore: "Restaurando archivos",
     loadingPhaseTools: "Trabajando en segundo plano",
+    loadingPhaseFinishing: "Finalizando resultados",
     continueInBackground: "Continuar en Segundo Plano",
     loadingPhrase1: "Leyendo los archivos seleccionados en el Manager.",
     loadingPhrase2: "Comparando los detalles antes de preparar el siguiente paso.",
@@ -1522,6 +1527,7 @@ const I18N = {
     analysisStatus_running: "En curso",
     analysisStatus_queued: "En espera",
     analysisStatus_completed: "Completado",
+    analysisStatus_stale: "Necesita actualizarse",
     analysisStatus_cancelled: "Cancelado",
     analysisStatus_failed: "Fallido",
     analysisStatus_cleared: "Borrado de la lista",
@@ -1922,7 +1928,7 @@ const state = {
       ? preferences.conflictsFilter
       : "attention",
   conflictSelectedId: "",
-  operations: { scan: null, duplicates: null, conflicts: null },
+  operations: { scan: null, duplicates: null, conflicts: null, unified_analysis: null },
   technicalDetails: {},
   technicalDetailsLoading: "",
   technicalDetailsErrors: {},
@@ -2218,6 +2224,13 @@ const el = {
   confirmMessage: document.querySelector("#confirm-message"),
   confirmCancelBtn: document.querySelector("#confirm-cancel-btn"),
   confirmActionBtn: document.querySelector("#confirm-action-btn"),
+  operationResultModal: document.querySelector("#operation-result-modal"),
+  operationResultIcon: document.querySelector("#operation-result-icon"),
+  operationResultTitle: document.querySelector("#operation-result-title"),
+  operationResultSummary: document.querySelector("#operation-result-summary"),
+  operationResultCounts: document.querySelector("#operation-result-counts"),
+  operationResultWarnings: document.querySelector("#operation-result-warnings"),
+  operationResultOk: document.querySelector("#operation-result-ok"),
   analyzeDuplicatesBtn: document.querySelector("#analyze-duplicates-btn"),
   duplicatesState: document.querySelector("#duplicates-state"),
   duplicatesSearch: document.querySelector("#duplicates-search"),
@@ -3720,23 +3733,24 @@ async function executeQuarantine() {
         ? { retainedPaths: retainedExactDuplicatePaths() } : {}),
     });
     const quarantineNotice = `${t("quarantineComplete")}: ${result.moved}`;
-    state.duplicatesNotice = quarantineNotice;
-    state.postQuarantineNotice = { tab: "duplicates", text: quarantineNotice };
-    state.quarantineSelected.clear();
-    state.quarantinePlan = null;
-    state.quarantineExactBatch = false;
-    state.duplicatesAnalysis = null;
-    state.duplicateSelectedId = "";
     closeDuplicateDetails();
-    state.tab = "duplicates";
-    persistPreferences();
-    await Promise.all([refreshOperationHistory(), refreshCacheInfo()]);
+    await refreshAfterStructureChange({
+      tab: "duplicates",
+      noticeTarget: "duplicatesNotice",
+      notice: quarantineNotice,
+    });
+    state.postQuarantineNotice = { tab: "duplicates", text: quarantineNotice };
     state.quarantineBusy = false;
-    await scanFolder(false, true);
-    state.tab = "duplicates";
     persistPreferences();
+    showOperationResult({
+      title: t("quarantineComplete"),
+      summary: quarantineNotice,
+      counters: [{ label: t("packages"), value: result.moved ?? 0 }],
+      warnings: result.warnings || [],
+    });
   } catch (error) {
     state.duplicatesError = String(error);
+    showOperationResult({ state: "error", summary: state.duplicatesError, warnings: [state.duplicatesError] });
   } finally {
     state.quarantineBusy = false;
     state.pendingAction = "";
@@ -4617,24 +4631,24 @@ async function executeConflictQuarantine() {
       plannedQuarantineRoot: state.conflictQuarantinePlan.quarantineRoot,
     });
     const quarantineNotice = `${t("quarantineComplete")}: ${result.moved}`;
-    state.conflictsNotice = quarantineNotice;
-    state.postQuarantineNotice = { tab: "conflicts", text: quarantineNotice };
-    state.conflictQuarantineSelected.clear();
-    state.conflictQuarantinePlan = null;
-    state.conflictsAnalysis = null;
-    state.conflictSelectedId = "";
-    state.conflictReviewSelected.clear();
-    state.conflictsSelectedOnly = false;
     closeConflictDetails();
-    state.tab = "conflicts";
-    persistPreferences();
-    await Promise.all([refreshOperationHistory(), refreshCacheInfo()]);
+    await refreshAfterStructureChange({
+      tab: "conflicts",
+      noticeTarget: "conflictsNotice",
+      notice: quarantineNotice,
+    });
+    state.postQuarantineNotice = { tab: "conflicts", text: quarantineNotice };
     state.quarantineBusy = false;
-    await scanFolder(false, true);
-    state.tab = "conflicts";
     persistPreferences();
+    showOperationResult({
+      title: t("quarantineComplete"),
+      summary: quarantineNotice,
+      counters: [{ label: t("packages"), value: result.moved ?? 0 }],
+      warnings: result.warnings || [],
+    });
   } catch (error) {
     state.conflictsError = String(error);
+    showOperationResult({ state: "error", summary: state.conflictsError, warnings: [state.conflictsError] });
   } finally {
     state.quarantineBusy = false;
     state.pendingAction = "";
@@ -5316,7 +5330,9 @@ function renderConflicts() {
 
 
 function operationBusy(kind) {
-  return kind === "scan"
+  return kind === "unified_analysis"
+    ? state.analysisPipelineBusy
+    : kind === "scan"
     ? state.scanning
     : kind === "duplicates"
       ? state.duplicatesBusy
@@ -5355,6 +5371,11 @@ function operationUi(kind) {
 function operationPhaseLabel(phase) {
   return {
     starting: t("progressStarting"),
+    reading_packages: t("loadingPhaseIdentification"),
+    identifying_contents: t("loadingPhaseAnalysis"),
+    comparing_duplicates: t("loadingPhaseDuplicates"),
+    finalizing_results: t("loadingPhaseFinishing"),
+    cache_reused: t("loadingPhaseFinishing"),
     scanning: t("progressScanning"),
     fingerprinting: t("progressFingerprinting"),
     indexing: t("progressIndexing"),
@@ -5367,7 +5388,12 @@ function renderOperationProgress(kind) {
   const ui = operationUi(kind);
   if (!ui) return;
   const [container, bar, text, percentText, countText, cancelButton] = ui;
-  const status = state.operations[kind];
+  // The three page-level progress panels deliberately mirror the coordinated
+  // analysis while it is running.  They must not start three independent
+  // monitors merely to display the same operation.
+  const status = state.analysisPipelineBusy && ["scan", "duplicates", "conflicts"].includes(kind)
+    ? state.operations.unified_analysis
+    : state.operations[kind];
   const visible = operationBusy(kind);
   container.classList.toggle("hidden", !visible);
   if (!visible) return;
@@ -5483,14 +5509,16 @@ function loadingOverlayState() {
       phase: kind === "sims3pack_inspect" ? "loadingPhaseAnalysis" : "loadingPhaseTools",
       blocking, cancelable: !blocking, continueable: !blocking };
   }
-  for (const kind of ["scan", "duplicates", "conflicts"]) {
+  for (const kind of ["unified_analysis", "scan", "duplicates", "conflicts"]) {
     // The local owner is the source of truth for the lifecycle.  A terminal
     // poll from an older run must never reopen the overlay after that owner
     // has released the operation.
     if (!operationBusy(kind)) continue;
     const status = state.operations[kind] || {};
     const operationKey = `${kind}:${status.startedUnixMs || "active"}`;
-    const scanPhase = kind === "scan"
+    const scanPhase = kind === "unified_analysis"
+      ? ({ reading_packages: "loadingPhaseIdentification", identifying_contents: "loadingPhaseAnalysis", comparing_duplicates: "loadingPhaseDuplicates", finalizing_results: "loadingPhaseFinishing", cache_reused: "loadingPhaseFinishing" }[status.phase] || "loadingPhaseAnalysis")
+      : kind === "scan"
       ? ({ starting: "loadingPhaseIdentification", scanning: "loadingPhaseAnalysis", fingerprinting: "loadingPhaseAnalysis", indexing: "loadingPhaseAnalysis", comparing: "loadingPhaseDuplicates" }[status.phase] || "loadingPhaseAnalysis")
       : "loadingPhaseDuplicates";
     return {
@@ -5612,6 +5640,7 @@ async function monitorOrganizationProgress() {
 }
 
 function renderAllOperationProgress() {
+  renderOperationProgress("unified_analysis");
   renderOperationProgress("scan");
   renderOperationProgress("duplicates");
   renderOperationProgress("conflicts");
@@ -5680,7 +5709,7 @@ async function cancelAnalysis(kind) {
 }
 
 async function cancelLoadingOperation(kind) {
-  if (["scan", "duplicates", "conflicts"].includes(kind)) {
+  if (["unified_analysis", "scan", "duplicates", "conflicts"].includes(kind)) {
     return cancelAnalysis(kind);
   }
   if (kind === state.toolsOperation) {
@@ -6138,6 +6167,17 @@ function invalidateAnalysesAfterStructureChange() {
   state.conflictQuarantinePlan = null;
   state.auditReports = { organizer: null, duplicates: null, conflicts: null };
   state.auditErrors = { organizer: "", duplicates: "", conflicts: "" };
+}
+
+// Successful writes invalidate package-derived data, but must never trigger a
+// hidden second corpus scan. The next explicit Analyze action can reuse the
+// persistent incremental cache; this refresh is metadata-only.
+async function refreshAfterStructureChange({ tab, noticeTarget, notice }) {
+  invalidateAnalysesAfterStructureChange();
+  if (noticeTarget) state[noticeTarget] = notice;
+  state.tab = tab || state.tab;
+  await Promise.all([refreshOperationHistory(), refreshCacheInfo()]);
+  if (state.folder) await loadStructure(state.structureCurrent || "");
 }
 
 async function loadStructure(relativePath = state.structureCurrent) {
@@ -7004,15 +7044,22 @@ async function restoreQuarantineFromHistory(item) {
       manifestPath: item.destination,
       confirmed: true,
     });
-    state.toolsNotice = `${t("quarantineRestored")}: ${result.moved}`;
-    state.duplicatesAnalysis = null;
-    state.quarantinePlan = null;
-    state.quarantineSelected.clear();
-    await Promise.all([refreshOperationHistory(), refreshCacheInfo()]);
+    const restoredNotice = `${t("quarantineRestored")}: ${result.moved}`;
+    await refreshAfterStructureChange({
+      tab: "tools",
+      noticeTarget: "toolsNotice",
+      notice: restoredNotice,
+    });
     state.toolsBusy = false;
-    await scanFolder(false, true);
+    showOperationResult({
+      title: t("quarantineRestored"),
+      summary: restoredNotice,
+      counters: [{ label: t("packages"), value: result.moved ?? 0 }],
+      warnings: result.warnings || [],
+    });
   } catch (error) {
     state.toolsError = String(error);
+    showOperationResult({ state: "error", summary: state.toolsError, warnings: [state.toolsError] });
   } finally {
     state.toolsBusy = false;
     state.pendingAction = "";
@@ -7034,15 +7081,22 @@ async function recoverQuarantineFromHistory(item) {
       folder: state.folder,
       manifestPath: item.destination,
     });
-    state.toolsNotice = `${t("quarantineRecovered")}: ${result.status} · ${result.moved}`;
-    state.duplicatesAnalysis = null;
-    state.quarantinePlan = null;
-    state.quarantineSelected.clear();
+    const recoveredNotice = `${t("quarantineRecovered")}: ${result.status} · ${result.moved}`;
+    await refreshAfterStructureChange({
+      tab: "tools",
+      noticeTarget: "toolsNotice",
+      notice: recoveredNotice,
+    });
     state.toolsBusy = false;
-    await Promise.all([refreshOperationHistory(), refreshCacheInfo()]);
-    await scanFolder(false, true);
+    showOperationResult({
+      title: t("quarantineRecovered"),
+      summary: recoveredNotice,
+      counters: [{ label: t("packages"), value: result.moved ?? 0 }],
+      warnings: result.warnings || [],
+    });
   } catch (error) {
     state.toolsError = String(error);
+    showOperationResult({ state: "error", summary: state.toolsError, warnings: [state.toolsError] });
   } finally {
     state.toolsBusy = false;
     render();
@@ -7280,7 +7334,18 @@ async function analyzeHealth() {
   try {
     state.healthReport = await invoke("analyze_mods_health", { folder: state.folder });
     state.healthSelected.clear();
-  } catch (error) { state.toolsError = String(error); }
+    showOperationResult({
+      title: t("health"),
+      summary: t("executionComplete"),
+      counters: [
+        { label: t("packages"), value: state.healthReport?.summary?.packages ?? state.healthReport?.packages?.length ?? 0 },
+        { label: t("warnings"), value: state.healthReport?.summary?.warnings ?? 0 },
+      ],
+    });
+  } catch (error) {
+    state.toolsError = String(error);
+    showOperationResult({ state: "error", summary: state.toolsError, warnings: [state.toolsError] });
+  }
   finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }
 
@@ -7360,13 +7425,25 @@ async function executeInboxImport() {
       sourceFolder: state.inboxFolder,
       selectedPaths: [...state.inboxSelected],
     });
-    state.toolsNotice = [
+    const importNotice = [
       `${result.imported} imported → ${result.destinationRoot}`,
       ...(result.warnings || []),
     ].join(" · ");
+    await refreshAfterStructureChange({
+      tab: "tools",
+      noticeTarget: "toolsNotice",
+      notice: importNotice,
+    });
     state.inboxSelected.clear(); state.inboxPlan = null;
-    await Promise.all([scanFolder(false, true), refreshOperationHistory(), refreshCacheInfo()]);
-  } catch (error) { state.toolsError = String(error); }
+    showOperationResult({
+      summary: importNotice,
+      counters: [{ label: t("packages"), value: result.imported ?? 0 }],
+      warnings: result.warnings || [],
+    });
+  } catch (error) {
+    state.toolsError = String(error);
+    showOperationResult({ state: "error", summary: state.toolsError, warnings: [state.toolsError] });
+  }
   finally { state.toolsBusy = false; state.toolsOperation = null; render(); }
 }
 
@@ -8408,6 +8485,56 @@ function closeConfirm() {
   el.confirmModal.setAttribute("aria-hidden", "true");
 }
 
+// One concise, themed terminal dialog per operation. Details remain in the
+// report/history; the modal intentionally summarizes real counters instead
+// of concatenating an unbounded status message into the page.
+function closeOperationResult() {
+  if (!el.operationResultModal) return;
+  el.operationResultModal.classList.add("hidden");
+  el.operationResultModal.setAttribute("aria-hidden", "true");
+}
+
+function showOperationResult({ state: resultState = "complete", title, summary, counters = [], warnings = [] }) {
+  if (!el.operationResultModal) return;
+  const normalizedWarnings = [...new Set((warnings || []).filter(Boolean).map(String))];
+  const visualState = resultState === "complete" && normalizedWarnings.length ? "warnings" : resultState;
+  const icon = visualState === "error"
+    ? "fa-circle-xmark"
+    : visualState === "cancelled"
+      ? "fa-ban"
+      : visualState === "warnings"
+        ? "fa-triangle-exclamation"
+        : "fa-circle-check";
+  el.operationResultModal.dataset.resultState = visualState;
+  el.operationResultIcon.innerHTML = `<i class="fa-solid ${icon}"></i>`;
+  el.operationResultTitle.textContent = title || (
+    visualState === "error" ? t("executionRolledBack") :
+    visualState === "cancelled" ? t("cancelled") : t("executionComplete")
+  );
+  el.operationResultSummary.textContent = summary || "";
+  el.operationResultCounts.replaceChildren(...counters
+    .filter((counter) => counter && counter.label)
+    .map((counter) => {
+      const item = document.createElement("div");
+      const value = document.createElement("b");
+      const label = document.createElement("span");
+      value.textContent = counter.value ?? 0;
+      label.textContent = counter.label;
+      item.append(value, label);
+      return item;
+    }));
+  el.operationResultWarnings.replaceChildren(...normalizedWarnings.map((warning) => {
+    const item = document.createElement("li");
+    item.textContent = warning;
+    return item;
+  }));
+  el.operationResultWarnings.classList.toggle("hidden", !normalizedWarnings.length);
+  el.operationResultOk.textContent = t("close");
+  el.operationResultModal.classList.remove("hidden");
+  el.operationResultModal.setAttribute("aria-hidden", "false");
+  el.operationResultOk.focus();
+}
+
 function render() {
   renderLanguage();
   renderTabs();
@@ -8591,7 +8718,7 @@ function clearLoadedLibrary() {
   state.technicalDetailsErrors = {};
   state.technicalDetailsOpen.clear();
 
-  state.operations = { scan: null, duplicates: null, conflicts: null };
+  state.operations = { scan: null, duplicates: null, conflicts: null, unified_analysis: null };
   closePlanModal();
   closeDuplicateDetails();
   closeConflictDetails();
@@ -8678,7 +8805,7 @@ async function chooseFolder() {
   ]);
 }
 
-async function scanFolder(preserveSelection = false, preserveNotice = false) {
+async function runUnifiedAnalysis(preserveSelection = false, preserveNotice = false) {
   if (!state.folder || analysisReadsBusy() || state.auditBusy ||
       state.planning || state.executing || state.restoreBusy ||
       state.quarantineBusy || state.structureBusy || state.toolsBusy) return;
@@ -8696,10 +8823,15 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
   const previousSelectedId = state.selectedId;
 
   state.scanning = true;
+  state.duplicatesBusy = true;
+  state.conflictsBusy = true;
+  state.analysisPipelineBusy = true;
   state.analysisStatus.manager = "running";
-  state.operations.scan = null;
-  const operationToken = beginOperationMonitor("scan");
-  void monitorOperation("scan", operationToken);
+  state.analysisStatus.duplicates = "running";
+  state.analysisStatus.conflicts = "running";
+  state.operations.unified_analysis = null;
+  const operationToken = beginOperationMonitor("unified_analysis");
+  void monitorOperation("unified_analysis", operationToken);
   state.error = "";
   state.planError = "";
   state.plan = null;
@@ -8712,11 +8844,13 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
   render();
 
   let scanSucceeded = false;
+  let terminalOutcome = null;
   try {
-    const result = await invoke("scan_packages", { folder, language: state.language });
+    const result = await invoke("analyze_unified", { folder, language: state.language });
     if (!analysisSessionMatches(folder, runId)) return;
-    state.items = result.items || [];
-    state.stats = result.stats || null;
+    const scan = result.scan || {};
+    state.items = scan.items || [];
+    state.stats = scan.stats || null;
     virtualViews.manager.items = null;
 
     const eligibleIds = new Set(
@@ -8735,15 +8869,8 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
     state.selectedId = visibleItems()[0]?.id || "";
     if (preserveNotice) state.notice = previousNotice;
     state.analysisStatus.manager = "completed";
-    // A cache-hit scan has already validated the package set, language and
-    // classification context. Keep matching duplicate/conflict results so a
-    // second click does not immediately reopen every package; a fresh scan
-    // still invalidates both analyses exactly as before.
-    const reusedScan = result.cacheHit === true;
-    const keepDuplicates = reusedScan && !!oldDuplicates;
-    const keepConflicts = reusedScan && !!oldConflicts;
-    state.duplicatesAnalysis = keepDuplicates ? oldDuplicates : null;
-    state.conflictsAnalysis = keepConflicts ? oldConflicts : null;
+    state.duplicatesAnalysis = result.duplicates || null;
+    state.conflictsAnalysis = result.conflicts || null;
     state.conflictReviewSelected.clear();
     state.conflictsSelectedOnly = false;
     conflictVisibleMemo.analysis = null;
@@ -8757,9 +8884,22 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
     state.quarantinePlan = null;
     closeDuplicateDetails();
     closeConflictDetails();
-    state.analysisStatus.duplicates = keepDuplicates ? "completed" : "queued";
-    state.analysisStatus.conflicts = keepConflicts ? "completed" : "queued";
+    state.analysisStatus.duplicates = "completed";
+    state.analysisStatus.conflicts = "completed";
+    state.duplicateSelectedId = flattenedDuplicateFindings()[0]?.id || "";
+    state.conflictSelectedId = state.conflictsAnalysis?.findings?.[0]?.id || "";
     scanSucceeded = true;
+    terminalOutcome = {
+      state: "complete",
+      title: t("scanComplete"),
+      summary: result.stats?.unifiedCacheReused ? t("cacheReused") : t("scanComplete"),
+      counters: [
+        { label: t("packages"), value: result.scan?.items?.length ?? 0 },
+        { label: t("exactGroups"), value: result.duplicates?.stats?.exactGroups ?? 0 },
+        { label: t("packagePairs"), value: result.conflicts?.findings?.length ?? 0 },
+      ],
+      warnings: [...(result.scan?.errors || []), ...(result.duplicates?.errors || []), ...(result.conflicts?.errors || [])],
+    };
   } catch (error) {
     const message = String(error);
     if (message.includes("__S3CC_OPERATION_CANCELLED__")) {
@@ -8772,23 +8912,30 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
       state.analysisStatus = oldStatus;
       state.duplicatesAnalysis = oldDuplicates;
       state.conflictsAnalysis = oldConflicts;
+      terminalOutcome = { state: "cancelled", title: t("cancelled"), summary: t("cancelled") };
     } else {
       state.error = message;
       state.analysisStatus.manager = "failed";
-      state.analysisStatus.duplicates = "not_run";
-      state.analysisStatus.conflicts = "not_run";
+      state.analysisStatus.duplicates = "failed";
+      state.analysisStatus.conflicts = "failed";
       state.duplicatesAnalysis = null;
       state.conflictsAnalysis = null;
       state.items = [];
       state.stats = null;
       state.selectedForPlan.clear();
+      terminalOutcome = { state: "error", title: t("scanFailed"), summary: message, warnings: [message] };
     }
   } finally {
-    await settleOperationStatus("scan", operationToken);
+    await settleOperationStatus("unified_analysis", operationToken);
     state.scanning = false;
-    endOperationMonitor("scan", operationToken);
+    state.duplicatesBusy = false;
+    state.conflictsBusy = false;
+    state.analysisPipelineBusy = false;
+    endOperationMonitor("unified_analysis", operationToken);
     render();
+    await refreshCacheInfo();
   }
+  if (terminalOutcome && analysisSessionMatches(folder, runId)) showOperationResult(terminalOutcome);
   if (scanSucceeded && analysisSessionMatches(folder, runId)) {
     // Prepare the exact plan once the scan has supplied a valid, current
     // classification snapshot.  The request is asynchronous and keyed to
@@ -8800,48 +8947,16 @@ async function scanFolder(preserveSelection = false, preserveNotice = false) {
         render();
       }
     });
-    void runAutomaticAnalyses(folder, runId);
   }
 }
 
-// Both analyses persist the same DBPF fingerprint cache. Never run them in parallel.
-async function runAutomaticAnalyses(folder, runId) {
-  if (!analysisSessionMatches(folder, runId) || state.analysisPipelineBusy) return;
-  state.analysisPipelineBusy = true;
-  try {
-    if (state.analysisStatus.duplicates === "queued") {
-      await analyzeDuplicates({ automated: true, folder, runId });
-    }
-    if (analysisSessionMatches(folder, runId) &&
-        state.analysisStatus.conflicts === "queued") {
-      await analyzeConflicts({ automated: true, folder, runId });
-    }
-  } finally {
-    // Release the lock even if moving packages invalidated this run.
-    // Previously a stale run could leave analysisPipelineBusy locked forever.
-    state.analysisPipelineBusy = false;
-    if (analysisSessionMatches(folder, runId) && state.postQuarantineNotice) {
-      const { tab, text } = state.postQuarantineNotice;
-      state.tab = tab;
-      if (tab === "duplicates") state.duplicatesNotice = text;
-      else if (tab === "conflicts") state.conflictsNotice = text;
-      state.postQuarantineNotice = null;
-    }
-    if (state.analysisRefreshQueued && state.folder) {
-      state.analysisRefreshQueued = false;
-      const currentFolder = state.folder, currentRun = state.analysisRunId;
-      // Rebuild Duplicates and Conflicts after the verified file moves,
-      // never using stale quarantine paths from the old analysis.
-      void runAutomaticAnalyses(currentFolder, currentRun);
-    }
-    render();
-  }
+async function scanFolder(preserveSelection = false, preserveNotice = false) {
+  return runUnifiedAnalysis(preserveSelection, preserveNotice);
 }
 
 async function buildPlan() {
   if (
     !state.folder ||
-    !state.selectedForPlan.size ||
     state.planning ||
     state.structureBusy
   ) return;
@@ -8891,7 +9006,7 @@ function planPreviewKey(
 }
 
 async function preparePlanInBackground(folder, runId) {
-  if (!folder || !analysisSessionMatches(folder, runId) || !state.selectedForPlan.size) return null;
+  if (!folder || !analysisSessionMatches(folder, runId)) return null;
 
   if (!supportsResourceCfgUpdate(folder)) state.updateResourceCfg = false;
   const selectedPaths = [...state.selectedForPlan];
@@ -8928,7 +9043,9 @@ async function preparePlanInBackground(folder, runId) {
 // which previously re-read the entire library and started both analyzers.
 function reconcileSuccessfulOrganization(result) {
   const moved = result.movedFiles || [];
-  if (!Array.isArray(moved) || !moved.length) return;
+  // A cleanup-only transaction is still a successful organization result.
+  // It must invalidate the stale preview without pretending packages moved.
+  if (!Array.isArray(moved)) return;
 
   const key = path => String(path || "").replaceAll("\\", "/").toLocaleLowerCase();
   const bySource = new Map(moved.map(move => [key(move.sourcePath), move]));
@@ -8960,14 +9077,15 @@ function reconcileSuccessfulOrganization(result) {
   state.technicalDetailsErrors = {};
   state.technicalDetailsOpen.clear();
 
-  // The old conflict/duplicate paths are no longer safe for quarantine.
-  // Keep these analyzers available, but do not automatically run them.
+  // Moved paths invalidate only the affected shared result.  Do not start a
+  // fresh duplicate/conflict traversal here: the next explicit analysis will
+  // rebuild all three views together from the changed inventory.
   state.analysisRunId += 1;
   state.duplicatesAnalysis = null;
   state.conflictsAnalysis = null;
   state.analysisStatus.manager = "completed";
-  state.analysisStatus.duplicates = "not_run";
-  state.analysisStatus.conflicts = "not_run";
+  state.analysisStatus.duplicates = "stale";
+  state.analysisStatus.conflicts = "stale";
   state.duplicatesError = "";
   state.conflictsError = "";
   state.duplicatesNotice = t("analysisNeedsRefresh");
@@ -8991,8 +9109,8 @@ async function executeOrganization() {
   if (!planCanExecute(state.plan) || state.executing || state.structureBusy) return;
 
   const completedPlan = state.plan;
-  let refreshAnalyses = false;
   const completedStats = completedPlan?.stats || {};
+  let terminalOutcome = null;
   const collisionItems = (completedPlan?.items || []).filter((item) =>
     String(item.planStatus || "").includes("collision")
   );
@@ -9028,7 +9146,6 @@ async function executeOrganization() {
       state.lastOrganizedDirectory = result.organizedDirectory || state.folder;
       if (result.status === "COMPLETE") {
         reconcileSuccessfulOrganization(result);
-        refreshAnalyses = (result.moved ?? 0) > 0;
       }
       state.organizationReview = {
         moved: result.moved ?? 0,
@@ -9055,8 +9172,26 @@ async function executeOrganization() {
       if (result.errors?.length) {
         state.notice += `\n${result.errors.join("\n")}`;
       }
+      terminalOutcome = {
+        state: "complete",
+        title: result.status === "COMPLETE" ? t("executionComplete") : t("executionNoChanges"),
+        summary: state.notice,
+        counters: [
+          { label: t("organizedPackages"), value: result.moved ?? 0 },
+          { label: t("duplicatesPending"), value: completedStats.duplicateSkipped ?? 0 },
+          { label: t("blocked"), value: completedStats.blocked ?? 0 },
+          { label: t("emptyOldFoldersRemoved"), value: result.oldFoldersRemoved ?? 0 },
+        ],
+        warnings: result.errors || [],
+      };
     } else {
       state.planError = `${t("executionRolledBack")}: ${(result.errors || []).join(" ")}`;
+      terminalOutcome = {
+        state: "error",
+        title: t("executionRolledBack"),
+        summary: state.planError,
+        warnings: result.errors || [],
+      };
     }
 
     state.pendingAction = "";
@@ -9064,6 +9199,7 @@ async function executeOrganization() {
     closePlanModal();
   } catch (error) {
     state.planError = String(error);
+    terminalOutcome = { state: "error", title: t("executionRolledBack"), summary: state.planError, warnings: [state.planError] };
   } finally {
     state.executing = false;
     state.organizeProgress = null;
@@ -9071,19 +9207,8 @@ async function executeOrganization() {
     render();
   }
 
-  if (!state.planError) {
-    await loadRestoreHistory();
-    if (refreshAnalyses && state.folder) {
-      state.analysisStatus.duplicates = "queued";
-      state.analysisStatus.conflicts = "queued";
-      state.analysisRefreshQueued = true;
-      if (!state.analysisPipelineBusy) {
-        state.analysisRefreshQueued = false;
-        void runAutomaticAnalyses(state.folder, state.analysisRunId);
-      }
-      render();
-    }
-  }
+  if (terminalOutcome) showOperationResult(terminalOutcome);
+  if (!state.planError) await loadRestoreHistory();
 }
 
 async function chooseManifest() {
@@ -9197,112 +9322,15 @@ async function executeRestore() {
   }
 }
 
-async function analyzeDuplicates({ automated = false, folder = state.folder, runId = state.analysisRunId } = {}) {
-  if (!folder || !analysisSessionMatches(folder, runId) ||
-      state.duplicatesBusy || state.conflictsBusy || state.scanning ||
-      (!automated && state.analysisPipelineBusy) ||
-      state.auditBusy || state.structureBusy || state.toolsBusy) return;
-  const previousAnalysis = state.duplicatesAnalysis;
-  const previousSelectedId = state.duplicateSelectedId;
-  state.duplicatesBusy = true;
-  state.analysisStatus.duplicates = "running";
-  state.duplicatesNotice = "";
-  state.duplicatesError = "";
-  state.duplicatesAnalysis = null;
-  state.duplicateSelectedId = "";
-  state.operations.duplicates = null;
-  const operationToken = beginOperationMonitor("duplicates");
-  void monitorOperation("duplicates", operationToken);
-  render();
-  try {
-    const result = await invoke("analyze_duplicates", { folder });
-    if (!analysisSessionMatches(folder, runId)) return;
-    state.duplicatesAnalysis = result;
-    state.analysisStatus.duplicates = "completed";
-    state.quarantineSelected.clear();
-    state.quarantinePlan = null;
-    state.duplicateSelectedId = flattenedDuplicateFindings()[0]?.id || "";
-  } catch (e) {
-    if (!analysisSessionMatches(folder, runId)) return;
-    const message = String(e);
-    state.duplicatesAnalysis = previousAnalysis;
-    state.duplicateSelectedId = previousSelectedId;
-    if (message.includes("__S3CC_OPERATION_CANCELLED__")) {
-      state.duplicatesNotice = t("cancelled");
-      state.analysisStatus.duplicates = "cancelled";
-    } else {
-      state.duplicatesError = message;
-      state.analysisStatus.duplicates = "failed";
-    }
-  } finally {
-    if (analysisSessionMatches(folder, runId)) {
-      await settleOperationStatus("duplicates", operationToken);
-    }
-    if (operationMonitorIsCurrent("duplicates", operationToken)) {
-      state.duplicatesBusy = false;
-      endOperationMonitor("duplicates", operationToken);
-    }
-    if (analysisSessionMatches(folder, runId)) {
-      render();
-      await refreshCacheInfo();
-    }
-  }
+async function analyzeDuplicates() {
+  // All three Analyze buttons deliberately enter the same backend operation.
+  // A fresh result therefore populates Organizer, Duplicates and Conflicts
+  // together instead of opening the DBPF corpus a second time.
+  await runUnifiedAnalysis(true, true);
 }
 
-async function analyzeConflicts({ automated = false, folder = state.folder, runId = state.analysisRunId } = {}) {
-  if (!folder || !analysisSessionMatches(folder, runId) ||
-      state.conflictsBusy || state.duplicatesBusy || state.scanning ||
-      (!automated && state.analysisPipelineBusy) ||
-      state.auditBusy || state.structureBusy || state.toolsBusy) return;
-  const previousAnalysis = state.conflictsAnalysis;
-  const previousSelectedId = state.conflictSelectedId;
-  state.conflictsBusy = true;
-  state.conflictQuarantineSelected.clear();
-  state.conflictQuarantinePlan = null;
-  state.conflictReviewSelected.clear();
-  state.conflictsSelectedOnly = false;
-  conflictVisibleMemo.analysis = null;
-  state.analysisStatus.conflicts = "running";
-  state.conflictsNotice = "";
-  state.conflictsError = "";
-  state.conflictsAnalysis = null;
-  state.conflictSelectedId = "";
-  state.operations.conflicts = null;
-  const operationToken = beginOperationMonitor("conflicts");
-  void monitorOperation("conflicts", operationToken);
-  render();
-  try {
-    const result = await invoke("analyze_conflicts", { folder });
-    if (!analysisSessionMatches(folder, runId)) return;
-    state.conflictsAnalysis = result;
-    state.analysisStatus.conflicts = "completed";
-    state.conflictMarks = {};
-    state.conflictSelectedId = result?.findings?.[0]?.id || "";
-  } catch (e) {
-    if (!analysisSessionMatches(folder, runId)) return;
-    const message = String(e);
-    state.conflictsAnalysis = previousAnalysis;
-    state.conflictSelectedId = previousSelectedId;
-    if (message.includes("__S3CC_OPERATION_CANCELLED__")) {
-      state.conflictsNotice = t("cancelled");
-      state.analysisStatus.conflicts = "cancelled";
-    } else {
-      state.conflictsError = message;
-      state.analysisStatus.conflicts = "failed";
-    }
-  } finally {
-    if (analysisSessionMatches(folder, runId)) {
-      await settleOperationStatus("conflicts", operationToken);
-    }
-    if (operationMonitorIsCurrent("conflicts", operationToken)) {
-      state.conflictsBusy = false;
-      endOperationMonitor("conflicts", operationToken);
-    }
-    if (analysisSessionMatches(folder, runId)) {
-      render();
-      await refreshCacheInfo();
-    }
-  }
+async function analyzeConflicts() {
+  await runUnifiedAnalysis(true, true);
 }
 
 function selectAllVisible() {
@@ -9411,19 +9439,24 @@ document.addEventListener("keydown", (event) => {
   }
   if (!el.structureModal.classList.contains("hidden")) closeStructureModal();
   else if (!el.confirmModal.classList.contains("hidden")) closeConfirm();
+  else if (!el.operationResultModal.classList.contains("hidden")) closeOperationResult();
   else if (!el.planModal.classList.contains("hidden")) closePlanModal();
 });
 
 
 el.chooseFolderBtn.addEventListener("click", chooseFolder);
-el.scanCancelBtn.addEventListener("click", () => cancelAnalysis("scan"));
-el.duplicatesCancelBtn.addEventListener("click", () => cancelAnalysis("duplicates"));
-el.conflictsCancelBtn.addEventListener("click", () => cancelAnalysis("conflicts"));
+el.scanCancelBtn.addEventListener("click", () => cancelAnalysis("unified_analysis"));
+el.duplicatesCancelBtn.addEventListener("click", () => cancelAnalysis("unified_analysis"));
+el.conflictsCancelBtn.addEventListener("click", () => cancelAnalysis("unified_analysis"));
 el.loadingOverlayCancel.addEventListener("click", () => {
   const current = loadingOverlayState();
   if (current?.cancelable) void cancelLoadingOperation(current.kind);
 });
 el.loadingOverlayContinue?.addEventListener("click", continueLoadingInBackground);
+el.operationResultOk.addEventListener("click", closeOperationResult);
+el.operationResultModal.addEventListener("click", (event) => {
+  if (event.target === el.operationResultModal) closeOperationResult();
+});
 window.addEventListener("s3cc-operation-progress", event => {
   const detail = event.detail || {};
   if (!detail.kind) return;

@@ -6,16 +6,16 @@ use crate::{
     i18n::AppLanguage,
     manifest::sha256_file,
     operation::{self, CANCELLED_ERROR},
-    resource_cfg::is_mods_layout_root,
-    workspace::{load_workspace_for_root, split_destination},
     package_family::{
         classify_package_family, PackageFamilyClassification, PackageFamilyResult, TYPE_BBLN,
         TYPE_BGEO, TYPE_BONE_DELTA, TYPE_FACE, TYPE_FBLN, TYPE_HAIR_TONE, TYPE_IMG, TYPE_S3SA,
         TYPE_SKIN_TONE,
     },
+    resource_cfg::is_mods_layout_root,
     slider::{fbln_evidence, read_fbln_metadata, FblnMetadata},
+    workspace::{load_workspace_for_root, split_destination},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
@@ -25,7 +25,7 @@ use std::{
 };
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanPackageItem {
     pub id: String,
@@ -60,7 +60,7 @@ pub struct ScanPackageItem {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanStats {
     pub packages: usize,
@@ -78,12 +78,17 @@ pub struct ScanStats {
     pub postprocess_ms: u128,
     pub dbpf_load_ms: u128,
     pub resource_decode_ms: u128,
+    /// Full-file hashing performed while populating the shared read-only
+    /// resource index. It prevents duplicate analysis from reopening DBPFs;
+    /// executor/preflight still hashes again before a write.
+    #[serde(default)]
+    pub full_hash_ms: u128,
     pub package_reads: usize,
     pub cache_hit: bool,
     pub reused_packages: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     pub root: String,
@@ -104,10 +109,82 @@ struct LatestScan {
     classification_context: String,
 }
 
+const PERSISTENT_SCAN_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistentScan {
+    version: u32,
+    root: String,
+    language: AppLanguage,
+    result: ScanResult,
+    file_signatures: HashMap<String, (u64, u128, String)>,
+    classification_context: String,
+}
+
 static LATEST_SCAN: OnceLock<Mutex<Option<LatestScan>>> = OnceLock::new();
 
 fn latest_scan_slot() -> &'static Mutex<Option<LatestScan>> {
     LATEST_SCAN.get_or_init(|| Mutex::new(None))
+}
+
+fn persistent_scan_path(root: &Path) -> PathBuf {
+    cache::analysis_snapshot_path(root)
+}
+
+fn save_persistent_scan(scan: &LatestScan) {
+    let path = persistent_scan_path(&scan.root);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let snapshot = PersistentScan {
+        version: PERSISTENT_SCAN_VERSION,
+        root: scan.root.to_string_lossy().to_string(),
+        language: scan.language,
+        result: scan.result.clone(),
+        file_signatures: scan.file_signatures.clone(),
+        classification_context: scan.classification_context.clone(),
+    };
+    let Ok(bytes) = serde_json::to_vec(&snapshot) else {
+        return;
+    };
+    let temp = path.with_extension("json.tmp");
+    if fs::write(&temp, bytes).is_err() {
+        return;
+    }
+    #[cfg(windows)]
+    if path.exists() && fs::remove_file(&path).is_err() {
+        let _ = fs::remove_file(&temp);
+        return;
+    }
+    if fs::rename(&temp, &path).is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+}
+
+fn load_persistent_scan(root: &Path, language: AppLanguage) -> Option<LatestScan> {
+    let path = persistent_scan_path(root);
+    let bytes = fs::read(path).ok()?;
+    let snapshot = serde_json::from_slice::<PersistentScan>(&bytes).ok()?;
+    let stable_root = stable_path(root);
+    if snapshot.version != PERSISTENT_SCAN_VERSION
+        || snapshot.language != language
+        || stable_path(Path::new(&snapshot.root)) != stable_root
+        || snapshot.classification_context
+            != classification_context_fingerprint(&stable_root, language)
+    {
+        return None;
+    }
+    let cached = LatestScan {
+        root: stable_root,
+        language,
+        result: snapshot.result,
+        file_signatures: snapshot.file_signatures,
+        classification_context: snapshot.classification_context,
+    };
+    latest_scan_is_current(&cached).then_some(cached)
 }
 
 const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261013-1";
@@ -145,24 +222,30 @@ fn stable_path(path: &Path) -> PathBuf {
 fn remember_latest_scan(result: &ScanResult, language: AppLanguage) {
     let root = stable_path(Path::new(&result.root));
     if let Ok(mut slot) = latest_scan_slot().lock() {
-        let file_signatures = result.items.iter().filter_map(|item| {
-            let path = PathBuf::from(&item.path);
-            let canonical = stable_path(&path);
-            let signature = cache::analysis_file_fingerprint(&canonical).ok()?;
-            Some((canonical.to_string_lossy().to_string(), signature))
-        }).collect::<HashMap<_, _>>();
-        *slot = Some(LatestScan {
+        let file_signatures = result
+            .items
+            .iter()
+            .filter_map(|item| {
+                let path = PathBuf::from(&item.path);
+                let canonical = stable_path(&path);
+                let signature = cache::analysis_file_fingerprint(&canonical).ok()?;
+                Some((canonical.to_string_lossy().to_string(), signature))
+            })
+            .collect::<HashMap<_, _>>();
+        let latest = LatestScan {
             root: root.clone(),
             language,
             result: result.clone(),
             file_signatures,
             classification_context: classification_context_fingerprint(&root, language),
-        });
+        };
+        save_persistent_scan(&latest);
+        *slot = Some(latest);
     }
 }
 
-fn latest_scan_is_current(cached: &LatestScan) -> bool {
-    let current = WalkDir::new(&cached.root)
+pub(crate) fn current_package_signatures(root: &Path) -> HashMap<String, (u64, u128, String)> {
+    WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
@@ -172,24 +255,37 @@ fn latest_scan_is_current(cached: &LatestScan) -> bool {
             let signature = cache::analysis_file_fingerprint(&path).ok()?;
             Some((path.to_string_lossy().to_string(), signature))
         })
-        .collect::<HashMap<_, _>>();
-    current == cached.file_signatures
+        .collect()
+}
+
+fn latest_scan_is_current(cached: &LatestScan) -> bool {
+    current_package_signatures(&cached.root) == cached.file_signatures
         && cached.classification_context
             == classification_context_fingerprint(&cached.root, cached.language)
 }
 
 pub fn cached_scan_for(root: &Path, language: AppLanguage) -> Option<ScanResult> {
     let canonical = stable_path(root);
-    let slot = latest_scan_slot().lock().ok()?;
-    let cached = slot.as_ref()?;
-    (cached.language == language && cached.root == canonical && latest_scan_is_current(cached))
-        .then(|| cached.result.clone())
+    let in_memory = latest_scan_slot().lock().ok().and_then(|slot| slot.clone());
+    if let Some(cached) = in_memory {
+        if cached.language == language
+            && cached.root == canonical
+            && latest_scan_is_current(&cached)
+        {
+            return Some(cached.result);
+        }
+    }
+    let persisted = load_persistent_scan(&canonical, language)?;
+    let result = persisted.result.clone();
+    if let Ok(mut slot) = latest_scan_slot().lock() {
+        *slot = Some(persisted);
+    }
+    Some(result)
 }
 
 fn previous_scan_for(root: &Path, language: AppLanguage) -> Option<LatestScan> {
     let stable_root = stable_path(root);
-    let slot = latest_scan_slot().lock().ok()?;
-    let cached = slot.as_ref()?;
+    let cached = latest_scan_slot().lock().ok()?.clone()?;
     if cached.language != language
         || cached.root != stable_root
         || cached.classification_context
@@ -197,14 +293,13 @@ fn previous_scan_for(root: &Path, language: AppLanguage) -> Option<LatestScan> {
     {
         return None;
     }
-    Some(cached.clone())
+    Some(cached)
 }
 
 pub fn cached_scan_paths(root: &Path) -> Option<Vec<PathBuf>> {
     let canonical = stable_path(root);
-    let slot = latest_scan_slot().lock().ok()?;
-    let cached = slot.as_ref()?;
-    if cached.root != canonical || !latest_scan_is_current(cached) {
+    let cached = latest_scan_slot().lock().ok()?.clone()?;
+    if cached.root != canonical || !latest_scan_is_current(&cached) {
         return None;
     }
 
@@ -224,7 +319,10 @@ pub fn cached_scan_paths(root: &Path) -> Option<Vec<PathBuf>> {
 pub fn invalidate_latest_scan_for(root: &Path) {
     let canonical = stable_path(root);
     if let Ok(mut slot) = latest_scan_slot().lock() {
-        if slot.as_ref().is_some_and(|current| current.root == canonical) {
+        if slot
+            .as_ref()
+            .is_some_and(|current| current.root == canonical)
+        {
             *slot = None;
         }
     }
@@ -235,7 +333,8 @@ fn package_extension(path: &Path) -> bool {
     // The physical .disabled suffix is never stripped, so the game will not
     // load the package after a move. Duplicate and conflict scans have their
     // own active-package discovery rules and remain unchanged.
-    let name = path.file_name()
+    let name = path
+        .file_name()
         .map(|v| v.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     name.ends_with(".package")
@@ -260,16 +359,30 @@ fn contains_ascii_case_insensitive(data: &[u8], needle: &str) -> bool {
 fn store_name_hint(value: &str) -> bool {
     let normalized = value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect::<String>();
     normalized.split_whitespace().any(|token| token == "store")
 }
 
-fn detect_store_source(package: &Package, name: &str, relative: &str, has_s3sa: bool) -> (String, Option<String>) {
+fn detect_store_source(
+    package: &Package,
+    name: &str,
+    relative: &str,
+    has_s3sa: bool,
+) -> (String, Option<String>) {
     let mut strong_internal_evidence = false;
 
     for entry in &package.entries {
-        if !matches!(entry.type_id, TYPE_S3SA | TYPE_STBL_LOCAL | TYPE_MANIFEST_LOCAL | TYPE_NMAP_LOCAL) {
+        if !matches!(
+            entry.type_id,
+            TYPE_S3SA | TYPE_STBL_LOCAL | TYPE_MANIFEST_LOCAL | TYPE_NMAP_LOCAL
+        ) {
             continue;
         }
         let Ok(data) = package.data(entry) else {
@@ -295,7 +408,6 @@ fn detect_store_source(package: &Package, name: &str, relative: &str, has_s3sa: 
 
     ("custom_content".to_string(), None)
 }
-
 
 const TYPE_NMAP_LOCAL: u32 = 0x0166_038C;
 const TYPE_SIME_LOCAL: u32 = 0x025E_D6F4;
@@ -361,7 +473,11 @@ fn internal_signature(
         };
         for needle in needles {
             if contains_ascii_case_insensitive(&data, needle) {
-                return Some(format!("{} contains '{}'", resource_type_label(entry.type_id), needle));
+                return Some(format!(
+                    "{} contains '{}'",
+                    resource_type_label(entry.type_id),
+                    needle
+                ));
             }
         }
     }
@@ -399,16 +515,26 @@ fn creator_candidate_from_filename(name: &str) -> Option<String> {
         .split(|ch: char| ch == '_' || ch == '-' || ch == '.')
         .next()?
         .trim();
-    if !(2..=40).contains(&candidate.len())
-        || !candidate.chars().any(|ch| ch.is_ascii_alphabetic())
+    if !(2..=40).contains(&candidate.len()) || !candidate.chars().any(|ch| ch.is_ascii_alphabetic())
     {
         return None;
     }
     let lower = candidate.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "al" | "mod" | "mods" | "script" | "scripts" | "package" | "update" | "updated"
-            | "new" | "fix" | "override" | "ts3" | "sims3" | "the"
+        "al" | "mod"
+            | "mods"
+            | "script"
+            | "scripts"
+            | "package"
+            | "update"
+            | "updated"
+            | "new"
+            | "fix"
+            | "override"
+            | "ts3"
+            | "sims3"
+            | "the"
     ) {
         return None;
     }
@@ -422,7 +548,11 @@ fn pretty_creator_label(candidate: &str) -> String {
         _ => {
             let mut chars = candidate.chars();
             match chars.next() {
-                Some(first) => format!("{}{}", first.to_uppercase().collect::<String>(), chars.as_str()),
+                Some(first) => format!(
+                    "{}{}",
+                    first.to_uppercase().collect::<String>(),
+                    chars.as_str()
+                ),
                 None => candidate.to_string(),
             }
         }
@@ -453,7 +583,9 @@ fn verified_standalone_script_identity(package: &Package, name: &str) -> bool {
     if creator_candidate_from_filename(name).is_some() {
         return false;
     }
-    let Some(stem) = Path::new(name).file_stem() else { return false };
+    let Some(stem) = Path::new(name).file_stem() else {
+        return false;
+    };
     let stem = strip_leading_status_tags(&stem.to_string_lossy());
     let stem = stem.trim();
     if !(8..=80).contains(&stem.len()) || !stem.chars().any(|ch| ch.is_ascii_alphabetic()) {
@@ -461,19 +593,51 @@ fn verified_standalone_script_identity(package: &Package, name: &str) -> bool {
     }
     internal_signature(
         package,
-        &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_XML_LOCAL, TYPE_ITUN_LOCAL, TYPE_STBL_LOCAL, TYPE_MANIFEST_LOCAL],
+        &[
+            TYPE_S3SA,
+            TYPE_NMAP_LOCAL,
+            TYPE_XML_LOCAL,
+            TYPE_ITUN_LOCAL,
+            TYPE_STBL_LOCAL,
+            TYPE_MANIFEST_LOCAL,
+        ],
         &[stem],
-    ).is_some()
+    )
+    .is_some()
 }
 
 fn generic_container_folder(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "#+18" | "18+" | "18" | "mods" | "packages" | "downloads" | "download" | "gameplay" | "jogabilidade"
-            | "jugabilidad" | "scripts" | "objects" | "objetos" | "buy" | "compra"
-            | "build" | "construção" | "construccion" | "cakes" | "cookies" | "breads"
-            | "pies" | "pastries" | "cupcakes" | "ingredients" | "savory"
-            | "gourmet desserts" | "other baked goods" | "wedding cakes"
+        "#+18"
+            | "18+"
+            | "18"
+            | "mods"
+            | "packages"
+            | "downloads"
+            | "download"
+            | "gameplay"
+            | "jogabilidade"
+            | "jugabilidad"
+            | "scripts"
+            | "objects"
+            | "objetos"
+            | "buy"
+            | "compra"
+            | "build"
+            | "construção"
+            | "construccion"
+            | "cakes"
+            | "cookies"
+            | "breads"
+            | "pies"
+            | "pastries"
+            | "cupcakes"
+            | "ingredients"
+            | "savory"
+            | "gourmet desserts"
+            | "other baked goods"
+            | "wedding cakes"
             | "birthday cakes"
     )
 }
@@ -506,9 +670,10 @@ fn mod_name_from_filename(name: &str) -> Option<String> {
         .map(|(_, rest)| rest.trim())
         .unwrap_or(stem.trim());
     let lower = without_creator.to_ascii_lowercase();
-    let mod_end = lower.find(" mod").map(|index| index + 4).or_else(|| {
-        lower.starts_with("mod ").then_some(3)
-    })?;
+    let mod_end = lower
+        .find(" mod")
+        .map(|index| index + 4)
+        .or_else(|| lower.starts_with("mod ").then_some(3))?;
     let value = without_creator[..mod_end].trim();
     if value.len() < 3 || generic_container_folder(value) {
         None
@@ -528,25 +693,67 @@ fn script_category(name: &str, language: AppLanguage) -> &'static str {
     let filename = name.to_ascii_lowercase();
     let named = |words: &[&str]| words.iter().any(|word| filename.contains(word));
 
-    if named(&["relationship", "romance", "romantic", "woohoo", "dating", "conversation", "bettergreet"]) {
+    if named(&[
+        "relationship",
+        "romance",
+        "romantic",
+        "woohoo",
+        "dating",
+        "conversation",
+        "bettergreet",
+    ]) {
         return localized_special_folder(language, "relationships");
     }
     if named(&["storyprogression", "story progression"]) {
         return localized_special_folder(language, "story_progression");
     }
-    if named(&["baking", "recipe", "food", "cooking", "cake", "pastry", "restaurant", "bistro", "kitchen", "pasteurize", "milk mod"]) {
+    if named(&[
+        "baking",
+        "recipe",
+        "food",
+        "cooking",
+        "cake",
+        "pastry",
+        "restaurant",
+        "bistro",
+        "kitchen",
+        "pasteurize",
+        "milk mod",
+    ]) {
         return localized_special_folder(language, "cooking_food");
     }
     if named(&["career", "profession"]) {
         return localized_special_folder(language, "careers");
     }
-    if named(&["housekeeper", "gardener_service", "maid_service", "cleaningservice", "service_npc"]) {
+    if named(&[
+        "housekeeper",
+        "gardener_service",
+        "maid_service",
+        "cleaningservice",
+        "service_npc",
+    ]) {
         return localized_special_folder(language, "services");
     }
-    if named(&["userinterface", "user interface", "ui mod", "hud", "dialog", "loading screen"]) {
+    if named(&[
+        "userinterface",
+        "user interface",
+        "ui mod",
+        "hud",
+        "dialog",
+        "loading screen",
+    ]) {
         return localized_special_folder(language, "ui");
     }
-    if named(&["utility", "utilities", "framework", "loader", "coremod", "core_mod", "smoothpatch", "monopatcher"]) {
+    if named(&[
+        "utility",
+        "utilities",
+        "framework",
+        "loader",
+        "coremod",
+        "core_mod",
+        "smoothpatch",
+        "monopatcher",
+    ]) {
         return localized_special_folder(language, "utilities");
     }
     localized_special_folder(language, "scripts")
@@ -629,7 +836,11 @@ fn merged_sim_export_evidence(package: &Package) -> Option<String> {
         .map(|entry| {
             format!(
                 "{} group 0x{:08X} instance 0x{:016X}",
-                if entry.type_id == TYPE_SIME_LOCAL { "SIME" } else { "SIMO" },
+                if entry.type_id == TYPE_SIME_LOCAL {
+                    "SIME"
+                } else {
+                    "SIMO"
+                },
                 entry.group,
                 entry.instance
             )
@@ -710,18 +921,18 @@ fn package_internal_identifiers(package: &Package) -> Vec<String> {
     for entry in &package.entries {
         if !matches!(
             entry.type_id,
-            TYPE_LAYO_LOCAL
-                | TYPE_NMAP_LOCAL
-                | TYPE_STBL_LOCAL
-                | TYPE_MANIFEST_LOCAL
-                | TYPE_S3SA
+            TYPE_LAYO_LOCAL | TYPE_NMAP_LOCAL | TYPE_STBL_LOCAL | TYPE_MANIFEST_LOCAL | TYPE_S3SA
         ) {
             continue;
         }
-        let Ok(data) = package.data(entry) else { continue };
+        let Ok(data) = package.data(entry) else {
+            continue;
+        };
         for marker in markers {
             if contains_ascii_case_insensitive(&data, marker)
-                && !identifiers.iter().any(|value| value.eq_ignore_ascii_case(marker))
+                && !identifiers
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(marker))
             {
                 identifiers.push(marker.to_string());
             }
@@ -757,10 +968,8 @@ fn path_independent_directed_classification(
     };
     let gameplay = localized_special_folder(language, "gameplay");
 
-    let cas_layout_marker = internal_name_contains(
-        internal_names,
-        &["casdetails", "ui/caption/cas/physical:"],
-    );
+    let cas_layout_marker =
+        internal_name_contains(internal_names, &["casdetails", "ui/caption/cas/physical:"]);
     if types.contains(&TYPE_LAYO_LOCAL)
         && !types.contains(&TYPE_CASP)
         && !types.contains(&TYPE_OBJD)
@@ -785,7 +994,12 @@ fn path_independent_directed_classification(
     );
     let lazy_asset_marker = internal_name_contains(
         internal_names,
-        &["defaultface", "defaultwhisker", "defaultbrow", "defaulttextures"],
+        &[
+            "defaultface",
+            "defaultwhisker",
+            "defaultbrow",
+            "defaulttextures",
+        ],
     );
     let body_marker_count = ["acbody", "adbody", "albody", "ccbody", "cdbody"]
         .iter()
@@ -870,8 +1084,7 @@ fn path_independent_directed_classification(
             .unwrap_or_default();
         let ep = if marker_lower.contains("king_qings_window") {
             Some("EP01")
-        } else if marker_lower.contains("pets_need_less_space")
-        {
+        } else if marker_lower.contains("pets_need_less_space") {
             Some("EP05")
         } else {
             None
@@ -955,19 +1168,14 @@ fn phase3_directed_family_classification(
     catalog_classifications: &[CatalogClassification],
 ) -> Option<PackageFamilyClassification> {
     let internal_names = package_internal_identifiers(package);
-    if let Some(classification) = path_independent_directed_classification(
-        types,
-        &internal_names,
-        language,
-    ) {
+    if let Some(classification) =
+        path_independent_directed_classification(types, &internal_names, language)
+    {
         return Some(classification);
     }
-    if let Some(classification) = broad_window_replacement_set(
-        package,
-        types,
-        &internal_names,
-        language,
-    ) {
+    if let Some(classification) =
+        broad_window_replacement_set(package, types, &internal_names, language)
+    {
         return Some(classification);
     }
     if let Some(classification) = rabbit_hole_family_classification(
@@ -1000,20 +1208,14 @@ fn phase3_directed_family_classification(
     ) {
         return Some(classification);
     }
-    if let Some(classification) = canonical_script_source_classification(
-        types,
-        relative,
-        language,
-        &internal_names,
-    ) {
+    if let Some(classification) =
+        canonical_script_source_classification(types, relative, language, &internal_names)
+    {
         return Some(classification);
     }
-    if let Some(classification) = legacy_source_evidence_classification(
-        types,
-        name,
-        relative,
-        language,
-    ) {
+    if let Some(classification) =
+        legacy_source_evidence_classification(types, name, relative, language)
+    {
         return Some(classification);
     }
     let lower = relative.to_ascii_lowercase();
@@ -1032,8 +1234,15 @@ fn phase3_directed_family_classification(
         .map(|number| format!("ep{number:02}"))
         .find(|token| lower.contains(token));
 
-    if lower.contains("eps fixes") && (has_s3sa || has_geom) && (lower.contains("fix") || filename.contains("fix")) {
-        let mut folder_parts = vec![corrections.to_string(), gameplay.to_string(), "EPs Fixes".to_string()];
+    if lower.contains("eps fixes")
+        && (has_s3sa || has_geom)
+        && (lower.contains("fix") || filename.contains("fix"))
+    {
+        let mut folder_parts = vec![
+            corrections.to_string(),
+            gameplay.to_string(),
+            "EPs Fixes".to_string(),
+        ];
         if let Some(ep) = ep {
             folder_parts.push(ep.to_ascii_uppercase());
         }
@@ -1050,9 +1259,13 @@ fn phase3_directed_family_classification(
         && !lower.contains("eps fixes")
         && (has_s3sa || types.contains(&0xD382_BF57))
         && !(types.contains(&TYPE_OBJD)
-            && catalog_classifications.iter().any(catalog_contains_rabbit_holes))
+            && catalog_classifications
+                .iter()
+                .any(catalog_contains_rabbit_holes))
         && !(types.contains(&TYPE_OBJD)
-            && catalog_classifications.iter().any(|classification| !classification.ambiguous))
+            && catalog_classifications
+                .iter()
+                .any(|classification| !classification.ambiguous))
     {
         return Some(PackageFamilyClassification {
             main_category: corrections.to_string(),
@@ -1126,8 +1339,20 @@ fn phase3_directed_family_classification(
         });
     }
 
-    if lower.contains("defaultface") || lower.contains("defaultbrows") || lower.contains("eyelash") || lower.contains("agsclera") {
-        if has_s3sa && !has_catalog && internal_signature(package, &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_MANIFEST_LOCAL], &["face", "eye", "brow", "lash", "clera"]).is_some() {
+    if lower.contains("defaultface")
+        || lower.contains("defaultbrows")
+        || lower.contains("eyelash")
+        || lower.contains("agsclera")
+    {
+        if has_s3sa
+            && !has_catalog
+            && internal_signature(
+                package,
+                &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_MANIFEST_LOCAL],
+                &["face", "eye", "brow", "lash", "clera"],
+            )
+            .is_some()
+        {
             let (sub, label) = if lower.contains("brow") {
                 ("Genética".to_string(), "Sobrancelhas".to_string())
             } else if lower.contains("lash") {
@@ -1137,7 +1362,14 @@ fn phase3_directed_family_classification(
             } else {
                 (replacements.to_string(), "Corpo\\Olhos".to_string())
             };
-            let folder_parts = label.split('\\').map(str::to_string).fold(vec![sub], |mut result, part| { result.push(part); result });
+            let folder_parts =
+                label
+                    .split('\\')
+                    .map(str::to_string)
+                    .fold(vec![sub], |mut result, part| {
+                        result.push(part);
+                        result
+                    });
             return Some(PackageFamilyClassification {
                 main_category: folder_parts[0].clone(),
                 sub_category: folder_parts.get(1).cloned(),
@@ -1148,7 +1380,16 @@ fn phase3_directed_family_classification(
         }
     }
 
-    if lower.contains("skin") && has_s3sa && !has_catalog && internal_signature(package, &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_MANIFEST_LOCAL], &["skin", "body"]).is_some() {
+    if lower.contains("skin")
+        && has_s3sa
+        && !has_catalog
+        && internal_signature(
+            package,
+            &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_MANIFEST_LOCAL],
+            &["skin", "body"],
+        )
+        .is_some()
+    {
         return Some(PackageFamilyClassification {
             main_category: replacements.to_string(),
             sub_category: Some("Corpo".to_string()),
@@ -1200,8 +1441,7 @@ fn rabbit_hole_family_classification(
             || types.contains(&0x0580_A2B6)
             || types.contains(&0x7368_84F1)
             || types.contains(&TYPE_XML_LOCAL));
-    let has_related_objd_set = types.contains(&TYPE_OBJD)
-        && catalog_classifications.len() >= 2;
+    let has_related_objd_set = types.contains(&TYPE_OBJD) && catalog_classifications.len() >= 2;
     let invisible_collection = has_family_identifier
         && (types.contains(&0x0C07_456D) || types.contains(&0x2F7D_0004))
         && !types.contains(&TYPE_OBJD);
@@ -1251,13 +1491,23 @@ fn non_catalog_replacement_classification(
         && types.contains(&0x03B4_C61D)
         && types.contains(&0x0166_1233)
     {
-        (Some("Cornijas"), "Awesims", "mesh/material/geometry replacement set")
-    } else if lower.contains("nobuildsparkles")
-        && has_image_payload
-    {
-        (Some("Efeitos"), "NoBuildSparkles", "IMG/effect replacement marker")
+        (
+            Some("Cornijas"),
+            "Awesims",
+            "mesh/material/geometry replacement set",
+        )
+    } else if lower.contains("nobuildsparkles") && has_image_payload {
+        (
+            Some("Efeitos"),
+            "NoBuildSparkles",
+            "IMG/effect replacement marker",
+        )
     } else if lower.contains("snow but better") && has_image_payload {
-        (Some("Ambiente"), "Lyralei", "IMG/environment replacement marker")
+        (
+            Some("Ambiente"),
+            "Lyralei",
+            "IMG/environment replacement marker",
+        )
     } else if lower.contains("buhudain")
         && has_image_payload
         && internal_names.iter().any(|value| {
@@ -1265,19 +1515,35 @@ fn non_catalog_replacement_classification(
             value.contains("buhudain") && (value.contains("face") || value.contains("body"))
         })
     {
-        (Some("Corpo\\Definição de Pele"), "Buhudain", "IMG/NMAP skin subject identifiers")
+        (
+            Some("Corpo\\Definição de Pele"),
+            "Buhudain",
+            "IMG/NMAP skin subject identifiers",
+        )
     } else if lower.contains("nointromaxis")
         && types.contains(&0xB1CC_1AF6)
-        && internal_names.iter().any(|value| value.to_ascii_lowercase().contains("sims3logo"))
+        && internal_names
+            .iter()
+            .any(|value| value.to_ascii_lowercase().contains("sims3logo"))
     {
-        (None, "NoIntroMaxis", "localized Sims3Logo replacement identifiers")
+        (
+            None,
+            "NoIntroMaxis",
+            "localized Sims3Logo replacement identifiers",
+        )
     } else if lower.contains("simsfm")
         && types.contains(&TYPE_NMAP_LOCAL)
         && types.contains(&TYPE_XML_LOCAL)
         && types.contains(&TYPE_STBL_LOCAL)
-        && internal_names.iter().any(|value| value.eq_ignore_ascii_case("Stereo"))
+        && internal_names
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("Stereo"))
     {
-        (Some("Scripts\\Radio and TV"), "SimsFM", "NMAP/XML/STBL radio tuning identifiers")
+        (
+            Some("Scripts\\Radio and TV"),
+            "SimsFM",
+            "NMAP/XML/STBL radio tuning identifiers",
+        )
     } else {
         return None;
     };
@@ -1355,7 +1621,13 @@ fn composite_script_family_classification(
             && (types.contains(&TYPE_NMAP_LOCAL) || types.contains(&TYPE_XML_LOCAL)));
     let internal_family_evidence = internal_signature(
         package,
-        &[TYPE_S3SA, TYPE_NMAP_LOCAL, TYPE_XML_LOCAL, TYPE_STBL_LOCAL, TYPE_MANIFEST_LOCAL],
+        &[
+            TYPE_S3SA,
+            TYPE_NMAP_LOCAL,
+            TYPE_XML_LOCAL,
+            TYPE_STBL_LOCAL,
+            TYPE_MANIFEST_LOCAL,
+        ],
         &["knitting", "baking"],
     )
     .is_some();
@@ -1469,7 +1741,9 @@ fn canonical_script_source_classification(
         && types.contains(&TYPE_S3SA)
         && !types.contains(&TYPE_CASP)
         && !types.contains(&TYPE_OBJD)
-        && (normalized.contains("pose") || normalized.contains("selfie") || normalized.contains("chamomilewine"))
+        && (normalized.contains("pose")
+            || normalized.contains("selfie")
+            || normalized.contains("chamomilewine"))
     {
         let poses = localized_special_folder(language, "poses");
         return Some(PackageFamilyClassification {
@@ -1507,8 +1781,8 @@ fn canonical_script_source_classification(
             technical_reason: "Cmar's named S3SA is the functional genital family controller; it remains with the verified Cmar anatomical family rather than the generic Scripts root.".to_string(),
         });
     }
-    let tuning_source = normalized.starts_with("jogabilidade/tuning/")
-        && types.contains(&TYPE_XML_LOCAL);
+    let tuning_source =
+        normalized.starts_with("jogabilidade/tuning/") && types.contains(&TYPE_XML_LOCAL);
     let gameplay_source = normalized.contains("#8 scripts/gameplay/")
         && types.contains(&TYPE_OBJD)
         && !types.contains(&TYPE_CASP);
@@ -1599,7 +1873,10 @@ fn script_family_result(
         main_category: scripts.to_string(),
         sub_category: Some(gameplay.to_string()),
         folder_parts: vec![scripts.to_string(), gameplay.to_string()],
-        detected_from: vec!["CanonicalScriptSource".to_string(), family_source.to_string()],
+        detected_from: vec![
+            "CanonicalScriptSource".to_string(),
+            family_source.to_string(),
+        ],
         technical_reason: technical_reason.to_string(),
     }
 }
@@ -1614,7 +1891,9 @@ fn legacy_source_evidence_classification(
         .replace('\\', "/")
         .to_ascii_lowercase();
     let has_visual_build_set = types.contains(&0x03B4_C61D)
-        && (types.contains(&TYPE_IMG) || types.contains(&0x7368_84F1) || types.contains(&0x0166_1233));
+        && (types.contains(&TYPE_IMG)
+            || types.contains(&0x7368_84F1)
+            || types.contains(&0x0166_1233));
     let has_body_mesh = types.contains(&0x015A_1849) || types.contains(&0x015A_1849);
     let has_visual = types.contains(&TYPE_IMG)
         || has_body_mesh
@@ -1637,10 +1916,7 @@ fn legacy_source_evidence_classification(
             vec!["LegacyBodySource".to_string(), "BodyResourceSet".to_string()],
             "Legacy body source branch plus GEOM/BGEO/IMG evidence identifies a body replacement; no CASP/OBJD catalog category was invented.",
         )
-    } else if normalized.contains("#4 hair/")
-        && has_visual
-        && !types.contains(&TYPE_CASP)
-    {
+    } else if normalized.contains("#4 hair/") && has_visual && !types.contains(&TYPE_CASP) {
         (
             vec![replacements.to_string(), "CAS".to_string()],
             vec!["LegacyHairSource".to_string(), "VisualResourceSet".to_string()],
@@ -1652,9 +1928,7 @@ fn legacy_source_evidence_classification(
             vec!["LegacyCASSource".to_string(), "VisualResourceSet".to_string()],
             "Legacy CAS script source branch plus visual/UI resources identifies a CAS replacement.",
         )
-    } else if normalized.contains("#8 scripts/gameplay/")
-        && types.contains(&0xD304_4521)
-    {
+    } else if normalized.contains("#8 scripts/gameplay/") && types.contains(&0xD304_4521) {
         (
             vec![scripts.to_string(), gameplay.to_string()],
             vec!["LegacyGameplaySource".to_string(), "GameplayResourceSet".to_string()],
@@ -1684,7 +1958,9 @@ fn legacy_source_evidence_classification(
             vec!["AnatomicalResourceSet".to_string(), "LegacyBodySource".to_string()],
             "Anatomical bone resource type and the explicit genital family source identify Genetics content.",
         )
-    } else if (normalized.contains("roof") || normalized.contains("ceilingbeam") || normalized.contains("fence"))
+    } else if (normalized.contains("roof")
+        || normalized.contains("ceilingbeam")
+        || normalized.contains("fence"))
         && has_visual_build_set
     {
         (
@@ -1763,7 +2039,9 @@ fn nraas_internal_evidence(package: &Package, name: &str, relative: &str) -> Opt
         if entry.type_id != TYPE_NMAP_LOCAL {
             continue;
         }
-        let Ok(data) = package.data(entry) else { continue };
+        let Ok(data) = package.data(entry) else {
+            continue;
+        };
         if let Some(identifier) = nmap_names(&data)
             .into_iter()
             .find(|value| authoritative_nraas_identifier(value))
@@ -1775,7 +2053,10 @@ fn nraas_internal_evidence(package: &Package, name: &str, relative: &str) -> Opt
     // Assembly/manifest evidence is accepted only when the namespace has a
     // boundary and the package is actually scripted. Raw 'nraas' mentions in
     // XML, ITUN, STBL or UI assets are never sufficient.
-    if package.entries.iter().any(|entry| entry.type_id == TYPE_S3SA)
+    if package
+        .entries
+        .iter()
+        .any(|entry| entry.type_id == TYPE_S3SA)
         && internal_signature(
             package,
             &[TYPE_S3SA, TYPE_MANIFEST_LOCAL],
@@ -1802,8 +2083,14 @@ fn nraas_internal_evidence(package: &Package, name: &str, relative: &str) -> Opt
 // guess. The primary package and at least one verified module must coexist in
 // the same scan before a family subfolder is created.
 fn nraas_family_role(name: &str) -> Option<(&'static str, bool)> {
-    let stem = Path::new(name).file_stem()?.to_string_lossy().to_ascii_lowercase();
-    let compact = stem.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect::<String>();
+    let stem = Path::new(name)
+        .file_stem()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let compact = stem
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>();
     for (token, family) in [
         ("nraasmastercontroller", "MasterController"),
         ("nraasstoryprogression", "StoryProgression"),
@@ -1817,7 +2104,10 @@ fn nraas_family_role(name: &str) -> Option<(&'static str, bool)> {
         }
         if let Some(suffix) = compact.strip_prefix(token) {
             let module = !suffix.is_empty()
-                && !matches!(suffix, "translation" | "english" | "portuguese" | "spanish" | "ptbr" | "en" | "es");
+                && !matches!(
+                    suffix,
+                    "translation" | "english" | "portuguese" | "spanish" | "ptbr" | "en" | "es"
+                );
             if module {
                 return Some((family, true));
             }
@@ -1850,7 +2140,9 @@ fn existing_nraas_subfolder(relative: &str) -> Option<String> {
         .filter(|part| !part.trim().is_empty())
         .map(|part| part.trim().to_string())
         .collect::<Vec<_>>();
-    let scripts_index = parts.iter().position(|part| part.eq_ignore_ascii_case("Scripts"))?;
+    let scripts_index = parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case("Scripts"))?;
     let nraas_index = parts
         .iter()
         .enumerate()
@@ -1859,20 +2151,38 @@ fn existing_nraas_subfolder(relative: &str) -> Option<String> {
     let candidate = parts.get(nraas_index + 1)?;
     (!candidate.to_ascii_lowercase().ends_with(".package")
         && !candidate.to_ascii_lowercase().ends_with(".disabled"))
-        .then(|| candidate.clone())
+    .then(|| candidate.clone())
 }
 
 fn apply_nraas_family_subfolders(language: AppLanguage, items: &mut [ScanPackageItem]) {
     let mut families = HashMap::<String, (bool, bool)>::new();
-    for item in items.iter().filter(|item| item.detected_from.iter().any(|source| source == "NRaasInternal")) {
-        let Some((family, module)) = nraas_family_role(&item.name) else { continue };
+    for item in items.iter().filter(|item| {
+        item.detected_from
+            .iter()
+            .any(|source| source == "NRaasInternal")
+    }) {
+        let Some((family, module)) = nraas_family_role(&item.name) else {
+            continue;
+        };
         let state = families.entry(family.to_string()).or_default();
-        if module { state.1 = true; } else { state.0 = true; }
+        if module {
+            state.1 = true;
+        } else {
+            state.0 = true;
+        }
     }
 
-    for item in items.iter_mut().filter(|item| item.detected_from.iter().any(|source| source == "NRaasInternal")) {
-        let Some((family, module)) = nraas_family_role(&item.name) else { continue };
-        let Some((has_primary, has_module)) = families.get(family).copied() else { continue };
+    for item in items.iter_mut().filter(|item| {
+        item.detected_from
+            .iter()
+            .any(|source| source == "NRaasInternal")
+    }) {
+        let Some((family, module)) = nraas_family_role(&item.name) else {
+            continue;
+        };
+        let Some((has_primary, has_module)) = families.get(family).copied() else {
+            continue;
+        };
         if module && !has_primary {
             item.warnings.push(format!(
                 "NRaas family module '{}' was detected without its primary package; it remains directly under NRaas.",
@@ -1882,29 +2192,46 @@ fn apply_nraas_family_subfolders(language: AppLanguage, items: &mut [ScanPackage
         let mut destination = nraas_family_destination(language, family, has_primary, has_module);
         if !has_primary || !has_module {
             if let Some(existing) = existing_nraas_subfolder(&item.relative_path) {
-                if !destination.iter().any(|part| part.eq_ignore_ascii_case(&existing)) {
+                if !destination
+                    .iter()
+                    .any(|part| part.eq_ignore_ascii_case(&existing))
+                {
                     destination.push(existing);
                 }
             }
         }
         item.destination_parts = destination;
         item.destination_path = Some(item.destination_parts.join("\\"));
-        item.detected_from.push("NRaasConditionalFamily".to_string());
+        item.detected_from
+            .push("NRaasConditionalFamily".to_string());
         item.detected_from.sort();
         item.detected_from.dedup();
         item.classification_reason = Some(format!(
             "{} | NRaas family '{}' uses a subfolder only when primary={} and module={}",
-            item.classification_reason.clone().unwrap_or_default(), family, has_primary, has_module
+            item.classification_reason.clone().unwrap_or_default(),
+            family,
+            has_primary,
+            has_module
         ));
     }
 }
 
 fn is_explicit_non_nraas_integration(name: &str) -> bool {
     let value = name.to_ascii_lowercase();
-    let compact = value.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect::<String>();
-    ["simpanel", "smoothpatch", "monopatcher", "neoh4x0r", "bankingmod", "bakingmod"]
-        .iter()
-        .any(|token| compact.contains(token))
+    let compact = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>();
+    [
+        "simpanel",
+        "smoothpatch",
+        "monopatcher",
+        "neoh4x0r",
+        "bankingmod",
+        "bakingmod",
+    ]
+    .iter()
+    .any(|token| compact.contains(token))
 }
 
 fn script_source_roles(relative: &str) -> (bool, bool, bool) {
@@ -1921,7 +2248,10 @@ fn script_source_roles(relative: &str) -> (bool, bool, bool) {
             catalog_root = matches!(normalized.as_str(), "buy" | "build" | "cas" | "objects");
             first = false;
         }
-        if matches!(normalized.as_str(), "gameplay" | "jogabilidade" | "jugabilidad") {
+        if matches!(
+            normalized.as_str(),
+            "gameplay" | "jogabilidade" | "jugabilidad"
+        ) {
             gameplay = true;
         }
         if matches!(normalized.as_str(), "scripts" | "#8 scripts") {
@@ -1944,9 +2274,17 @@ fn catalog_precedes_embedded_script(
     if catalog_resource_count == 0 {
         return false;
     }
-    let Some(classification) = special else { return false };
-    if !classification.detected_from.iter().any(|source| source == "S3SA")
-        || classification.detected_from.iter().any(|source| source == "NRaasInternal")
+    let Some(classification) = special else {
+        return false;
+    };
+    if !classification
+        .detected_from
+        .iter()
+        .any(|source| source == "S3SA")
+        || classification
+            .detected_from
+            .iter()
+            .any(|source| source == "NRaasInternal")
     {
         return false;
     }
@@ -1976,9 +2314,11 @@ fn catalog_precedes_embedded_script(
     if scripts_folder {
         return false;
     }
-    if classification.detected_from.iter().any(|source| {
-        source == "InternalCreator" || source == "InternalScriptIdentity"
-    }) && (catalog_destinations != 1 || catalog_ambiguous)
+    if classification
+        .detected_from
+        .iter()
+        .any(|source| source == "InternalCreator" || source == "InternalScriptIdentity")
+        && (catalog_destinations != 1 || catalog_ambiguous)
     {
         return false;
     }
@@ -2054,7 +2394,12 @@ fn special_package_classification(
         && !type_ids.contains(&TYPE_S3SA)
         && internal_signature(
             package,
-            &[TYPE_XML_LOCAL, TYPE_NMAP_LOCAL, TYPE_STBL_LOCAL, TYPE_MANIFEST_LOCAL],
+            &[
+                TYPE_XML_LOCAL,
+                TYPE_NMAP_LOCAL,
+                TYPE_STBL_LOCAL,
+                TYPE_MANIFEST_LOCAL,
+            ],
             &["poselist", "pose list", "poseplayer", "pose player"],
         )
         .is_some();
@@ -2102,8 +2447,7 @@ fn nmap_names(data: &[u8]) -> Vec<String> {
             return Vec::new();
         }
         offset += 8; // name hash
-        let byte_count =
-            u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let byte_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let Some(next) = offset.checked_add(byte_count) else {
             return Vec::new();
@@ -2111,7 +2455,9 @@ fn nmap_names(data: &[u8]) -> Vec<String> {
         if next > data.len() {
             return Vec::new();
         }
-        let name = String::from_utf8_lossy(&data[offset..next]).trim().to_string();
+        let name = String::from_utf8_lossy(&data[offset..next])
+            .trim()
+            .to_string();
         if !name.is_empty() {
             names.push(name);
         }
@@ -2136,8 +2482,7 @@ fn stbl_entries(data: &[u8]) -> Vec<(u64, String)> {
         }
         let key = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
         offset += 8;
-        let char_count =
-            u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let char_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
         let Some(byte_count) = char_count.checked_mul(2) else {
@@ -2219,18 +2564,26 @@ fn geometry_clothing_from_nmap(
     types: &BTreeSet<u32>,
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
-    if !types.contains(&0x015A_1849) || !types.contains(&0x7368_84F1)
-        || types.contains(&TYPE_S3SA) || types.contains(&TYPE_CASP)
+    if !types.contains(&0x015A_1849)
+        || !types.contains(&0x7368_84F1)
+        || types.contains(&TYPE_S3SA)
+        || types.contains(&TYPE_CASP)
     {
         return None;
     }
-    let names = package.entries.iter()
+    let names = package
+        .entries
+        .iter()
         .filter(|entry| entry.type_id == TYPE_NMAP_LOCAL)
         .filter_map(|entry| package.data(entry).ok())
         .flat_map(|data| nmap_names(&data))
         .collect::<Vec<_>>();
     let subtype = clothing_mesh_subtype(&names)?;
-    let label = if subtype == "top" { language.top() } else { language.bottom() };
+    let label = if subtype == "top" {
+        language.top()
+    } else {
+        language.bottom()
+    };
     let parts = vec![
         language.clothing().to_string(),
         language.female().to_string(),
@@ -2260,12 +2613,16 @@ fn replacement_mesh_classification(
     filename: &str,
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
-    if !types.contains(&0x015A_1849) || !types.contains(&0x7368_84F1)
-        || types.contains(&TYPE_CASP) || types.contains(&TYPE_S3SA)
+    if !types.contains(&0x015A_1849)
+        || !types.contains(&0x7368_84F1)
+        || types.contains(&TYPE_CASP)
+        || types.contains(&TYPE_S3SA)
     {
         return None;
     }
-    let internal_names = package.entries.iter()
+    let internal_names = package
+        .entries
+        .iter()
         .filter(|entry| entry.type_id == TYPE_NMAP_LOCAL)
         .filter_map(|entry| package.data(entry).ok())
         .flat_map(|data| nmap_names(&data))
@@ -2273,11 +2630,13 @@ fn replacement_mesh_classification(
     let mut evidence = internal_names.join(" ").to_ascii_lowercase();
     evidence.push(' ');
     evidence.push_str(&filename.to_ascii_lowercase());
-    let (en, pt, es, key) = if ["eyelash", "eyelashes", "lashes", "cils"].iter()
+    let (en, pt, es, key) = if ["eyelash", "eyelashes", "lashes", "cils"]
+        .iter()
         .any(|part| evidence.contains(part))
     {
         ("Eyelashes", "Cílios", "Pestañas", "Eyelashes")
-    } else if ["foot", "feet", "barefeet", "barefoot"].iter()
+    } else if ["foot", "feet", "barefeet", "barefoot"]
+        .iter()
         .any(|part| evidence.contains(part))
     {
         ("Feet", "Pés", "Pies", "Feet")
@@ -2294,7 +2653,11 @@ fn replacement_mesh_classification(
         AppLanguage::Pt => pt,
         AppLanguage::Es => es,
     };
-    let parts = vec![category.to_string(), body.to_string(), subcategory.to_string()];
+    let parts = vec![
+        category.to_string(),
+        body.to_string(),
+        subcategory.to_string(),
+    ];
     Some(PackageFamilyClassification {
         main_category: category.to_string(),
         sub_category: Some(subcategory.to_string()),
@@ -2316,8 +2679,10 @@ fn verified_eye_mesh_replacement(
     filename: &str,
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
-    if !types.contains(&0x015A_1849) || !types.contains(&TYPE_NMAP_LOCAL)
-        || types.contains(&TYPE_CASP) || types.contains(&TYPE_S3SA)
+    if !types.contains(&0x015A_1849)
+        || !types.contains(&TYPE_NMAP_LOCAL)
+        || types.contains(&TYPE_CASP)
+        || types.contains(&TYPE_S3SA)
         || types.contains(&TYPE_OBJD)
     {
         return None;
@@ -2325,15 +2690,22 @@ fn verified_eye_mesh_replacement(
     let name = filename.to_ascii_lowercase();
     let explicit = name.contains("default replacement eye mesh")
         || name.contains("eyeball") && (name.contains("simskin") || name.contains("uvfix"));
-    if !explicit { return None; }
-    let names = package.entries.iter()
+    if !explicit {
+        return None;
+    }
+    let names = package
+        .entries
+        .iter()
         .filter(|entry| entry.type_id == TYPE_NMAP_LOCAL)
         .filter_map(|entry| package.data(entry).ok())
         .flat_map(|data| nmap_names(&data))
         .collect::<Vec<_>>();
     // The uploaded 2016 packages declare face geometry in the NMAP; verify
     // that internal evidence before treating a filename as a replacement.
-    if !names.iter().any(|v| v.to_ascii_lowercase().contains("face")) {
+    if !names
+        .iter()
+        .any(|v| v.to_ascii_lowercase().contains("face"))
+    {
         return None;
     }
     let (replacements, body, eyes) = match language {
@@ -2369,7 +2741,9 @@ fn slider_region_keys(internal_name: &str) -> Option<(&'static str, Option<&'sta
     }
     if token_starts_with_any(
         &name,
-        &["lip", "mouth", "philtrum", "cupid", "overlip", "frown", "smile"],
+        &[
+            "lip", "mouth", "philtrum", "cupid", "overlip", "frown", "smile",
+        ],
     ) {
         return Some(("face", Some("mouth_lips")));
     }
@@ -2401,7 +2775,9 @@ fn slider_region_keys(internal_name: &str) -> Option<(&'static str, Option<&'sta
 
     if token_starts_with_any(
         &name,
-        &["penis", "testicle", "scrotum", "foreskin", "genital", "phallus", "erection"],
+        &[
+            "penis", "testicle", "scrotum", "foreskin", "genital", "phallus", "erection",
+        ],
     ) {
         return Some(("body", Some("genitals")));
     }
@@ -2433,7 +2809,10 @@ fn slider_region_keys(internal_name: &str) -> Option<(&'static str, Option<&'sta
     if token_starts_with_any(&name, &["neck"]) {
         return Some(("body", Some("neck")));
     }
-    if token_starts_with_any(&name, &["torso", "body", "belly", "abdomen", "stomach", "back"]) {
+    if token_starts_with_any(
+        &name,
+        &["torso", "body", "belly", "abdomen", "stomach", "back"],
+    ) {
         return Some(("body", Some("torso")));
     }
     if token_starts_with_any(&name, &["simheight", "height", "posture", "simscaler"]) {
@@ -2601,7 +2980,8 @@ fn verified_slider_name_alias(filename: &str) -> Option<&'static str> {
     // Confirmed against the supplied slider corpus: OneEuroMutt's original
     // package filename omits the anatomical prefix. Only use this alias once
     // resources have independently established that the package is a slider.
-    filename.eq_ignore_ascii_case("OneEuroMuttTip Width.package")
+    filename
+        .eq_ignore_ascii_case("OneEuroMuttTip Width.package")
         .then_some("Nose Tip Width")
 }
 
@@ -2632,7 +3012,11 @@ fn slider_internal_evidence(
     // anatomical term in the package filename.
     if let Some((name, source)) = candidates.first() {
         if let Some(destination) = slider_destination_from_internal_name(filename, language) {
-            return Some((format!("{name} | filename: {filename}"), *source, Some(destination)));
+            return Some((
+                format!("{name} | filename: {filename}"),
+                *source,
+                Some(destination),
+            ));
         }
     }
     candidates
@@ -2678,7 +3062,6 @@ fn fbln_slider_classification(
         technical_reason: reason,
     }
 }
-
 
 fn is_slider_morph_type(type_id: u32) -> bool {
     matches!(
@@ -2770,10 +3153,12 @@ fn apply_slider_companion_classification(
 }
 
 fn top_level_relative_folder(relative: &str) -> Option<String> {
-    let mut components = Path::new(relative).components().filter_map(|component| match component {
-        std::path::Component::Normal(value) => Some(value.to_string_lossy().to_string()),
-        _ => None,
-    });
+    let mut components = Path::new(relative)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        });
     let first = components.next()?;
     // A direct file at the selected root has no containing mod folder.
     components.next().map(|_| first)
@@ -2787,13 +3172,37 @@ fn named_mod_companion_folder(relative: &str) -> Option<String> {
     let name = folder.trim().to_ascii_lowercase();
     let generic = matches!(
         name.as_str(),
-        "packages" | "overrides" | "test" | "probation" | "dccache"
-            | "mods" | "cc" | "custom content" | "downloads"
-            | "build" | "buy" | "cas" | "gameplay" | "scripts"
-            | "sliders" | "objects" | "poses" | "animations"
-            | "hair" | "clothing" | "accessories" | "skins" | "textures"
-            | "male" | "female" | "misc" | "miscellaneous"
-            | "nraas" | "tuning" | "store" | "ui"
+        "packages"
+            | "overrides"
+            | "test"
+            | "probation"
+            | "dccache"
+            | "mods"
+            | "cc"
+            | "custom content"
+            | "downloads"
+            | "build"
+            | "buy"
+            | "cas"
+            | "gameplay"
+            | "scripts"
+            | "sliders"
+            | "objects"
+            | "poses"
+            | "animations"
+            | "hair"
+            | "clothing"
+            | "accessories"
+            | "skins"
+            | "textures"
+            | "male"
+            | "female"
+            | "misc"
+            | "miscellaneous"
+            | "nraas"
+            | "tuning"
+            | "store"
+            | "ui"
     );
     if generic || name.starts_with('#') || name.starts_with('!') || name.starts_with('+') {
         return None;
@@ -2815,8 +3224,14 @@ fn may_reclassify_as_companion(item: &ScanPackageItem) -> bool {
         && !item.scripted
         && item.catalog_resource_count == 0
         && item.classification_confidence != "high"
-        && !item.detected_from.iter().any(|source| value_is_authoritative_mod_source(source))
-        && item.detected_from.iter().any(|source| source == "CompositeModFamily" || source == "InternalModLink")
+        && !item
+            .detected_from
+            .iter()
+            .any(|source| value_is_authoritative_mod_source(source))
+        && item
+            .detected_from
+            .iter()
+            .any(|source| source == "CompositeModFamily" || source == "InternalModLink")
 }
 
 fn value_is_authoritative_mod_source(source: &str) -> bool {
@@ -2836,9 +3251,7 @@ fn apply_named_mod_companions(items: &mut [ScanPackageItem]) {
         let Some(folder) = named_mod_companion_folder(&item.relative_path) else {
             continue;
         };
-        let state = destinations
-            .entry(folder.to_ascii_lowercase())
-            .or_default();
+        let state = destinations.entry(folder.to_ascii_lowercase()).or_default();
         state.0.insert(item.destination_parts.join("\\"));
         state.1 += 1;
         state.2 = folder;
@@ -2867,7 +3280,10 @@ fn apply_named_mod_companions(items: &mut [ScanPackageItem]) {
         let Some(destination) = unique.get(&folder.to_ascii_lowercase()) else {
             continue;
         };
-        let parts = destination.split('\\').map(str::to_string).collect::<Vec<_>>();
+        let parts = destination
+            .split('\\')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         if item.destination_parts == parts {
             continue;
         }
@@ -2894,7 +3310,10 @@ fn apply_named_mod_companions(items: &mut [ScanPackageItem]) {
         let Some(destination) = unique.get(&folder.to_ascii_lowercase()) else {
             continue;
         };
-        let parts = destination.split('\\').map(str::to_string).collect::<Vec<_>>();
+        let parts = destination
+            .split('\\')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         if parts.is_empty() || item.destination_parts == parts {
             continue;
         }
@@ -2922,7 +3341,11 @@ fn apply_manual_classifications(root: &Path, items: &mut [ScanPackageItem]) {
     }
 
     for item in items.iter_mut() {
-        if item.detected_from.iter().any(|source| source == "MergedSimExport") {
+        if item
+            .detected_from
+            .iter()
+            .any(|source| source == "MergedSimExport")
+        {
             continue;
         }
         // Authoritative automatic classifications win. Manual review exists to
@@ -2941,7 +3364,10 @@ fn apply_manual_classifications(root: &Path, items: &mut [ScanPackageItem]) {
             continue;
         };
         let mut parts = split_destination(&manual.destination);
-        if parts.first().is_some_and(|part| part.eq_ignore_ascii_case("CAS")) {
+        if parts
+            .first()
+            .is_some_and(|part| part.eq_ignore_ascii_case("CAS"))
+        {
             parts.remove(0);
         }
         if parts.is_empty() {
@@ -2980,13 +3406,30 @@ fn filename_indicates_headwear(filename: &str) -> bool {
     let lower = filename.to_ascii_lowercase();
     let normalized = lower.replace(&['_', '-', '.', ' ', '[', ']'][..], " ");
     let tokens = normalized.split_whitespace().collect::<Vec<_>>();
-    tokens.iter().any(|part| matches!(*part,
-        "hat" | "hats" | "helmet" | "cap" | "crown" | "veil"
-        | "beanie" | "headband" | "hairband" | "braidband"
-        | "cowboyhat" | "strawhat" | "ridinghat" | "hatsun"
-        | "papercrown" | "graduationcap" | "bikehelmet"
-        | "triangleveil" | "bachveil"
-    ))
+    tokens.iter().any(|part| {
+        matches!(
+            *part,
+            "hat"
+                | "hats"
+                | "helmet"
+                | "cap"
+                | "crown"
+                | "veil"
+                | "beanie"
+                | "headband"
+                | "hairband"
+                | "braidband"
+                | "cowboyhat"
+                | "strawhat"
+                | "ridinghat"
+                | "hatsun"
+                | "papercrown"
+                | "graduationcap"
+                | "bikehelmet"
+                | "triangleveil"
+                | "bachveil"
+        )
+    })
 }
 
 fn refine_headwear_accessory(
@@ -2999,8 +3442,10 @@ fn refine_headwear_accessory(
         AppLanguage::Pt => "Braçadeira",
         AppLanguage::Es => "Brazalete",
     };
-    if item.source != "CASP" || item.sub_category.as_deref() != Some(armband)
-        || !filename_indicates_headwear(filename) {
+    if item.source != "CASP"
+        || item.sub_category.as_deref() != Some(armband)
+        || !filename_indicates_headwear(filename)
+    {
         return;
     }
     let headwear = match language {
@@ -3009,10 +3454,14 @@ fn refine_headwear_accessory(
         AppLanguage::Es => "Accesorios para la Cabeza",
     };
     item.sub_category = Some(headwear.to_string());
-    if let Some(last) = item.folder_parts.last_mut() { *last = headwear.to_string(); }
+    if let Some(last) = item.folder_parts.last_mut() {
+        *last = headwear.to_string();
+    }
     for candidate in &mut item.candidate_folder_parts {
         if let Some(last) = candidate.last_mut() {
-            if last == armband { *last = headwear.to_string(); }
+            if last == armband {
+                *last = headwear.to_string();
+            }
         }
     }
     item.technical_reason.push_str(&format!(
@@ -3187,20 +3636,40 @@ fn classification_confidence(status: &str) -> &'static str {
 fn localized_warning(language: AppLanguage, key: &str) -> &'static str {
     match (language, key) {
         (AppLanguage::En, "parse") => "A CASP/OBJD resource could not be fully interpreted.",
-        (AppLanguage::Pt, "parse") => "Um resource CASP/OBJD não pôde ser interpretado completamente.",
+        (AppLanguage::Pt, "parse") => {
+            "Um resource CASP/OBJD não pôde ser interpretado completamente."
+        }
         (AppLanguage::Es, "parse") => "Un resource CASP/OBJD no se pudo interpretar completamente.",
-        (AppLanguage::En, "mixed") => "The package contains catalog resources with different destinations.",
-        (AppLanguage::Pt, "mixed") => "O package contém resources de catálogo com destinos diferentes.",
-        (AppLanguage::Es, "mixed") => "El package contiene resources de catálogo con destinos diferentes.",
+        (AppLanguage::En, "mixed") => {
+            "The package contains catalog resources with different destinations."
+        }
+        (AppLanguage::Pt, "mixed") => {
+            "O package contém resources de catálogo com destinos diferentes."
+        }
+        (AppLanguage::Es, "mixed") => {
+            "El package contiene resources de catálogo con destinos diferentes."
+        }
         (AppLanguage::En, "none") => "No supported CASP/OBJD classification was found.",
         (AppLanguage::Pt, "none") => "Nenhuma classificação CASP/OBJD compatível foi encontrada.",
         (AppLanguage::Es, "none") => "No se encontró una clasificación CASP/OBJD compatible.",
-        (AppLanguage::En, "ambiguous") => "The catalog flags indicate more than one possible destination.",
-        (AppLanguage::Pt, "ambiguous") => "Os flags de catálogo indicam mais de um destino possível.",
-        (AppLanguage::Es, "ambiguous") => "Los flags del catálogo indican más de un destino posible.",
-        (AppLanguage::En, "family_ambiguous") => "The package contains multiple authoritative resource families and needs review.",
-        (AppLanguage::Pt, "family_ambiguous") => "O package contém várias famílias de resources autoritativas e precisa de revisão.",
-        (AppLanguage::Es, "family_ambiguous") => "El package contiene varias familias de resources autoritativas y necesita revisión.",
+        (AppLanguage::En, "ambiguous") => {
+            "The catalog flags indicate more than one possible destination."
+        }
+        (AppLanguage::Pt, "ambiguous") => {
+            "Os flags de catálogo indicam mais de um destino possível."
+        }
+        (AppLanguage::Es, "ambiguous") => {
+            "Los flags del catálogo indican más de un destino posible."
+        }
+        (AppLanguage::En, "family_ambiguous") => {
+            "The package contains multiple authoritative resource families and needs review."
+        }
+        (AppLanguage::Pt, "family_ambiguous") => {
+            "O package contém várias famílias de resources autoritativas e precisa de revisão."
+        }
+        (AppLanguage::Es, "family_ambiguous") => {
+            "El package contiene varias familias de resources autoritativas y necesita revisión."
+        }
         _ => "Unknown",
     }
 }
@@ -3212,31 +3681,47 @@ fn shared_casp_family(
     classifications: &[CatalogClassification],
     types: &BTreeSet<u32>,
 ) -> Option<CatalogClassification> {
-    if classifications.len() < 2 || !types.contains(&TYPE_CASP)
+    if classifications.len() < 2
+        || !types.contains(&TYPE_CASP)
         || types.contains(&TYPE_OBJD)
-        || classifications.iter().any(|value| value.source != "CASP" || value.ambiguous)
+        || classifications
+            .iter()
+            .any(|value| value.source != "CASP" || value.ambiguous)
     {
         return None;
     }
     let first = classifications.first()?;
     if first.main_category.is_empty()
-        || matches!(first.main_category.as_str(), "Unknown" | "Desconhecido" | "Desconocido")
-        || classifications.iter().any(|value| value.main_category != first.main_category)
+        || matches!(
+            first.main_category.as_str(),
+            "Unknown" | "Desconhecido" | "Desconocido"
+        )
+        || classifications
+            .iter()
+            .any(|value| value.main_category != first.main_category)
     {
         return None;
     }
     let mut shared = first.folder_parts.clone();
     for candidate in classifications.iter().skip(1) {
-        shared.truncate(shared.iter().zip(&candidate.folder_parts)
-            .take_while(|(left, right)| left == right).count());
+        shared.truncate(
+            shared
+                .iter()
+                .zip(&candidate.folder_parts)
+                .take_while(|(left, right)| left == right)
+                .count(),
+        );
     }
     // "CAS" by itself is not a category; demand at least a shared CAS
     // family. Never combine unrelated makeup, clothes and accessories.
     if shared.len() < 2 {
         return None;
     }
-    let common_sub = first.sub_category.as_ref()
-        .filter(|sub| classifications.iter().all(|item| item.sub_category.as_deref() == Some(sub.as_str())));
+    let common_sub = first.sub_category.as_ref().filter(|sub| {
+        classifications
+            .iter()
+            .all(|item| item.sub_category.as_deref() == Some(sub.as_str()))
+    });
     if let Some(sub) = common_sub {
         if !shared.iter().any(|part| part == sub) {
             shared.push(sub.clone());
@@ -3245,10 +3730,18 @@ fn shared_casp_family(
     let mut result = first.clone();
     result.folder_parts = shared.clone();
     result.candidate_folder_parts = vec![shared.clone()];
-    result.gender = first.gender.as_ref()
-        .filter(|gender| classifications.iter().all(|v| v.gender.as_ref() == Some(gender)))
+    result.gender = first
+        .gender
+        .as_ref()
+        .filter(|gender| {
+            classifications
+                .iter()
+                .all(|v| v.gender.as_ref() == Some(gender))
+        })
         .cloned();
-    result.age = first.age.as_ref()
+    result.age = first
+        .age
+        .as_ref()
         .filter(|age| classifications.iter().all(|v| v.age.as_ref() == Some(age)))
         .cloned();
     result.ambiguous = false;
@@ -3271,20 +3764,47 @@ fn verified_eyelash_catalog_bundle(
 ) -> Option<CatalogClassification> {
     let lower = filename.to_ascii_lowercase();
     if !(lower.contains("eyelash") || lower.contains("lashes"))
-        || classifications.len() < 3 || !types.contains(&TYPE_CASP)
-        || types.contains(&TYPE_OBJD) || types.contains(&TYPE_S3SA)
-        || classifications.iter().any(|value| value.source != "CASP" || value.ambiguous)
+        || classifications.len() < 3
+        || !types.contains(&TYPE_CASP)
+        || types.contains(&TYPE_OBJD)
+        || types.contains(&TYPE_S3SA)
+        || classifications
+            .iter()
+            .any(|value| value.source != "CASP" || value.ambiguous)
     {
         return None;
     }
     let (makeup, eyeliner, accessories, earrings, glasses, eyelashes) = match language {
-        AppLanguage::En => ("Makeup", "Eyeliner", "Accessories", "Earrings", "Glasses", "Eyelashes"),
-        AppLanguage::Pt => ("Maquiagem", "Delineador", "Acessórios", "Brincos", "Óculos", "Cílios"),
-        AppLanguage::Es => ("Maquillaje", "Delineador", "Accesorios", "Pendientes", "Gafas", "Pestañas"),
+        AppLanguage::En => (
+            "Makeup",
+            "Eyeliner",
+            "Accessories",
+            "Earrings",
+            "Glasses",
+            "Eyelashes",
+        ),
+        AppLanguage::Pt => (
+            "Maquiagem",
+            "Delineador",
+            "Acessórios",
+            "Brincos",
+            "Óculos",
+            "Cílios",
+        ),
+        AppLanguage::Es => (
+            "Maquillaje",
+            "Delineador",
+            "Accesorios",
+            "Pendientes",
+            "Gafas",
+            "Pestañas",
+        ),
     };
-    let eyeliner_count = classifications.iter()
-        .filter(|value| value.main_category == makeup
-            && value.sub_category.as_deref() == Some(eyeliner))
+    let eyeliner_count = classifications
+        .iter()
+        .filter(|value| {
+            value.main_category == makeup && value.sub_category.as_deref() == Some(eyeliner)
+        })
         .count();
     if eyeliner_count * 2 <= classifications.len() {
         return None;
@@ -3318,6 +3838,7 @@ struct ScanTiming {
     package_reads: usize,
     dbpf_load_us: u128,
     resource_decode_us: u128,
+    full_hash_us: u128,
 }
 
 fn scan_one(
@@ -3327,6 +3848,26 @@ fn scan_one(
     slider_instances: &mut HashSet<u64>,
     fix_index: Option<&FixSignatureIndex>,
     timing: &mut ScanTiming,
+) -> ScanPackageItem {
+    scan_one_with_index(
+        root,
+        path,
+        language,
+        slider_instances,
+        fix_index,
+        timing,
+        None,
+    )
+}
+
+fn scan_one_with_index(
+    root: &Path,
+    path: &Path,
+    language: AppLanguage,
+    slider_instances: &mut HashSet<u64>,
+    fix_index: Option<&FixSignatureIndex>,
+    timing: &mut ScanTiming,
+    shared_index: Option<&mut cache::FingerprintCache>,
 ) -> ScanPackageItem {
     let relative = path
         .strip_prefix(root)
@@ -3391,11 +3932,34 @@ fn scan_one(
         }
     };
 
+    // The duplicate/conflict phases need full resource fingerprints. Build
+    // them now, while this DBPF is already decoded, instead of reopening it
+    // later in the same unified analysis. A failure here does not discard a
+    // valid classification; those later phases fall back to their validated
+    // readers and report the specific cache error.
+    let shared_index_error = if let Some(shared_index) = shared_index {
+        match cache::remember_loaded_package(path, &package, shared_index) {
+            Ok(metrics) => {
+                timing.full_hash_us += metrics.hash_us;
+                timing.resource_decode_us += metrics.resource_decode_us;
+                None
+            }
+            Err(error) => Some(format!(
+                "Could not add package to the shared analysis index: {error}"
+            )),
+        }
+    } else {
+        None
+    };
+
     let mut type_set = BTreeSet::new();
     let mut type_ids = BTreeSet::new();
     let mut detected_from = BTreeSet::new();
     let mut classifications = Vec::new();
     let mut warnings = Vec::new();
+    if let Some(error) = shared_index_error {
+        warnings.push(error);
+    }
     let mut catalog_resource_count = 0usize;
     let is_merged_sim_export = merged_sim_export_evidence(&package).is_some();
     let fbln_metadata = read_fbln_metadata(&package);
@@ -3438,7 +4002,7 @@ fn scan_one(
                         detected_from.insert("CASPSemanticEvidence".to_string());
                     }
                     classifications.push(classification);
-                },
+                }
                 None => warnings.push(format!(
                     "{} {}",
                     localized_warning(language, "parse"),
@@ -3451,7 +4015,9 @@ fn scan_one(
 
     let special_primary = preserved_correction_family_classification(&type_ids, &relative)
         .or_else(|| merged_sim_export_classification(&package, language))
-        .or_else(|| has_fbln.then(|| fbln_slider_classification(&package, &fbln_metadata, &name, language)))
+        .or_else(|| {
+            has_fbln.then(|| fbln_slider_classification(&package, &fbln_metadata, &name, language))
+        })
         .or_else(|| {
             fix_signatures::learned_fix_classification(
                 &package,
@@ -3483,12 +4049,12 @@ fn scan_one(
         })
         .or_else(|| {
             special_package_classification(
-            &package,
-            &type_ids,
-            &name,
-            &relative,
-            language,
-            catalog_resource_count,
+                &package,
+                &type_ids,
+                &name,
+                &relative,
+                language,
+                catalog_resource_count,
             )
         });
     if let Some(special) = &special_primary {
@@ -3522,69 +4088,61 @@ fn scan_one(
     }
 
     let catalog_first = catalog_precedes_embedded_script(
-        special_primary.as_ref(), catalog_resource_count, &relative, destinations.len(), has_ambiguous
+        special_primary.as_ref(),
+        catalog_resource_count,
+        &relative,
+        destinations.len(),
+        has_ambiguous,
     );
-    let active_special = if catalog_first { None } else { special_primary.as_ref() };
-    let (mut status, primary, mut destination_parts, mut destination_path) = if let Some(special) = active_special {
-        (
-            "classified".to_string(),
-            None,
-            special.folder_parts.clone(),
-            Some(special.folder_parts.join("\\")),
-        )
-    } else if has_ambiguous {
-        warnings.push(localized_warning(language, "ambiguous").to_string());
-        (
-            "needs_review".to_string(),
-            None,
-            Vec::new(),
-            None,
-        )
-    } else if destinations.len() == 1 {
-        let (path, classification) = destinations.into_iter().next().unwrap();
-        (
-            "classified".to_string(),
-            Some(classification.clone()),
-            classification.folder_parts.clone(),
-            Some(path),
-        )
-    } else if destinations.len() > 1 {
-        if let Some(shared) = shared_casp_family(&classifications, &type_ids)
-            .or_else(|| verified_eyelash_catalog_bundle(&classifications, &type_ids, &name, language))
-        {
-            let path = shared.folder_parts.join("\\");
+    let active_special = if catalog_first {
+        None
+    } else {
+        special_primary.as_ref()
+    };
+    let (mut status, primary, mut destination_parts, mut destination_path) =
+        if let Some(special) = active_special {
             (
                 "classified".to_string(),
-                Some(shared.clone()),
-                shared.folder_parts,
+                None,
+                special.folder_parts.clone(),
+                Some(special.folder_parts.join("\\")),
+            )
+        } else if has_ambiguous {
+            warnings.push(localized_warning(language, "ambiguous").to_string());
+            ("needs_review".to_string(), None, Vec::new(), None)
+        } else if destinations.len() == 1 {
+            let (path, classification) = destinations.into_iter().next().unwrap();
+            (
+                "classified".to_string(),
+                Some(classification.clone()),
+                classification.folder_parts.clone(),
                 Some(path),
             )
+        } else if destinations.len() > 1 {
+            if let Some(shared) = shared_casp_family(&classifications, &type_ids).or_else(|| {
+                verified_eyelash_catalog_bundle(&classifications, &type_ids, &name, language)
+            }) {
+                let path = shared.folder_parts.join("\\");
+                (
+                    "classified".to_string(),
+                    Some(shared.clone()),
+                    shared.folder_parts,
+                    Some(path),
+                )
+            } else {
+                warnings.push(localized_warning(language, "mixed").to_string());
+                ("mixed".to_string(), None, Vec::new(), None)
+            }
+        } else if catalog_resource_count > 0 {
+            ("needs_review".to_string(), None, Vec::new(), None)
         } else {
-            warnings.push(localized_warning(language, "mixed").to_string());
-            (
-                "mixed".to_string(),
-                None,
-                Vec::new(),
-                None,
-            )
-        }
-    } else if catalog_resource_count > 0 {
-        (
-            "needs_review".to_string(),
-            None,
-            Vec::new(),
-            None,
-        )
-    } else {
-        (
-            "unknown".to_string(),
-            None,
-            Vec::new(),
-            None,
-        )
-    };
+            ("unknown".to_string(), None, Vec::new(), None)
+        };
     if active_special.is_some_and(|classification| {
-        classification.detected_from.iter().any(|source| source == "MergedSimExport")
+        classification
+            .detected_from
+            .iter()
+            .any(|source| source == "MergedSimExport")
     }) {
         status = "sim_export_merged".to_string();
         destination_parts.clear();
@@ -3598,7 +4156,8 @@ fn scan_one(
                 .as_ref()
                 .map(|classification| classification.technical_reason.clone())
         });
-    let mut family_primary: Option<PackageFamilyClassification> = if catalog_first { None } else { special_primary };
+    let mut family_primary: Option<PackageFamilyClassification> =
+        if catalog_first { None } else { special_primary };
 
     if status == "unknown" && catalog_resource_count == 0 {
         let family_result = geometry_clothing_from_nmap(&package, &type_ids, language)
@@ -3729,7 +4288,9 @@ fn scan_one(
     // as a slider, never from clothing that happens to contain morphs.
     if status == "classified" && sub_category.as_deref() == Some("Sliders") {
         slider_instances.extend(
-            package.entries.iter()
+            package
+                .entries
+                .iter()
                 .filter(|entry| is_slider_morph_type(entry.type_id))
                 .map(|entry| entry.instance),
         );
@@ -3770,7 +4331,9 @@ fn scan_one(
         resource_count: package.entries.len(),
         catalog_resource_count,
         resource_types: type_set.into_iter().collect(),
-        instances: package.entries.iter()
+        instances: package
+            .entries
+            .iter()
             .map(|entry| format!("0x{:016X}", entry.instance))
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -3802,34 +4365,41 @@ fn scan_one(
 // Previews must preserve the loading branch of the source: Packages stays in
 // Packages, Overrides stays in Overrides. The semantic category is independent
 // of which branch actually contains the package.
-fn physical_destination_parts(
-    root: &Path,
-    source_relative: &str,
-    parts: &[String],
-) -> Vec<String> {
-    let root_name = root.file_name().map(|name| name.to_string_lossy().to_lowercase())
+fn physical_destination_parts(root: &Path, source_relative: &str, parts: &[String]) -> Vec<String> {
+    let root_name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    let source_top = source_relative.replace('\\', "/")
-        .split('/').next().unwrap_or("").to_lowercase();
+    let source_top = source_relative
+        .replace('\\', "/")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
     let mods_layout = is_mods_layout_root(root);
-    let override_source = root_name == "overrides"
-        || (mods_layout && source_top == "overrides");
+    let override_source = root_name == "overrides" || (mods_layout && source_top == "overrides");
 
     let mut result = parts.to_vec();
-    if result.first().is_some_and(|part| part.eq_ignore_ascii_case("Packages")
-        || part.eq_ignore_ascii_case("Overrides"))
+    if result.first().is_some_and(|part| {
+        part.eq_ignore_ascii_case("Packages") || part.eq_ignore_ascii_case("Overrides")
+    }) {
+        result.remove(0);
+    }
+    if result
+        .first()
+        .is_some_and(|part| part.eq_ignore_ascii_case("CAS"))
     {
         result.remove(0);
     }
-    if result.first().is_some_and(|part| part.eq_ignore_ascii_case("CAS")) {
-        result.remove(0);
-    }
     if mods_layout && !result.is_empty() {
-        result.insert(0, if override_source {
-            "Overrides".to_string()
-        } else {
-            "Packages".to_string()
-        });
+        result.insert(
+            0,
+            if override_source {
+                "Overrides".to_string()
+            } else {
+                "Packages".to_string()
+            },
+        );
     } else {
         // Mirror planner relative destination normalization. Existing
         // categories represented by the selected subfolder are not repeated.
@@ -3840,15 +4410,22 @@ fn physical_destination_parts(
             }) && ancestor.parent().is_some_and(is_mods_layout_root)
         });
         if let Some(branch) = branch {
-            let existing = root.strip_prefix(branch).ok().into_iter()
+            let existing = root
+                .strip_prefix(branch)
+                .ok()
+                .into_iter()
                 .flat_map(|relative| relative.components())
                 .filter_map(|part| match part {
                     std::path::Component::Normal(name) => Some(name.to_string_lossy().to_string()),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            if !existing.is_empty() && result.len() >= existing.len()
-                && result.iter().take(existing.len()).zip(existing.iter())
+            if !existing.is_empty()
+                && result.len() >= existing.len()
+                && result
+                    .iter()
+                    .take(existing.len())
+                    .zip(existing.iter())
                     .all(|(left, right)| left.eq_ignore_ascii_case(right))
             {
                 result.drain(..existing.len());
@@ -3859,9 +4436,14 @@ fn physical_destination_parts(
 }
 
 fn remove_generic_unknown_levels(parts: Vec<String>) -> Vec<String> {
-    parts.into_iter()
-        .filter(|part| !matches!(part.trim().to_ascii_lowercase().as_str(),
-            "unknown" | "desconhecido" | "desconocido"))
+    parts
+        .into_iter()
+        .filter(|part| {
+            !matches!(
+                part.trim().to_ascii_lowercase().as_str(),
+                "unknown" | "desconhecido" | "desconocido"
+            )
+        })
         .collect()
 }
 
@@ -3869,6 +4451,26 @@ pub fn scan_packages_core(
     folder: String,
     language: AppLanguage,
     operation_kind: Option<&str>,
+) -> Result<ScanResult, String> {
+    scan_packages_core_with_progress(folder, language, operation_kind, true)
+}
+
+/// Variant for a coordinated analysis.  Cancellation remains cooperative,
+/// but the coordinator owns the one monotonic progress bar instead of each
+/// inner phase resetting it independently.
+pub(crate) fn scan_packages_core_quiet_progress(
+    folder: String,
+    language: AppLanguage,
+    operation_kind: Option<&str>,
+) -> Result<ScanResult, String> {
+    scan_packages_core_with_progress(folder, language, operation_kind, false)
+}
+
+fn scan_packages_core_with_progress(
+    folder: String,
+    language: AppLanguage,
+    operation_kind: Option<&str>,
+    report_progress: bool,
 ) -> Result<ScanResult, String> {
     let total_started = Instant::now();
     if folder.trim().is_empty() {
@@ -3894,9 +4496,11 @@ pub fn scan_packages_core(
         cached.stats.resource_decode_ms = 0;
         cached.stats.classification_ms = 0;
         cached.stats.postprocess_ms = 0;
-        if let Some(kind) = operation_kind {
-            operation::set_total(kind, cached.items.len());
-            operation::update(kind, cached.items.len(), None, "cache_reused");
+        if report_progress {
+            if let Some(kind) = operation_kind {
+                operation::set_total(kind, cached.items.len());
+                operation::update(kind, cached.items.len(), None, "cache_reused");
+            }
         }
         return Ok(cached);
     }
@@ -3910,11 +4514,15 @@ pub fn scan_packages_core(
         .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
     package_paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    let mut shared_index = cache::load_cache(&root);
+    cache::retain_existing(&mut shared_index, &package_paths);
     let discovery_ms = discovery_started.elapsed().as_millis();
 
-    if let Some(kind) = operation_kind {
-        operation::set_total(kind, package_paths.len());
-        operation::update(kind, 0, None, "scanning");
+    if report_progress {
+        if let Some(kind) = operation_kind {
+            operation::set_total(kind, package_paths.len());
+            operation::update(kind, 0, None, "scanning");
+        }
     }
 
     let mut items = Vec::with_capacity(package_paths.len());
@@ -3948,12 +4556,18 @@ pub fn scan_packages_core(
                 // are revisited by the companion pass. Reopen those small
                 // dependency carriers when another package changed; ordinary
                 // unchanged classifications can be reused safely.
-                !item.resource_types.iter().any(|kind| kind == "FBLN" || kind == "STBL")
+                !item
+                    .resource_types
+                    .iter()
+                    .any(|kind| kind == "FBLN" || kind == "STBL")
             })
             .filter(|_| {
                 previous
                     .as_ref()
-                    .and_then(|scan| scan.file_signatures.get(&stable.to_string_lossy().to_string()))
+                    .and_then(|scan| {
+                        scan.file_signatures
+                            .get(&stable.to_string_lossy().to_string())
+                    })
                     .is_some_and(|signature| {
                         cache::analysis_file_fingerprint(path)
                             .ok()
@@ -3965,20 +4579,23 @@ pub fn scan_packages_core(
             items.push(item.clone());
             reused_packages += 1;
         } else {
-            items.push(scan_one(
+            items.push(scan_one_with_index(
                 &root,
                 path,
                 language,
                 &mut slider_instances,
                 fix_index.as_ref(),
                 &mut timing,
+                Some(&mut shared_index),
             ));
         }
 
-        if let Some(kind) = operation_kind {
-            let processed = index + 1;
-            if processed == package_paths.len() || processed % 8 == 0 {
-                operation::update(kind, processed, None, "scanning");
+        if report_progress {
+            if let Some(kind) = operation_kind {
+                let processed = index + 1;
+                if processed == package_paths.len() || processed % 8 == 0 {
+                    operation::update(kind, processed, None, "scanning");
+                }
             }
         }
     }
@@ -3994,35 +4611,48 @@ pub fn scan_packages_core(
         let sanitized = remove_generic_unknown_levels(item.destination_parts.clone());
         if sanitized != item.destination_parts {
             item.destination_parts = sanitized;
-            item.destination_path = (!item.destination_parts.is_empty())
-                .then(|| item.destination_parts.join("\\"));
+            item.destination_path =
+                (!item.destination_parts.is_empty()).then(|| item.destination_parts.join("\\"));
             item.detected_from.push("UnknownLevelRemoved".to_string());
             item.detected_from.sort();
             item.detected_from.dedup();
             item.warnings.push("Generic Unknown/Desconhecido level was removed; no unsupported gender or age was invented.".to_string());
             if item.destination_parts.is_empty() && item.status == "classified" {
                 item.status = "needs_review".to_string();
-                item.classification_confidence = classification_confidence(&item.status).to_string();
+                item.classification_confidence =
+                    classification_confidence(&item.status).to_string();
             }
         }
-        item.destination_parts = physical_destination_parts(&root, &item.relative_path, &item.destination_parts);
+        item.destination_parts =
+            physical_destination_parts(&root, &item.relative_path, &item.destination_parts);
         if item.destination_path.is_some() {
             item.destination_path = Some(item.destination_parts.join("\\"));
         }
-        item.candidate_destinations = item.candidate_destinations
+        item.candidate_destinations = item
+            .candidate_destinations
             .iter()
             .map(|value| {
-                physical_destination_parts(&root, &item.relative_path, &split_destination(value)).join("\\")
+                physical_destination_parts(&root, &item.relative_path, &split_destination(value))
+                    .join("\\")
             })
             .collect();
     }
     let postprocess_ms = postprocess_started.elapsed().as_millis();
+    // Persist only after the complete pass so a cancelled scan cannot leave a
+    // partial index that looks like a full unified result.
+    let _ = cache::save_cache(&root, &shared_index);
 
     let mut stats = ScanStats::default();
     stats.packages = items.len();
     for item in &items {
-        if item.name.to_ascii_lowercase().ends_with(".package.disabled")
-            || item.name.to_ascii_lowercase().ends_with(".package.duplicated")
+        if item
+            .name
+            .to_ascii_lowercase()
+            .ends_with(".package.disabled")
+            || item
+                .name
+                .to_ascii_lowercase()
+                .ends_with(".package.duplicated")
         {
             stats.disabled += 1;
         }
@@ -4052,17 +4682,20 @@ pub fn scan_packages_core(
     stats.postprocess_ms = postprocess_ms;
     stats.dbpf_load_ms = timing.dbpf_load_us / 1_000;
     stats.resource_decode_ms = timing.resource_decode_us / 1_000;
+    stats.full_hash_ms = timing.full_hash_us / 1_000;
     stats.package_reads = timing.package_reads;
     stats.cache_hit = false;
     stats.reused_packages = reused_packages;
 
-    Ok(ScanResult {
+    let result = ScanResult {
         root: root.to_string_lossy().to_string(),
         items,
         stats,
         cache_hit: false,
         reused_packages,
-    })
+    };
+    remember_latest_scan(&result, language);
+    Ok(result)
 }
 
 /// Scan only an explicit set of package paths. Planner previews use this
@@ -4085,6 +4718,8 @@ pub fn scan_selected_package_paths(
     paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
     let mut slider_instances = HashSet::<u64>::new();
     let fix_index = fix_signatures::load_persistent_index();
+    let mut shared_index = cache::load_cache(root);
+    cache::retain_existing(&mut shared_index, &paths);
     operation::set_total("planning", paths.len());
     let mut items = Vec::with_capacity(paths.len());
     let mut timing = ScanTiming::default();
@@ -4092,16 +4727,23 @@ pub fn scan_selected_package_paths(
         if operation::is_cancelled("planning") {
             return Err(CANCELLED_ERROR.to_string());
         }
-        operation::update("planning", processed, Some(path.to_string_lossy().into_owned()), "scanning");
-        items.push(scan_one(
+        operation::update(
+            "planning",
+            processed,
+            Some(path.to_string_lossy().into_owned()),
+            "scanning",
+        );
+        items.push(scan_one_with_index(
             root,
             path,
             language,
             &mut slider_instances,
             fix_index.as_ref(),
             &mut timing,
+            Some(&mut shared_index),
         ));
     }
+    let _ = cache::save_cache(root, &shared_index);
 
     apply_slider_companion_classification(&paths, &mut items, &slider_instances);
     apply_nraas_family_subfolders(language, &mut items);
@@ -4112,8 +4754,8 @@ pub fn scan_selected_package_paths(
         let sanitized = remove_generic_unknown_levels(item.destination_parts.clone());
         if sanitized != item.destination_parts {
             item.destination_parts = sanitized;
-            item.destination_path = (!item.destination_parts.is_empty())
-                .then(|| item.destination_parts.join("\\"));
+            item.destination_path =
+                (!item.destination_parts.is_empty()).then(|| item.destination_parts.join("\\"));
             item.detected_from.push("UnknownLevelRemoved".to_string());
             item.detected_from.sort();
             item.detected_from.dedup();
@@ -4123,17 +4765,22 @@ pub fn scan_selected_package_paths(
             );
             if item.destination_parts.is_empty() && item.status == "classified" {
                 item.status = "needs_review".to_string();
-                item.classification_confidence = classification_confidence(&item.status).to_string();
+                item.classification_confidence =
+                    classification_confidence(&item.status).to_string();
             }
         }
-        item.destination_parts = physical_destination_parts(root, &item.relative_path, &item.destination_parts);
+        item.destination_parts =
+            physical_destination_parts(root, &item.relative_path, &item.destination_parts);
         if item.destination_path.is_some() {
             item.destination_path = Some(item.destination_parts.join("\\"));
         }
         item.candidate_destinations = item
             .candidate_destinations
             .iter()
-            .map(|value| physical_destination_parts(root, &item.relative_path, &split_destination(value)).join("\\"))
+            .map(|value| {
+                physical_destination_parts(root, &item.relative_path, &split_destination(value))
+                    .join("\\")
+            })
             .collect();
     }
 
@@ -4142,8 +4789,14 @@ pub fn scan_selected_package_paths(
         ..ScanStats::default()
     };
     for item in &items {
-        if item.name.to_ascii_lowercase().ends_with(".package.disabled")
-            || item.name.to_ascii_lowercase().ends_with(".package.duplicated")
+        if item
+            .name
+            .to_ascii_lowercase()
+            .ends_with(".package.disabled")
+            || item
+                .name
+                .to_ascii_lowercase()
+                .ends_with(".package.duplicated")
         {
             stats.disabled += 1;
         }
@@ -4212,8 +4865,7 @@ mod tests {
         item.destination_parts
             .iter()
             .find(|part| {
-                !part.eq_ignore_ascii_case("Packages")
-                    && !part.eq_ignore_ascii_case("Overrides")
+                !part.eq_ignore_ascii_case("Packages") && !part.eq_ignore_ascii_case("Overrides")
             })
             .cloned()
     }
@@ -4252,8 +4904,8 @@ mod tests {
             .deserialize::<MatrixRow>()
             .map(|row| row.unwrap())
             .collect::<Vec<_>>();
-        let validation_scope = std::env::var("S3CC_VALIDATION_SCOPE")
-            .unwrap_or_else(|_| "conflicts".to_string());
+        let validation_scope =
+            std::env::var("S3CC_VALIDATION_SCOPE").unwrap_or_else(|_| "conflicts".to_string());
         let validation_rows = rows
             .iter()
             .filter(|row| {
@@ -4264,12 +4916,17 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let expected_validation_count = if validation_scope.eq_ignore_ascii_case("resolved_unique") {
+        let expected_validation_count = if validation_scope.eq_ignore_ascii_case("resolved_unique")
+        {
             457
         } else {
             49
         };
-        assert_eq!(validation_rows.len(), expected_validation_count, "diagnostic matrix validation scope changed");
+        assert_eq!(
+            validation_rows.len(),
+            expected_validation_count,
+            "diagnostic matrix validation scope changed"
+        );
         let mut actual_paths = HashMap::<String, PathBuf>::new();
         for entry in WalkDir::new(&backup_root)
             .follow_links(false)
@@ -4292,7 +4949,9 @@ mod tests {
             for row in &validation_rows {
                 let path = actual_paths
                     .get(&matrix_path_key(&row.backup_relative_path))
-                    .unwrap_or_else(|| panic!("diagnostic package is absent: {}", row.backup_relative_path));
+                    .unwrap_or_else(|| {
+                        panic!("diagnostic package is absent: {}", row.backup_relative_path)
+                    });
                 let mut item = scan_one(
                     Path::new(&backup_root),
                     path,
@@ -4306,8 +4965,8 @@ mod tests {
                     &item.relative_path,
                     &remove_generic_unknown_levels(item.destination_parts.clone()),
                 );
-                item.destination_path = (!item.destination_parts.is_empty())
-                    .then(|| item.destination_parts.join("\\"));
+                item.destination_path =
+                    (!item.destination_parts.is_empty()).then(|| item.destination_parts.join("\\"));
                 items.push(item);
             }
             items
@@ -4348,7 +5007,10 @@ mod tests {
                 )
             })
             .collect::<HashMap<_, _>>();
-        assert_eq!(first_stability, second_stability, "classification changed on re-analysis");
+        assert_eq!(
+            first_stability, second_stability,
+            "classification changed on re-analysis"
+        );
 
         let by_relative = scan
             .items
@@ -4366,7 +5028,11 @@ mod tests {
             .iter()
             .filter(|row| row.outcome == "resolvido_destino_unico")
             .collect::<Vec<_>>();
-        assert_eq!(resolved_rows.len(), 457, "diagnostic matrix no longer contains 457 resolved destinations");
+        assert_eq!(
+            resolved_rows.len(),
+            457,
+            "diagnostic matrix no longer contains 457 resolved destinations"
+        );
         let mut resolved_mismatches = Vec::new();
         let mut conflict_rows = Vec::new();
         for row in &validation_rows {
@@ -4450,12 +5116,17 @@ mod tests {
             fs::write(output_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         }
         if let Ok(output_path) = std::env::var("S3CC_CONFLICT_OUTPUT") {
-            fs::write(output_path, serde_json::to_vec_pretty(&conflict_rows).unwrap()).unwrap();
+            fs::write(
+                output_path,
+                serde_json::to_vec_pretty(&conflict_rows).unwrap(),
+            )
+            .unwrap();
         }
         assert!(
             resolved_mismatches
                 .iter()
-                .all(|row| row.get("actual").and_then(|value| value.as_str()) != Some("missing-from-real-scan")),
+                .all(|row| row.get("actual").and_then(|value| value.as_str())
+                    != Some("missing-from-real-scan")),
             "a diagnostic package was absent from the real backup scan"
         );
     }
@@ -4491,7 +5162,10 @@ mod tests {
             let Some(name) = entry.path().file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if targets.iter().any(|target| name.eq_ignore_ascii_case(target)) {
+            if targets
+                .iter()
+                .any(|target| name.eq_ignore_ascii_case(target))
+            {
                 paths.insert(name.to_ascii_lowercase(), entry.into_path());
             }
         }
@@ -4544,12 +5218,18 @@ mod tests {
             if target.eq_ignore_ascii_case("Anach_CASDetails8x2.package") {
                 assert_eq!(item.status, "classified");
                 assert_eq!(item.destination_parts, vec!["Substituições", "CAS"]);
-                assert!(item.detected_from.iter().any(|value| value == "CASLayoutIdentifier"));
+                assert!(item
+                    .detected_from
+                    .iter()
+                    .any(|value| value == "CASLayoutIdentifier"));
             }
             if target.eq_ignore_ascii_case("windows-lite-overrides-ALL-EP-SP.package") {
                 assert_eq!(item.status, "classified");
                 assert_eq!(item.destination_parts, vec!["Substituições", "Objetos"]);
-                assert!(!item.detected_from.iter().any(|value| value == "OhRudiFamily"));
+                assert!(!item
+                    .detected_from
+                    .iter()
+                    .any(|value| value == "OhRudiFamily"));
             }
             let expected_real_family = match target {
                 "Fantuanss12_ProfessionalOven.package" => Some(vec!["Scripts", "Jogabilidade"]),
@@ -4574,7 +5254,10 @@ mod tests {
             if let Some(expected) = expected_real_family {
                 assert_eq!(item.status, "classified", "{target}");
                 assert_eq!(
-                    item.destination_parts.iter().map(String::as_str).collect::<Vec<_>>(),
+                    item.destination_parts
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
                     expected,
                     "{target}"
                 );
@@ -4606,47 +5289,63 @@ mod tests {
             &oh_rudi,
             &["deathByMeteorJig".into(), "minerExclusionJig".into()],
             AppLanguage::Pt,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(gameplay.folder_parts, vec!["Correções", "Jogabilidade"]);
 
         let ep01 = path_independent_directed_classification(
             &BTreeSet::from([TYPE_NMAP_LOCAL, 0x03B4_C61D]),
             &["king_qings_window".into()],
             AppLanguage::Pt,
-        ).unwrap();
-        assert_eq!(ep01.folder_parts, vec!["Correções", "Jogabilidade", "EPs Fixes", "EP01"]);
+        )
+        .unwrap();
+        assert_eq!(
+            ep01.folder_parts,
+            vec!["Correções", "Jogabilidade", "EPs Fixes", "EP01"]
+        );
 
         let lazy = path_independent_directed_classification(
             &BTreeSet::from([TYPE_NMAP_LOCAL, 0x015A_1849, TYPE_IMG]),
             &["acBody_lod1_2".into(), "adBody_lod1".into()],
             AppLanguage::Pt,
-        ).unwrap();
-        assert_eq!(lazy.folder_parts, vec!["Substituições", "Corpo", "Cães e Gatos", "Lazy Duchess"]);
+        )
+        .unwrap();
+        assert_eq!(
+            lazy.folder_parts,
+            vec!["Substituições", "Corpo", "Cães e Gatos", "Lazy Duchess"]
+        );
 
         let lazy_default = path_independent_directed_classification(
             &BTreeSet::from([0x015A_1849, TYPE_IMG]),
             &["ld_CatDogAddons_DefaultFaces".into()],
             AppLanguage::Pt,
-        ).unwrap();
-        assert_eq!(lazy_default.folder_parts, vec!["Substituições", "Corpo", "Cães e Gatos", "Lazy Duchess"]);
+        )
+        .unwrap();
+        assert_eq!(
+            lazy_default.folder_parts,
+            vec!["Substituições", "Corpo", "Cães e Gatos", "Lazy Duchess"]
+        );
 
         let layout = path_independent_directed_classification(
             &BTreeSet::from([TYPE_LAYO_LOCAL]),
             &["CASDetails8x2".into()],
             AppLanguage::Pt,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(layout.folder_parts, vec!["Substituições", "CAS"]);
 
         assert!(path_independent_directed_classification(
             &oh_rudi,
             &["genericObjectName".into()],
             AppLanguage::Pt,
-        ).is_none());
+        )
+        .is_none());
         assert!(path_independent_directed_classification(
             &BTreeSet::from([TYPE_NMAP_LOCAL, 0xD382_BF57]),
             &["genericDogEarMesh".into()],
             AppLanguage::Pt,
-        ).is_none());
+        )
+        .is_none());
 
         assert_eq!(
             path_independent_directed_classification(
@@ -4663,45 +5362,85 @@ mod tests {
     #[test]
     fn named_headwear_refines_only_the_armband_slot_in_all_languages() {
         let mk = |sub: &str| CatalogClassification {
-            source: "CASP".into(), kind: "cas".into(),
-            main_category: "Acessórios".into(), sub_category: Some(sub.into()),
-            gender: None, age: None, species: None, usage_categories: vec![],
-            folder_parts: vec!["CAS".into(), "Acessórios".into(), "Unissex".into(), sub.into()],
-            candidate_folder_parts: vec![vec!["CAS".into(), "Acessórios".into(), "Unissex".into(), sub.into()]],
-            ambiguous: false, technical_reason: "CASP clothingType=0x00000020".into(),
+            source: "CASP".into(),
+            kind: "cas".into(),
+            main_category: "Acessórios".into(),
+            sub_category: Some(sub.into()),
+            gender: None,
+            age: None,
+            species: None,
+            usage_categories: vec![],
+            folder_parts: vec![
+                "CAS".into(),
+                "Acessórios".into(),
+                "Unissex".into(),
+                sub.into(),
+            ],
+            candidate_folder_parts: vec![vec![
+                "CAS".into(),
+                "Acessórios".into(),
+                "Unissex".into(),
+                sub.into(),
+            ]],
+            ambiguous: false,
+            technical_reason: "CASP clothingType=0x00000020".into(),
         };
         let mut hat = mk("Braçadeira");
-        refine_headwear_accessory(&mut hat, "CARVER_acc_EP5-cowboyhat-CU.package", AppLanguage::Pt);
+        refine_headwear_accessory(
+            &mut hat,
+            "CARVER_acc_EP5-cowboyhat-CU.package",
+            AppLanguage::Pt,
+        );
         assert_eq!(hat.sub_category.as_deref(), Some("Acessórios de Cabeça"));
-        assert_eq!(hat.folder_parts.last().map(String::as_str), Some("Acessórios de Cabeça"));
-        assert_eq!(hat.candidate_folder_parts[0].last().map(String::as_str), Some("Acessórios de Cabeça"));
+        assert_eq!(
+            hat.folder_parts.last().map(String::as_str),
+            Some("Acessórios de Cabeça")
+        );
+        assert_eq!(
+            hat.candidate_folder_parts[0].last().map(String::as_str),
+            Some("Acessórios de Cabeça")
+        );
         assert!(hat.technical_reason.contains("original CASP slot"));
         let mut bracelet = mk("Braçadeira");
-        refine_headwear_accessory(&mut bracelet, "CARVER_acc_armband-CU.package", AppLanguage::Pt);
+        refine_headwear_accessory(
+            &mut bracelet,
+            "CARVER_acc_armband-CU.package",
+            AppLanguage::Pt,
+        );
         assert_eq!(bracelet.sub_category.as_deref(), Some("Braçadeira"));
         let mut glasses = mk("Óculos");
         refine_headwear_accessory(&mut glasses, "Hat_glasses.package", AppLanguage::Pt);
         assert_eq!(glasses.sub_category.as_deref(), Some("Óculos"));
-        assert!(filename_indicates_headwear("CARVER_acc_graduationcap-AU.package"));
-        assert!(filename_indicates_headwear("CARVER_acc_EP5-cowboyhat-CU.package"));
-        assert!(!filename_indicates_headwear("CARVER_acc_armband-AU.package"));
+        assert!(filename_indicates_headwear(
+            "CARVER_acc_graduationcap-AU.package"
+        ));
+        assert!(filename_indicates_headwear(
+            "CARVER_acc_EP5-cowboyhat-CU.package"
+        ));
+        assert!(!filename_indicates_headwear(
+            "CARVER_acc_armband-AU.package"
+        ));
     }
 
     #[test]
     fn copied_mods_root_scanner_keeps_packages_and_overrides_distinct() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("s3cc-scanner-copy-{}-{nonce}",std::process::id()))
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("s3cc-scanner-copy-{}-{nonce}", std::process::id()))
             .join("Mods - Copia");
         std::fs::create_dir_all(root.join("Packages")).unwrap();
         std::fs::create_dir_all(root.join("Overrides")).unwrap();
         let parts = vec!["CAS".into(), "Cabelos".into()];
         assert_eq!(
-            physical_destination_parts(&root,"Packages\\Legacy\\hair.package",&parts),
+            physical_destination_parts(&root, "Packages\\Legacy\\hair.package", &parts),
             vec!["Packages", "Cabelos"]
         );
         assert_eq!(
-            physical_destination_parts(&root,"Overrides\\Legacy\\hair.package",&parts),
+            physical_destination_parts(&root, "Overrides\\Legacy\\hair.package", &parts),
             vec!["Overrides", "Cabelos"]
         );
         std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
@@ -4710,42 +5449,70 @@ mod tests {
     #[test]
     fn eyelash_multi_slot_bundle_is_not_stranded_as_mixed() {
         let mk = |main: &str, sub: &str| CatalogClassification {
-            source: "CASP".into(), kind: "cas".into(),
-            main_category: main.into(), sub_category: Some(sub.into()),
-            gender: None, age: None, species: None, usage_categories: vec![],
+            source: "CASP".into(),
+            kind: "cas".into(),
+            main_category: main.into(),
+            sub_category: Some(sub.into()),
+            gender: None,
+            age: None,
+            species: None,
+            usage_categories: vec![],
             folder_parts: vec!["CAS".into(), main.into(), sub.into()],
             candidate_folder_parts: vec![],
-            ambiguous: false, technical_reason: "".into(),
+            ambiguous: false,
+            technical_reason: "".into(),
         };
         let mut items = vec![mk("Maquiagem", "Delineador"); 42];
         items.extend(vec![mk("Acessórios", "Óculos"); 2]);
         items.extend(vec![mk("Acessórios", "Brincos"); 2]);
         let types = BTreeSet::from([TYPE_CASP]);
         let resolved = verified_eyelash_catalog_bundle(
-            &items, &types, "sclub_ts3_eyelash_n3a.package", AppLanguage::Pt
-        ).unwrap();
+            &items,
+            &types,
+            "sclub_ts3_eyelash_n3a.package",
+            AppLanguage::Pt,
+        )
+        .unwrap();
         assert_eq!(resolved.folder_parts, vec!["CAS", "Maquiagem", "Cílios"]);
         assert_eq!(resolved.gender, None);
         assert!(verified_eyelash_catalog_bundle(
-            &items, &types, "unrelated_bundle.package", AppLanguage::Pt
-        ).is_none());
+            &items,
+            &types,
+            "unrelated_bundle.package",
+            AppLanguage::Pt
+        )
+        .is_none());
         items.push(mk("Roupas", "Conjunto"));
         assert!(verified_eyelash_catalog_bundle(
-            &items, &types, "sclub_ts3_eyelash_n3a.package", AppLanguage::Pt
-        ).is_none());
+            &items,
+            &types,
+            "sclub_ts3_eyelash_n3a.package",
+            AppLanguage::Pt
+        )
+        .is_none());
     }
 
     #[test]
     fn merged_casp_variants_share_anatomical_family_without_guessing_gender() {
         let mk = |category: &str, gender: &str, age: &str, subtype: &str| CatalogClassification {
-            source: "CASP".into(), kind: "cas".into(),
+            source: "CASP".into(),
+            kind: "cas".into(),
             main_category: category.into(),
             sub_category: Some(subtype.into()),
-            gender: Some(gender.into()), age: Some(age.into()),
-            species: None, usage_categories: vec![],
-            folder_parts: vec!["CAS".into(), category.into(), gender.into(), age.into(), subtype.into()],
+            gender: Some(gender.into()),
+            age: Some(age.into()),
+            species: None,
+            usage_categories: vec![],
+            folder_parts: vec![
+                "CAS".into(),
+                category.into(),
+                gender.into(),
+                age.into(),
+                subtype.into(),
+            ],
             candidate_folder_parts: vec![],
-            ambiguous: false, technical_reason: "".into(),
+            ambiguous: false,
+            technical_reason: "".into(),
         };
         let types = BTreeSet::from([TYPE_CASP]);
         let glasses = vec![
@@ -4766,21 +5533,33 @@ mod tests {
 
     #[test]
     fn legacy_active_and_disabled_packages_are_organized_without_reactivating() {
-        assert!(package_extension(Path::new("TMZ_CustomBodyHair.package.disabled")));
-        assert!(package_extension(Path::new("TMZ_CustomBodyHair.package.duplicated")));
+        assert!(package_extension(Path::new(
+            "TMZ_CustomBodyHair.package.disabled"
+        )));
+        assert!(package_extension(Path::new(
+            "TMZ_CustomBodyHair.package.duplicated"
+        )));
         assert!(package_extension(Path::new("OneEuroMuttTip Width.package")));
-        assert!(!package_extension(Path::new("OneEuroMuttTip Width.package.bak")));
+        assert!(!package_extension(Path::new(
+            "OneEuroMuttTip Width.package.bak"
+        )));
         assert!(!package_extension(Path::new("Backup.zip")));
     }
 
     #[test]
     fn canonical_scripts_gameplay_creator_hierarchy_is_localized() {
-        assert_eq!(script_creator_folder(AppLanguage::Pt, Some("TwinSimming")),
-            vec!["Scripts", "Jogabilidade"]);
-        assert_eq!(script_creator_folder(AppLanguage::En, Some("NRaas")),
-            vec!["Scripts", "NRaas"]);
-        assert_eq!(script_creator_folder(AppLanguage::Es, None),
-            vec!["Scripts", "Jugabilidad"]);
+        assert_eq!(
+            script_creator_folder(AppLanguage::Pt, Some("TwinSimming")),
+            vec!["Scripts", "Jogabilidade"]
+        );
+        assert_eq!(
+            script_creator_folder(AppLanguage::En, Some("NRaas")),
+            vec!["Scripts", "NRaas"]
+        );
+        assert_eq!(
+            script_creator_folder(AppLanguage::Es, None),
+            vec!["Scripts", "Jugabilidad"]
+        );
         assert!(script_source_roles("Scripts/Jogabilidade/TwinSimming/X.package").0);
     }
 
@@ -4795,24 +5574,66 @@ mod tests {
             ("Look! A living Sheep!.package", "Scripts"),
             ("zoeoe_knitting_resources.package", "Scripts"),
             ("simler90GameplayCoreMod-UPDATE199.package", "Utilitários"),
-            ("twinsimming_Pasteurize Milk Mod.package", "Culinária e Comida"),
-            ("TSS_KitchenTweaks_WithMikeyEdit.package", "Culinária e Comida"),
+            (
+                "twinsimming_Pasteurize Milk Mod.package",
+                "Culinária e Comida",
+            ),
+            (
+                "TSS_KitchenTweaks_WithMikeyEdit.package",
+                "Culinária e Comida",
+            ),
             ("NeoH4x0rGlobalOnlineBankingMod.package", "Scripts"),
             ("Gamefreak130_SmartphoneDating.package", "Relacionamentos"),
         ];
         for (name, expected) in cases {
             assert_eq!(script_category(name, AppLanguage::Pt), expected, "{name}");
         }
-        assert_eq!(script_category("douglasveiga_HousekeeperService_v1.2.package", AppLanguage::En), "Services");
-        assert_eq!(script_category("douglasveiga_HousekeeperService_v1.2.package", AppLanguage::Es), "Servicios");
-        assert_eq!(creator_candidate_from_filename("AnimatedWoohoo.package"), None);
-        assert_eq!(creator_candidate_from_filename("[Items] Al Fresco Street Market.package"), None);
-        assert_eq!(creator_candidate_from_filename("Let's Take a Selfie by David Veiga.package"), None);
-        assert_eq!(creator_candidate_from_filename("Retro Workout.package"), None);
-        assert_eq!(creator_candidate_from_filename("ld_MonoPatcher.package"), Some("ld".to_string()));
-        assert_eq!(creator_candidate_from_filename("icarusallsorts.EatOutsideRestaurant.package"), Some("icarusallsorts".to_string()));
-        assert_eq!(creator_candidate_from_filename("twinsimming_Pasteurize Milk Mod.package"), Some("twinsimming".to_string()));
-        assert_eq!(mod_name_from_relative(r"#+18\\AnimatedWoohoo.package"), None);
+        assert_eq!(
+            script_category(
+                "douglasveiga_HousekeeperService_v1.2.package",
+                AppLanguage::En
+            ),
+            "Services"
+        );
+        assert_eq!(
+            script_category(
+                "douglasveiga_HousekeeperService_v1.2.package",
+                AppLanguage::Es
+            ),
+            "Servicios"
+        );
+        assert_eq!(
+            creator_candidate_from_filename("AnimatedWoohoo.package"),
+            None
+        );
+        assert_eq!(
+            creator_candidate_from_filename("[Items] Al Fresco Street Market.package"),
+            None
+        );
+        assert_eq!(
+            creator_candidate_from_filename("Let's Take a Selfie by David Veiga.package"),
+            None
+        );
+        assert_eq!(
+            creator_candidate_from_filename("Retro Workout.package"),
+            None
+        );
+        assert_eq!(
+            creator_candidate_from_filename("ld_MonoPatcher.package"),
+            Some("ld".to_string())
+        );
+        assert_eq!(
+            creator_candidate_from_filename("icarusallsorts.EatOutsideRestaurant.package"),
+            Some("icarusallsorts".to_string())
+        );
+        assert_eq!(
+            creator_candidate_from_filename("twinsimming_Pasteurize Milk Mod.package"),
+            Some("twinsimming".to_string())
+        );
+        assert_eq!(
+            mod_name_from_relative(r"#+18\\AnimatedWoohoo.package"),
+            None
+        );
     }
 
     #[test]
@@ -4829,55 +5650,135 @@ mod tests {
         };
         // Store bundles and premium content should never become Gameplay
         // just because an XML/assembly contains keyword matches.
-        assert!(catalog("Packages/#9 Store/Store Content/[Items] Al Fresco.package", 4, false));
-        assert!(catalog("Packages/#9 Store/Store Content/[PC] Basketball Hoop.package", 1, false));
-        assert!(catalog("Buy/Entertainment/Sports/[PC] Basketball Hoop.package", 1, false));
-        assert!(catalog("Buy/Debug/Buzz_ShellSoundEmitter.package", 1, false));
+        assert!(catalog(
+            "Packages/#9 Store/Store Content/[Items] Al Fresco.package",
+            4,
+            false
+        ));
+        assert!(catalog(
+            "Packages/#9 Store/Store Content/[PC] Basketball Hoop.package",
+            1,
+            false
+        ));
+        assert!(catalog(
+            "Buy/Entertainment/Sports/[PC] Basketball Hoop.package",
+            1,
+            false
+        ));
+        assert!(catalog(
+            "Buy/Debug/Buzz_ShellSoundEmitter.package",
+            1,
+            false
+        ));
         assert!(catalog("Packages/ani_BistroStove.package", 1, false));
-        assert!(catalog("Packages/Scripts/cmomoney_TimeShifter.package", 1, false));
-        assert!(catalog("Packages/#8 Scripts/Objects/Fantuanss12_ProfessionalOven.package", 1, false));
+        assert!(catalog(
+            "Packages/Scripts/cmomoney_TimeShifter.package",
+            1,
+            false
+        ));
+        assert!(catalog(
+            "Packages/#8 Scripts/Objects/Fantuanss12_ProfessionalOven.package",
+            1,
+            false
+        ));
         // Gameplay mods may bundle multiple object types or unreadable OBJD.
-        assert!(!catalog("Packages/#8 Scripts/Gameplay/Services/HousekeeperService.package", 2, false));
-        assert!(!catalog("Packages/#8 Scripts/Gameplay/Global Online Banking Mod/Bank.package", 1, false));
-        assert!(!catalog("Packages/Scripts/Gamefreak130_KarmaPowers.package", 0, true));
-        assert!(!catalog_precedes_embedded_script(None, 2, "Buy/Sports/Hoop.package", 1, false));
-        assert!(!catalog_precedes_embedded_script(Some(&script), 0, "Buy/Sports/Hoop.package", 1, false));
+        assert!(!catalog(
+            "Packages/#8 Scripts/Gameplay/Services/HousekeeperService.package",
+            2,
+            false
+        ));
+        assert!(!catalog(
+            "Packages/#8 Scripts/Gameplay/Global Online Banking Mod/Bank.package",
+            1,
+            false
+        ));
+        assert!(!catalog(
+            "Packages/Scripts/Gamefreak130_KarmaPowers.package",
+            0,
+            true
+        ));
+        assert!(!catalog_precedes_embedded_script(
+            None,
+            2,
+            "Buy/Sports/Hoop.package",
+            1,
+            false
+        ));
+        assert!(!catalog_precedes_embedded_script(
+            Some(&script),
+            0,
+            "Buy/Sports/Hoop.package",
+            1,
+            false
+        ));
 
         let verified = PackageFamilyClassification {
             detected_from: vec!["S3SA".into(), "InternalCreator".into()],
             ..script.clone()
         };
         assert!(!catalog_precedes_embedded_script(
-            Some(&verified), 2, "#+18/AnimatedWoohoo.package", 2, false
+            Some(&verified),
+            2,
+            "#+18/AnimatedWoohoo.package",
+            2,
+            false
         ));
         let standalone_identity = PackageFamilyClassification {
             detected_from: vec!["S3SA".into(), "InternalScriptIdentity".into()],
             ..script.clone()
         };
         assert!(!catalog_precedes_embedded_script(
-            Some(&standalone_identity), 2, "#+18/AnimatedWoohoo.package", 2, false
+            Some(&standalone_identity),
+            2,
+            "#+18/AnimatedWoohoo.package",
+            2,
+            false
         ));
         assert!(catalog_precedes_embedded_script(
-            Some(&standalone_identity), 2, "Packages/#9 Store/Store Content/[Items] Al Fresco.package", 2, false
+            Some(&standalone_identity),
+            2,
+            "Packages/#9 Store/Store Content/[Items] Al Fresco.package",
+            2,
+            false
         ));
         assert!(catalog_precedes_embedded_script(
-            Some(&script), 2, "#+18/UnknownResourceBundle.package", 2, false
+            Some(&script),
+            2,
+            "#+18/UnknownResourceBundle.package",
+            2,
+            false
         ));
         assert!(catalog_precedes_embedded_script(
-            Some(&verified), 2, "Packages/#9 Store/Store Content/[Items] Le Cinema.package", 2, false
+            Some(&verified),
+            2,
+            "Packages/#9 Store/Store Content/[Items] Le Cinema.package",
+            2,
+            false
         ));
         assert!(catalog_precedes_embedded_script(
-            Some(&verified), 2, "Packages/ani_BistroStove.package", 1, false
+            Some(&verified),
+            2,
+            "Packages/ani_BistroStove.package",
+            1,
+            false
         ));
         assert!(catalog_precedes_embedded_script(
-            Some(&verified), 2, "Buy/Decor/Fantuanss12_GroceryDeliveryService.package", 2, true
+            Some(&verified),
+            2,
+            "Buy/Decor/Fantuanss12_GroceryDeliveryService.package",
+            2,
+            true
         ));
         let nraas = PackageFamilyClassification {
             detected_from: vec!["NRaasInternal".into()],
             ..script
         };
         assert!(!catalog_precedes_embedded_script(
-            Some(&nraas), 2, "Packages/Scripts/NRaas.package", 1, false
+            Some(&nraas),
+            2,
+            "Packages/Scripts/NRaas.package",
+            1,
+            false
         ));
     }
 
@@ -4912,19 +5813,36 @@ mod tests {
     #[test]
     fn independent_catalog_and_script_classifications_are_not_companions() {
         let mut item = ScanPackageItem {
-            id: String::new(), name: String::new(), path: String::new(),
+            id: String::new(),
+            name: String::new(),
+            path: String::new(),
             relative_path: "Baking Mod/Cakes/Example.package".into(),
-            file_size: 0, resource_count: 0, catalog_resource_count: 1,
-            resource_types: Vec::new(), instances: Vec::new(),
-            scripted: false, content_source: String::new(), source_confidence: None,
-            status: "classified".into(), classification_confidence: "high".into(),
-            creator: None, mod_name: None, gameplay_category: None,
-            detected_from: Vec::new(), category: Some("Objects".into()),
-            sub_category: None, gender: None, age: None, species: None,
-            usage_categories: Vec::new(), destination_parts: vec!["Objects".into()],
+            file_size: 0,
+            resource_count: 0,
+            catalog_resource_count: 1,
+            resource_types: Vec::new(),
+            instances: Vec::new(),
+            scripted: false,
+            content_source: String::new(),
+            source_confidence: None,
+            status: "classified".into(),
+            classification_confidence: "high".into(),
+            creator: None,
+            mod_name: None,
+            gameplay_category: None,
+            detected_from: Vec::new(),
+            category: Some("Objects".into()),
+            sub_category: None,
+            gender: None,
+            age: None,
+            species: None,
+            usage_categories: Vec::new(),
+            destination_parts: vec!["Objects".into()],
             destination_path: Some("Objects".into()),
-            candidate_destinations: Vec::new(), classifications: Vec::new(),
-            classification_reason: None, warnings: Vec::new(),
+            candidate_destinations: Vec::new(),
+            classifications: Vec::new(),
+            classification_reason: None,
+            warnings: Vec::new(),
         };
         assert!(!may_reclassify_as_companion(&item));
         item.catalog_resource_count = 0;
@@ -4988,7 +5906,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-
     #[test]
     fn slider_morph_types_are_authoritative_for_companion_matching() {
         assert!(is_slider_morph_type(TYPE_BGEO));
@@ -5032,8 +5949,13 @@ mod tests {
     fn scan_previews_use_packages_without_cas_level() {
         let mods = Path::new("The Sims 3").join("Mods");
         let packages = mods.join("Packages");
-        let legacy = vec!["CAS".to_string(), "Clothing".to_string(),
-            "Male".to_string(), "YA-A".to_string(), "Top".to_string()];
+        let legacy = vec![
+            "CAS".to_string(),
+            "Clothing".to_string(),
+            "Male".to_string(),
+            "YA-A".to_string(),
+            "Top".to_string(),
+        ];
         assert_eq!(
             physical_destination_parts(&mods, "Packages/legacy.package", &legacy),
             vec!["Packages", "Clothing", "Male", "YA-A", "Top"]
@@ -5043,11 +5965,19 @@ mod tests {
             vec!["Clothing", "Male", "YA-A", "Top"]
         );
         assert_eq!(
-            physical_destination_parts(&mods, "Packages/legacy.package", &["Packages".into(), "CAS".into(), "Sliders".into()]),
+            physical_destination_parts(
+                &mods,
+                "Packages/legacy.package",
+                &["Packages".into(), "CAS".into(), "Sliders".into()]
+            ),
             vec!["Packages", "Sliders"]
         );
         assert_eq!(
-            physical_destination_parts(&packages, "legacy.package", &["Packages".into(), "CAS".into(), "Sliders".into()]),
+            physical_destination_parts(
+                &packages,
+                "legacy.package",
+                &["Packages".into(), "CAS".into(), "Sliders".into()]
+            ),
             vec!["Sliders"]
         );
     }
@@ -5057,14 +5987,25 @@ mod tests {
         let mods = Path::new("Game").join("Mods");
         let folder = mods.join("Packages").join("Clothing").join("Male");
         assert_eq!(
-            physical_destination_parts(&folder, "top.package",
-                &["Clothing".into(), "Male".into(), "YA-A".into(), "Top".into()]),
+            physical_destination_parts(
+                &folder,
+                "top.package",
+                &[
+                    "Clothing".into(),
+                    "Male".into(),
+                    "YA-A".into(),
+                    "Top".into()
+                ]
+            ),
             vec!["YA-A", "Top"]
         );
         let overrides = mods.join("Overrides").join("Gameplay");
         assert_eq!(
-            physical_destination_parts(&overrides, "tuning.package",
-                &["Overrides".into(), "Gameplay".into(), "Tuning".into()]),
+            physical_destination_parts(
+                &overrides,
+                "tuning.package",
+                &["Overrides".into(), "Gameplay".into(), "Tuning".into()]
+            ),
             vec!["Tuning"]
         );
     }
@@ -5092,7 +6033,8 @@ mod tests {
         );
         assert_eq!(
             physical_destination_parts(
-                &mods, "Overrides/foo.package",
+                &mods,
+                "Overrides/foo.package",
                 &["Packages".into(), "CAS".into(), "Sliders".into()]
             ),
             vec!["Overrides", "Sliders"]
@@ -5181,10 +6123,7 @@ mod tests {
             makeup_semantic_folder_key(&["BrntWafflesNoseMask".into()]),
             Some(("Máscaras de Nariz", "nosemask"))
         );
-        assert_eq!(
-            makeup_semantic_folder_key(&["ordinary_blush".into()]),
-            None
-        );
+        assert_eq!(makeup_semantic_folder_key(&["ordinary_blush".into()]), None);
     }
 
     #[test]
@@ -5235,11 +6174,10 @@ mod tests {
         ];
         assert_eq!(clothing_mesh_subtype(&names), Some("bottom"));
         assert_eq!(
-            clothing_mesh_subtype(&["afTopNude_special".to_string()]), Some("top")
+            clothing_mesh_subtype(&["afTopNude_special".to_string()]),
+            Some("top")
         );
-        assert_eq!(
-            clothing_mesh_subtype(&["Tip Width".to_string()]), None
-        );
+        assert_eq!(clothing_mesh_subtype(&["Tip Width".to_string()]), None);
         assert_eq!(
             clothing_mesh_subtype(&["afTopNude".to_string(), "afBottomJeans".to_string()]),
             None
@@ -5261,15 +6199,28 @@ mod tests {
     #[test]
     fn filename_can_refine_a_generic_internal_slider_name() {
         assert_eq!(
-            slider_destination_from_internal_name("aWT_Mouth-UpperLip-TipWidth.package", AppLanguage::En),
+            slider_destination_from_internal_name(
+                "aWT_Mouth-UpperLip-TipWidth.package",
+                AppLanguage::En
+            ),
             Some(vec!["Sliders".into(), "Face".into(), "Mouth & Lips".into()])
         );
         assert_eq!(
-            slider_destination_from_internal_name("Lavender_MiddleFaceWidth.package", AppLanguage::En),
+            slider_destination_from_internal_name(
+                "Lavender_MiddleFaceWidth.package",
+                AppLanguage::En
+            ),
             Some(vec!["Sliders".into(), "Face".into()])
         );
-        assert!(slider_destination_from_internal_name("OneEuroMuttTip Width.package", AppLanguage::En).is_none());
-        assert_eq!(verified_slider_name_alias("OneEuroMuttTip Width.package"), Some("Nose Tip Width"));
+        assert!(slider_destination_from_internal_name(
+            "OneEuroMuttTip Width.package",
+            AppLanguage::En
+        )
+        .is_none());
+        assert_eq!(
+            verified_slider_name_alias("OneEuroMuttTip Width.package"),
+            Some("Nose Tip Width")
+        );
         assert_eq!(
             slider_destination_from_internal_name(
                 verified_slider_name_alias("OneEuroMuttTip Width.package").unwrap(),
@@ -5277,7 +6228,10 @@ mod tests {
             ),
             Some(vec!["Sliders".into(), "Face".into(), "Nose".into()])
         );
-        assert_eq!(verified_slider_name_alias("SomeoneElseTip Width.package"), None);
+        assert_eq!(
+            verified_slider_name_alias("SomeoneElseTip Width.package"),
+            None
+        );
     }
 
     #[test]
@@ -5320,13 +6274,26 @@ mod tests {
 
     #[test]
     fn nraas_family_folder_requires_primary_and_module() {
-        assert_eq!(nraas_family_role("NRaas_MasterController.package"), Some(("MasterController", false)));
-        assert_eq!(nraas_family_role("NRaas_MasterControllerCheats.package"), Some(("MasterController", true)));
-        assert_eq!(nraas_family_role("NRaas_Careers.package"), Some(("Careers", false)));
-        assert_eq!(nraas_family_destination(AppLanguage::Pt, "MasterController", true, false),
-            vec!["Scripts", "NRaas"]);
-        assert_eq!(nraas_family_destination(AppLanguage::Pt, "MasterController", true, true),
-            vec!["Scripts", "NRaas", "MasterController"]);
+        assert_eq!(
+            nraas_family_role("NRaas_MasterController.package"),
+            Some(("MasterController", false))
+        );
+        assert_eq!(
+            nraas_family_role("NRaas_MasterControllerCheats.package"),
+            Some(("MasterController", true))
+        );
+        assert_eq!(
+            nraas_family_role("NRaas_Careers.package"),
+            Some(("Careers", false))
+        );
+        assert_eq!(
+            nraas_family_destination(AppLanguage::Pt, "MasterController", true, false),
+            vec!["Scripts", "NRaas"]
+        );
+        assert_eq!(
+            nraas_family_destination(AppLanguage::Pt, "MasterController", true, true),
+            vec!["Scripts", "NRaas", "MasterController"]
+        );
         assert_eq!(
             existing_nraas_subfolder(r"Scripts\NRaas\Dreamer\NRaas_Dreamer.package"),
             Some("Dreamer".into())
@@ -5339,9 +6306,15 @@ mod tests {
 
     #[test]
     fn integrations_do_not_become_nraas_from_a_logo_reference() {
-        assert!(is_explicit_non_nraas_integration("Battery.Simpanel_1.03.package"));
-        assert!(is_explicit_non_nraas_integration("NeoH4x0rGlobalOnlineBankingMod.package"));
-        assert!(!is_explicit_non_nraas_integration("NRaas_MasterController.package"));
+        assert!(is_explicit_non_nraas_integration(
+            "Battery.Simpanel_1.03.package"
+        ));
+        assert!(is_explicit_non_nraas_integration(
+            "NeoH4x0rGlobalOnlineBankingMod.package"
+        ));
+        assert!(!is_explicit_non_nraas_integration(
+            "NRaas_MasterController.package"
+        ));
         assert!(!authoritative_nraas_identifier("Battery.NRaasLogo2"));
         assert!(authoritative_nraas_identifier("NRaas.MasterController"));
     }
@@ -5411,7 +6384,10 @@ mod tests {
         let mut rows = Vec::new();
         for relative in targets {
             let path = root_path.join(relative);
-            assert!(path.is_file(), "real Body Hair fixture is absent: {relative}");
+            assert!(
+                path.is_file(),
+                "real Body Hair fixture is absent: {relative}"
+            );
             let mut slider_instances = HashSet::new();
             let item = scan_one(
                 &root_path,
@@ -5422,10 +6398,9 @@ mod tests {
                 &mut ScanTiming::default(),
             );
             assert_eq!(item.status, "classified", "{relative}");
-            assert!(item.destination_parts.starts_with(&[
-                "Cabelos e Pêlos".to_string(),
-                "Pelos Corporais".to_string(),
-            ]));
+            assert!(item
+                .destination_parts
+                .starts_with(&["Cabelos e Pêlos".to_string(), "Pelos Corporais".to_string(),]));
             assert!(!item.destination_parts.iter().any(|part| {
                 part.contains("Idade")
                     || part.contains("Peito")
@@ -5471,7 +6446,13 @@ mod tests {
             let path = WalkDir::new(&root_path)
                 .into_iter()
                 .filter_map(Result::ok)
-                .find(|entry| entry.file_type().is_file() && entry.file_name().to_string_lossy().eq_ignore_ascii_case(target))
+                .find(|entry| {
+                    entry.file_type().is_file()
+                        && entry
+                            .file_name()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(target)
+                })
                 .map(|entry| entry.into_path())
                 .unwrap_or_else(|| panic!("pending package is absent: {target}"));
             let package = Package::load(&path).expect("pending package must be valid DBPF");
@@ -5485,7 +6466,10 @@ mod tests {
                 &mut ScanTiming::default(),
             );
             assert!(
-                !package.entries.iter().any(|entry| entry.type_id == TYPE_FBLN),
+                !package
+                    .entries
+                    .iter()
+                    .any(|entry| entry.type_id == TYPE_FBLN),
                 "a pending non-FBLN control unexpectedly acquired FBLN: {target}"
             );
             assert_ne!(
@@ -5532,7 +6516,9 @@ mod tests {
 
     #[test]
     fn external_slider_corpus_is_a_read_only_dry_run_when_requested() {
-        let Ok(root) = std::env::var("S3CC_SLIDER_CORPUS_ROOT") else { return; };
+        let Ok(root) = std::env::var("S3CC_SLIDER_CORPUS_ROOT") else {
+            return;
+        };
         let root_path = PathBuf::from(&root);
         let package_paths = WalkDir::new(&root_path)
             .into_iter()
@@ -5540,12 +6526,19 @@ mod tests {
             .filter(|entry| entry.file_type().is_file() && package_extension(entry.path()))
             .map(|entry| entry.into_path())
             .collect::<Vec<_>>();
-        assert_eq!(package_paths.len(), 299, "slider corpus package count changed");
+        assert_eq!(
+            package_paths.len(),
+            299,
+            "slider corpus package count changed"
+        );
 
         let mut package_items = HashMap::<String, &ScanPackageItem>::new();
         let result = scan_packages_core(root.clone(), AppLanguage::Pt, None).expect("scan corpus");
         for item in &result.items {
-            package_items.insert(item.relative_path.replace('/', "\\").to_ascii_lowercase(), item);
+            package_items.insert(
+                item.relative_path.replace('/', "\\").to_ascii_lowercase(),
+                item,
+            );
         }
 
         let mut fbln_packages = 0usize;
@@ -5556,19 +6549,50 @@ mod tests {
         for path in package_paths {
             let package = Package::load(&path).expect("DBPF package");
             let metadata = read_fbln_metadata(&package);
-            let fbln_count = package.entries.iter().filter(|entry| entry.type_id == TYPE_FBLN).count();
-            assert_eq!(fbln_count, metadata.len(), "every FBLN must be readable: {}", path.display());
-            if fbln_count > 0 { fbln_packages += 1; fbln_resources += fbln_count; } else { no_fbln += 1; }
+            let fbln_count = package
+                .entries
+                .iter()
+                .filter(|entry| entry.type_id == TYPE_FBLN)
+                .count();
+            assert_eq!(
+                fbln_count,
+                metadata.len(),
+                "every FBLN must be readable: {}",
+                path.display()
+            );
+            if fbln_count > 0 {
+                fbln_packages += 1;
+                fbln_resources += fbln_count;
+            } else {
+                no_fbln += 1;
+            }
             let (sha256, size) = sha256_file(&path).expect("hash corpus package");
-            assert!(hashes.insert(sha256.clone()), "corpus contains an identical SHA-256");
-            let relative = path.strip_prefix(&root_path).unwrap().to_string_lossy().replace('/', "\\");
-            let item = package_items.get(&relative.to_ascii_lowercase()).expect("scan item");
+            assert!(
+                hashes.insert(sha256.clone()),
+                "corpus contains an identical SHA-256"
+            );
+            let relative = path
+                .strip_prefix(&root_path)
+                .unwrap()
+                .to_string_lossy()
+                .replace('/', "\\");
+            let item = package_items
+                .get(&relative.to_ascii_lowercase())
+                .expect("scan item");
             let destination = item.destination_path.clone().unwrap_or_default();
             let bucket = if fbln_count > 0 {
                 "sliders"
-            } else if destination.to_ascii_lowercase().contains("fix") || item.detected_from.iter().any(|v| v.to_ascii_lowercase().contains("fix")) {
+            } else if destination.to_ascii_lowercase().contains("fix")
+                || item
+                    .detected_from
+                    .iter()
+                    .any(|v| v.to_ascii_lowercase().contains("fix"))
+            {
                 "fixes"
-            } else if destination.to_ascii_lowercase().contains("substit") || destination.to_ascii_lowercase().contains("reempl") || destination.to_ascii_lowercase().contains("replacement") {
+            } else if destination.to_ascii_lowercase().contains("substit")
+                || destination.to_ascii_lowercase().contains("reempl")
+                || destination.to_ascii_lowercase().contains("replacement")
+            {
                 "replacements"
             } else if item.status == "classified" {
                 "support_or_other"
@@ -5593,26 +6617,49 @@ mod tests {
         assert_eq!(fbln_packages, 290, "FBLN package count changed");
         assert_eq!(fbln_resources, 292, "FBLN resource count changed");
         assert_eq!(no_fbln, 9, "non-FBLN package count changed");
-        assert_eq!(result.stats.invalid, 0, "corpus contains an unreadable DBPF");
-        let non_fbln_slider_items = result.items.iter().filter(|item| {
-            item.sub_category.as_deref() == Some("Sliders") && !item.resource_types.iter().any(|kind| kind == "FBLN")
-        }).collect::<Vec<_>>();
-        for item in &non_fbln_slider_items { println!("NON_FBLN_SLIDER {} {:?} {:?}", item.relative_path, item.resource_types, item.detected_from); }
-        assert!(non_fbln_slider_items.is_empty(), "non-FBLN resources must not be auto-classified as sliders");
+        assert_eq!(
+            result.stats.invalid, 0,
+            "corpus contains an unreadable DBPF"
+        );
+        let non_fbln_slider_items = result
+            .items
+            .iter()
+            .filter(|item| {
+                item.sub_category.as_deref() == Some("Sliders")
+                    && !item.resource_types.iter().any(|kind| kind == "FBLN")
+            })
+            .collect::<Vec<_>>();
+        for item in &non_fbln_slider_items {
+            println!(
+                "NON_FBLN_SLIDER {} {:?} {:?}",
+                item.relative_path, item.resource_types, item.detected_from
+            );
+        }
+        assert!(
+            non_fbln_slider_items.is_empty(),
+            "non-FBLN resources must not be auto-classified as sliders"
+        );
 
         if let Ok(output) = std::env::var("S3CC_SLIDER_DRY_RUN_OUTPUT") {
             let path = PathBuf::from(output);
-            if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
-            std::fs::write(&path, serde_json::to_vec_pretty(&serde_json::json!({
-                "packageCount": result.stats.packages,
-                "fblnPackages": fbln_packages,
-                "fblnResources": fbln_resources,
-                "withoutFbln": no_fbln,
-                "dbpfIndexErrors": result.stats.invalid,
-                "identicalSha256": 0,
-                "dryRunOnly": true,
-                "items": dry_run,
-            })).unwrap()).unwrap();
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(
+                &path,
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "packageCount": result.stats.packages,
+                    "fblnPackages": fbln_packages,
+                    "fblnResources": fbln_resources,
+                    "withoutFbln": no_fbln,
+                    "dbpfIndexErrors": result.stats.invalid,
+                    "identicalSha256": 0,
+                    "dryRunOnly": true,
+                    "items": dry_run,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         }
     }
 }

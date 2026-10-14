@@ -17,6 +17,23 @@ fn cache_write_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// The disk cache is an optimization across application sessions.  During an
+/// active unified analysis we also retain the just-built index in memory,
+/// scoped to the canonical root. This keeps scanner -> duplicates -> conflicts
+/// truly single-pass even when a sandbox, antivirus or transient permission
+/// issue prevents writing the cache file.
+fn transient_root_caches() -> &'static Mutex<HashMap<String, FingerprintCache>> {
+    static CACHES: OnceLock<Mutex<HashMap<String, FingerprintCache>>> = OnceLock::new();
+    CACHES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn root_cache_key(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .to_ascii_lowercase()
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CacheBuildMetrics {
     pub cache_hit: bool,
@@ -28,6 +45,7 @@ pub struct CacheBuildMetrics {
     pub quick_fingerprint_us: u128,
     pub dbpf_load_ms: u128,
     pub resource_decode_ms: u128,
+    pub resource_decode_us: u128,
     pub integrity_verified: bool,
 }
 
@@ -87,8 +105,12 @@ fn metadata_signature(path: &Path) -> Result<(u64, u128), String> {
 
 fn quick_fingerprint(path: &Path, size: u64) -> Result<String, String> {
     const SAMPLE_BYTES: u64 = 16 * 1024;
-    let mut file = File::open(path)
-        .map_err(|error| format!("Could not open {} for cache validation: {error}", path.display()))?;
+    let mut file = File::open(path).map_err(|error| {
+        format!(
+            "Could not open {} for cache validation: {error}",
+            path.display()
+        )
+    })?;
     let mut offsets = vec![0u64];
     if size > SAMPLE_BYTES {
         offsets.extend([size / 4, size / 2, size.saturating_sub(SAMPLE_BYTES)]);
@@ -100,15 +122,24 @@ fn quick_fingerprint(path: &Path, size: u64) -> Result<String, String> {
     digest.update(size.to_le_bytes());
     let mut buffer = vec![0u8; SAMPLE_BYTES as usize];
     for offset in offsets {
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|error| format!("Could not seek {} for cache validation: {error}", path.display()))?;
+        file.seek(SeekFrom::Start(offset)).map_err(|error| {
+            format!(
+                "Could not seek {} for cache validation: {error}",
+                path.display()
+            )
+        })?;
         let requested = (size.saturating_sub(offset)).min(SAMPLE_BYTES) as usize;
         let mut read = 0usize;
         while read < requested {
-            let count = file
-                .read(&mut buffer[read..requested])
-                .map_err(|error| format!("Could not read {} for cache validation: {error}", path.display()))?;
-            if count == 0 { break; }
+            let count = file.read(&mut buffer[read..requested]).map_err(|error| {
+                format!(
+                    "Could not read {} for cache validation: {error}",
+                    path.display()
+                )
+            })?;
+            if count == 0 {
+                break;
+            }
             read += count;
         }
         digest.update(offset.to_le_bytes());
@@ -155,6 +186,14 @@ pub fn cache_path(root: &Path) -> PathBuf {
         .join("fingerprints-v1.json")
 }
 
+/// Sidecar for the scanner's serialized classification snapshot.  It lives
+/// beside the DBPF fingerprint index, outside the user's Mods tree, so an
+/// application restart can reuse a current read-only classification without
+/// treating that cache as proof for a later mutation.
+pub fn analysis_snapshot_path(root: &Path) -> PathBuf {
+    cache_path(root).with_file_name("analysis-snapshot-v1.json")
+}
+
 fn read_cache_file(path: &Path) -> Option<FingerprintCache> {
     let text = fs::read_to_string(path).ok()?;
     let cache = serde_json::from_str::<FingerprintCache>(&text).ok()?;
@@ -162,6 +201,11 @@ fn read_cache_file(path: &Path) -> Option<FingerprintCache> {
 }
 
 pub fn load_cache(root: &Path) -> FingerprintCache {
+    if let Ok(caches) = transient_root_caches().lock() {
+        if let Some(cache) = caches.get(&root_cache_key(root)) {
+            return cache.clone();
+        }
+    }
     let path = cache_path(root);
     if let Some(cache) = read_cache_file(&path) {
         return cache;
@@ -181,6 +225,9 @@ pub fn load_cache(root: &Path) -> FingerprintCache {
 }
 
 pub fn save_cache(root: &Path, cache: &FingerprintCache) -> Result<(), String> {
+    if let Ok(mut caches) = transient_root_caches().lock() {
+        caches.insert(root_cache_key(root), cache.clone());
+    }
     let _guard = cache_write_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -188,8 +235,12 @@ pub fn save_cache(root: &Path, cache: &FingerprintCache) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Cache path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create cache directory {}: {error}", parent.display()))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Could not create cache directory {}: {error}",
+            parent.display()
+        )
+    })?;
 
     let temp = parent.join(".fingerprints-v1.json.tmp");
     let data = serde_json::to_vec(cache)
@@ -227,6 +278,85 @@ pub fn get_or_build_analysis_with_metrics(
     get_or_build_with_validation(path, cache, false)
 }
 
+/// Stores a complete package resource index while the caller already owns a
+/// decoded DBPF.  The unified scanner uses this to avoid reopening the same
+/// package in the duplicate/conflict phases.  It deliberately computes the
+/// full file SHA-256: this is the identity later used for exact-duplicate
+/// presentation, while mutating operations still hash the source again during
+/// preflight and execution.
+pub fn remember_loaded_package(
+    path: &Path,
+    package: &Package,
+    cache: &mut FingerprintCache,
+) -> Result<CacheBuildMetrics, String> {
+    let total_started = Instant::now();
+    let key = canonical_key(path)?;
+    let (size, modified_ns) = metadata_signature(path)?;
+
+    let hash_started = Instant::now();
+    let (file_sha256, _) =
+        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let hash_ms = hash_started.elapsed().as_millis();
+    let hash_us = hash_started.elapsed().as_micros();
+
+    let quick_started = Instant::now();
+    let quick_fingerprint = quick_fingerprint(path, size)?;
+    let quick_fingerprint_ms = quick_started.elapsed().as_millis();
+    let quick_fingerprint_us = quick_started.elapsed().as_micros();
+
+    let decode_started = Instant::now();
+    let mut resources = Vec::with_capacity(package.entries.len());
+    let mut parse_error = None;
+    for entry in &package.entries {
+        match package.data(entry) {
+            Ok(data) => resources.push(CachedResource {
+                type_id: entry.type_id,
+                group: entry.group,
+                instance: entry.instance,
+                payload_sha256: format!("{:X}", Sha256::digest(&data)),
+                payload_size: data.len(),
+                file_size: entry.file_size,
+                mem_size: entry.mem_size,
+                compressed: entry.compressed,
+            }),
+            Err(error) => {
+                parse_error = Some(format!("{}: {error}", entry.key_string()));
+                break;
+            }
+        }
+    }
+    let resource_decode_ms = decode_started.elapsed().as_millis();
+    let resource_decode_us = decode_started.elapsed().as_micros();
+
+    cache.entries.insert(
+        key.clone(),
+        CachedPackage {
+            path: key,
+            size,
+            modified_ns,
+            file_sha256,
+            quick_fingerprint,
+            dbpf_major: Some(package.major),
+            dbpf_minor: Some(package.minor),
+            resources,
+            parse_error,
+        },
+    );
+
+    Ok(CacheBuildMetrics {
+        total_ms: total_started.elapsed().as_millis(),
+        total_us: total_started.elapsed().as_micros(),
+        hash_ms,
+        hash_us,
+        quick_fingerprint_ms,
+        quick_fingerprint_us,
+        resource_decode_ms,
+        resource_decode_us,
+        integrity_verified: true,
+        ..CacheBuildMetrics::default()
+    })
+}
+
 fn get_or_build_with_validation(
     path: &Path,
     cache: &mut FingerprintCache,
@@ -240,9 +370,8 @@ fn get_or_build_with_validation(
         if existing.size == size && existing.modified_ns == modified_ns {
             if require_integrity {
                 let hash_started = Instant::now();
-                let (file_sha256, _) = sha256_file(path).map_err(|error| {
-                    format!("Could not hash {}: {error}", path.display())
-                })?;
+                let (file_sha256, _) = sha256_file(path)
+                    .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
                 let hash_ms = hash_started.elapsed().as_millis();
                 let hash_us = hash_started.elapsed().as_micros();
                 if existing.file_sha256.eq_ignore_ascii_case(&file_sha256) {
@@ -368,6 +497,7 @@ fn get_or_build_with_validation(
         },
     };
     let resource_decode_ms = decode_started.elapsed().as_millis();
+    let resource_decode_us = decode_started.elapsed().as_micros();
 
     cache.entries.insert(key, built.clone());
     Ok((
@@ -382,6 +512,7 @@ fn get_or_build_with_validation(
             quick_fingerprint_us,
             dbpf_load_ms,
             resource_decode_ms,
+            resource_decode_us,
             integrity_verified: true,
         },
     ))
@@ -425,7 +556,9 @@ pub fn get_cache_info(folder: String) -> Result<CacheInfo, String> {
         .canonicalize()
         .map_err(|error| format!("Could not resolve cache root: {error}"))?;
     let path = cache_path(&root);
-    let bytes = fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0);
+    let bytes = fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     let entries = load_cache(&root).entries.len();
     Ok(CacheInfo {
         path: path.to_string_lossy().to_string(),
@@ -442,6 +575,9 @@ pub fn clear_cache(folder: String) -> Result<bool, String> {
 
     let scope = cache_path(&root).to_string_lossy().to_string();
     crate::operation::run_mutating_sync("cache_write", "clearing", &[scope.as_str()], move || {
+        if let Ok(mut caches) = transient_root_caches().lock() {
+            caches.remove(&root_cache_key(&root));
+        }
         // The learned Fix/Override model is a separate persistent evidence store.
         // Clearing transient DBPF fingerprints must never remove or invalidate it;
         // it is independently rebuilt through fix_signatures commands.
@@ -486,7 +622,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("s3cc-health-cache-{}-{unique}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("s3cc-health-cache-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let package = root.join("empty.package");
         write_empty_dbpf(&package, 0);
@@ -516,7 +653,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("s3cc-analysis-cache-{}-{unique}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-analysis-cache-{}-{unique}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let package = root.join("same-size.package");
         write_empty_dbpf(&package, 0);
