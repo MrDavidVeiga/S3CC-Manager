@@ -1008,6 +1008,13 @@ fn execute_organization_plan_core(
                     item.size,
                 ));
                 operation::update("organize", moved_pairs.len(), None, "moving");
+                #[cfg(test)]
+                if moved_pairs.len() == 1
+                    && std::env::var_os("S3CC_TEST_ABORT_AFTER_FIRST_MOVE").is_some()
+                {
+                    errors.push("test-injected failure after first move".to_string());
+                    break;
+                }
             },
             Err(error) => {
                 errors.push(error);
@@ -1817,6 +1824,356 @@ mod tests {
                 fs::create_dir_all(parent).unwrap();
             }
             fs::write(output, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn physical_fixture_exercises_planner_executor_restore_and_mid_transaction_rollback() {
+        use std::{
+            collections::{BTreeMap, BTreeSet},
+            panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        fn minimal_dbpf(seed: u8) -> Vec<u8> {
+            let mut bytes = vec![0u8; 96];
+            bytes[0..4].copy_from_slice(&0x4650_424Du32.to_le_bytes());
+            bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+            bytes[8] = seed;
+            bytes[60..64].copy_from_slice(&3u32.to_le_bytes());
+            bytes
+        }
+
+        fn write_package(path: &Path, seed: u8) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, minimal_dbpf(seed)).unwrap();
+        }
+
+        fn inventory(root: &Path) -> BTreeMap<String, usize> {
+            let mut result = BTreeMap::new();
+            for entry in walkdir::WalkDir::new(root)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let (hash, size) = sha256_file(entry.path()).unwrap();
+                let key = format!("{hash}:{size}");
+                *result.entry(key).or_insert(0) += 1;
+            }
+            result
+        }
+
+        fn assert_unique_ready_paths(root: &Path, plan: &OrganizationPlan) {
+            let mut sources = BTreeSet::new();
+            let mut destinations = BTreeSet::new();
+            for item in plan.items.iter().filter(|item| item.plan_status.starts_with("ready")) {
+                let source = normalized_path_key(root, Path::new(&item.source_path));
+                assert!(sources.insert(source), "duplicate ready source: {item:?}");
+                let destination = normalized_path_key(
+                    root,
+                    Path::new(item.destination_path.as_deref().unwrap()),
+                );
+                assert!(
+                    destinations.insert(destination),
+                    "duplicate ready destination: {item:?}"
+                );
+            }
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("s3cc-physical-e2e-{}-{nonce}", std::process::id()));
+        let model = base.join("Model").join("Packages");
+        let mods = base.join("Fixture Mods");
+        let packages = mods.join("Packages");
+        let canonical_relative = PathBuf::from("Sliders")
+            .join("Rosto")
+            .join("Sobrancelhas")
+            .join("Canonical.package");
+        let canonical_model = model.join(&canonical_relative);
+        let canonical_fixture = packages.join(&canonical_relative);
+        let legacy_duplicate = packages.join("#6 Sliders").join("Canonical.package");
+        let nested_duplicate = packages
+            .join("#Duplicados")
+            .join("OldBucket")
+            .join("Canonical.package");
+        let disabled = packages.join("Legacy").join("Review.package.disabled");
+        let conflicting_a = packages.join("Legacy").join("Same.package");
+        let conflicting_b = packages.join("Other").join("Same.package");
+        let auxiliary = packages.join("Legacy").join("readme.txt");
+        let old_empty = packages.join("#6 Sliders").join("Empty").join("Nested");
+        let official_empty = packages.join("Sliders").join("Chapéus");
+        let root_string = packages.to_string_lossy().into_owned();
+        let model_string = model.to_string_lossy().into_owned();
+        let index_path = base.join("manual-model-index.json");
+        let selected_roots = vec![
+            packages.join("#6 Sliders"),
+            packages.join("#Duplicados"),
+            packages.join("Legacy"),
+            packages.join("Other"),
+        ];
+        let selected = selected_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        let test_result = catch_unwind(AssertUnwindSafe(|| {
+            fs::create_dir_all(&model).unwrap();
+            fs::create_dir_all(&packages).unwrap();
+            fs::create_dir_all(&official_empty).unwrap();
+            fs::create_dir_all(model.join("Sliders").join("Chapéus")).unwrap();
+            fs::create_dir_all(model.join("#Sem Categoria")).unwrap();
+            fs::create_dir_all(model.join("#Duplicados")).unwrap();
+            write_package(&canonical_model, 0);
+            write_package(&canonical_fixture, 0);
+            write_package(&legacy_duplicate, 0);
+            write_package(&nested_duplicate, 0);
+            write_package(&disabled, 1);
+            write_package(&conflicting_a, 2);
+            write_package(&conflicting_b, 3);
+            fs::write(&auxiliary, b"fixture auxiliary").unwrap();
+            fs::create_dir_all(&old_empty).unwrap();
+
+            std::env::set_var("S3CC_MANUAL_MODEL_PACKAGES", &model_string);
+            std::env::set_var("S3CC_MANUAL_MODEL_INDEX", &index_path);
+            std::env::set_var("S3CC_REFRESH_MANUAL_MODEL", "1");
+
+            let scan = tauri::async_runtime::block_on(crate::scanner::scan_packages(
+                root_string.clone(),
+                AppLanguage::Pt,
+            ))
+            .expect("physical fixture scan");
+            assert_eq!(scan.stats.packages, 6);
+            assert!(scan.stats.package_reads >= 6);
+            let cached_before = crate::scanner::cached_scan_for(&packages, AppLanguage::Pt)
+                .expect("scanner cache after application scan");
+
+            let plan = crate::planner::build_organization_plan_with_cfg_core(
+                root_string.clone(),
+                AppLanguage::Pt,
+                selected.clone(),
+                false,
+            )
+            .expect("physical fixture organization plan");
+            assert!(plan.can_execute, "plan unexpectedly blocked: {plan:?}");
+            assert_unique_ready_paths(&packages, &plan);
+            let nested_source_key = normalized_path_key(&packages, &nested_duplicate);
+            assert_eq!(
+                plan.items
+                    .iter()
+                    .filter(|item| {
+                        item.plan_status.starts_with("ready")
+                            && normalized_path_key(&packages, Path::new(&item.source_path))
+                                == nested_source_key
+                    })
+                    .count(),
+                1,
+                "nested duplicate source must be executable once"
+            );
+            assert!(plan.items.iter().any(|item| {
+                item.source_path.ends_with("Other\\Same.package")
+                    && item.plan_status == "collision_different_content"
+            }));
+            // This is the same data path used by Visualizar Plano: a second
+            // preview must consume the valid scan cache instead of reopening
+            // the DBPF corpus.
+            std::env::remove_var("S3CC_REFRESH_MANUAL_MODEL");
+            let second_plan = crate::planner::build_organization_plan_with_cfg_core(
+                root_string.clone(),
+                AppLanguage::Pt,
+                selected.clone(),
+                false,
+            )
+            .expect("second physical fixture plan");
+            let cached_after = crate::scanner::cached_scan_for(&packages, AppLanguage::Pt)
+                .expect("scanner cache after two previews");
+            assert_eq!(cached_before.stats.package_reads, cached_after.stats.package_reads);
+            assert_eq!(cached_before.stats.dbpf_load_ms, cached_after.stats.dbpf_load_ms);
+            assert_unique_ready_paths(&packages, &second_plan);
+
+            let before_inventory = inventory(&packages);
+            let result = execute_organization_plan_core(
+                plan,
+                AppLanguage::Pt,
+                false,
+                None,
+                Vec::new(),
+            )
+            .expect("physical fixture organization");
+            assert_eq!(result.status, "COMPLETE");
+            assert!(result.errors.is_empty(), "unexpected execution warnings: {:?}", result.errors);
+            assert!(result.moved > 0);
+            assert!(!packages.join("#6 Sliders").exists());
+            assert!(official_empty.is_dir(), "canonical empty directory was removed");
+            assert!(conflicting_b.is_file(), "different-content collision was overwritten");
+            assert!(packages
+                .join("#Sem Categoria")
+                .join("Review.package.disabled")
+                .is_file());
+            assert!(packages
+                .join("#Sem Categoria")
+                .join("Arquivos Auxiliares")
+                .join("Legacy")
+                .join("readme.txt")
+                .is_file());
+            assert!(packages.join("Sliders").join("Rosto").join("Sobrancelhas").join("Canonical.package").is_file());
+            assert!(packages.join("#Duplicados").join("Canonical.package.duplicated").is_file());
+            assert!(walkdir::WalkDir::new(packages.join("#Duplicados"))
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+                .filter(|entry| entry.file_type().is_file())
+                .all(|entry| entry.path().parent() == Some(packages.join("#Duplicados").as_path())));
+            assert_eq!(before_inventory.values().sum::<usize>(), inventory(&packages).values().sum::<usize>());
+
+            // No second organization should propose a new executable move.
+            crate::scanner::invalidate_latest_scan_for(&packages);
+            let second_scan = tauri::async_runtime::block_on(crate::scanner::scan_packages(
+                root_string.clone(),
+                AppLanguage::Pt,
+            ))
+            .expect("post-organization scan");
+            assert!(second_scan.stats.packages >= 5);
+            let idempotent_selected = selected
+                .iter()
+                .filter(|path| Path::new(path).is_dir())
+                .cloned()
+                .collect::<Vec<_>>();
+            let idempotent_plan = crate::planner::build_organization_plan_with_cfg_core(
+                root_string.clone(),
+                AppLanguage::Pt,
+                idempotent_selected,
+                false,
+            )
+            .expect("idempotent physical fixture plan");
+            assert_eq!(
+                idempotent_plan
+                    .items
+                    .iter()
+                    .filter(|item| item.plan_status.starts_with("ready"))
+                    .count(),
+                0,
+                "second organization proposed new moves: {idempotent_plan:?}"
+            );
+            assert!(idempotent_plan.items.iter().any(|item| {
+                item.plan_status == "collision_different_content"
+                    && item.source_path.ends_with("Other\\Same.package")
+            }));
+
+            let manifest = result.manifest_path.clone().expect("restore manifest");
+            let restore_preview = crate::restore::preview_restore(
+                manifest.clone(),
+                AppLanguage::Pt,
+                Some(root_string.clone()),
+            )
+            .expect("physical fixture restore preview");
+            assert!(restore_preview.can_execute);
+            let restored = crate::restore::execute_restore(
+                manifest,
+                AppLanguage::Pt,
+                Some(root_string.clone()),
+                true,
+            )
+            .expect("physical fixture restore");
+            assert_eq!(restored.status, "RESTORED");
+            assert_eq!(before_inventory, inventory(&packages));
+            assert!(legacy_duplicate.is_file());
+            assert!(nested_duplicate.is_file());
+            assert!(disabled.is_file());
+            assert!(auxiliary.is_file());
+            assert!(legacy_duplicate.parent().unwrap().is_dir());
+            assert!(nested_duplicate.parent().unwrap().is_dir());
+
+            // Reproduce a failure after one real rename. The hook is compiled
+            // only into tests; production builds retain the normal executor.
+            let rollback_source_a = packages.join("Rollback A").join("a.package");
+            let rollback_source_b = packages.join("Rollback B").join("b.package");
+            write_package(&rollback_source_a, 7);
+            write_package(&rollback_source_b, 8);
+            let rollback_root = packages.canonicalize().unwrap();
+            let rollback_source_a = rollback_source_a.canonicalize().unwrap();
+            let rollback_source_b = rollback_source_b.canonicalize().unwrap();
+            let rollback_destination_a = rollback_root.join("Rollback Dest").join("a.package");
+            let rollback_destination_b = rollback_root.join("Rollback Dest").join("b.package");
+            let (hash_a, size_a) = sha256_file(&rollback_source_a).unwrap();
+            let (hash_b, size_b) = sha256_file(&rollback_source_b).unwrap();
+            let rollback_plan = OrganizationPlan {
+                root: rollback_root.to_string_lossy().into_owned(),
+                items: vec![
+                    PlanItem {
+                        id: "rollback-a".into(),
+                        name: "a.package".into(),
+                        source_path: rollback_source_a.to_string_lossy().into_owned(),
+                        source_relative_path: "Rollback A\\a.package".into(),
+                        destination_path: Some(rollback_destination_a.to_string_lossy().into_owned()),
+                        destination_relative_path: Some("Rollback Dest\\a.package".into()),
+                        classification_status: "classified".into(),
+                        classification_reason: None,
+                        plan_status: "ready".into(),
+                        sha256: Some(hash_a),
+                        size: size_a,
+                        warnings: Vec::new(),
+                    },
+                    PlanItem {
+                        id: "rollback-b".into(),
+                        name: "b.package".into(),
+                        source_path: rollback_source_b.to_string_lossy().into_owned(),
+                        source_relative_path: "Rollback B\\b.package".into(),
+                        destination_path: Some(rollback_destination_b.to_string_lossy().into_owned()),
+                        destination_relative_path: Some("Rollback Dest\\b.package".into()),
+                        classification_status: "classified".into(),
+                        classification_reason: None,
+                        plan_status: "ready".into(),
+                        sha256: Some(hash_b),
+                        size: size_b,
+                        warnings: Vec::new(),
+                    },
+                ],
+                stats: crate::planner::PlanStats { selected: 2, ready: 2, ..Default::default() },
+                directories_to_create: vec!["Rollback Dest".into()],
+                protected_empty_directories: Vec::new(),
+                cleanup_roots: vec!["Rollback A".into(), "Rollback B".into()],
+                resource_cfg_update: None,
+                manifest_preview: String::new(),
+                can_execute: true,
+                analysis_before: OrganizationAnalysisSnapshot::from_scan(
+                    "analysis_before",
+                    &crate::scanner::ScanStats::default(),
+                ),
+            };
+            std::env::set_var("S3CC_TEST_ABORT_AFTER_FIRST_MOVE", "1");
+            let rolled_back = execute_organization_plan_core(
+                rollback_plan,
+                AppLanguage::Pt,
+                false,
+                None,
+                Vec::new(),
+            )
+            .expect("injected rollback should return a transaction result");
+            std::env::remove_var("S3CC_TEST_ABORT_AFTER_FIRST_MOVE");
+            assert_eq!(rolled_back.status, "ROLLED_BACK");
+            assert_eq!(rolled_back.rolled_back, 1);
+            assert!(rollback_source_a.is_file() && rollback_source_b.is_file());
+            assert!(!rollback_destination_a.exists() && !rollback_destination_b.exists());
+            assert_eq!(sha256_file(&rollback_source_a).unwrap().1, size_a);
+            assert_eq!(sha256_file(&rollback_source_b).unwrap().1, size_b);
+        }));
+
+        std::env::remove_var("S3CC_MANUAL_MODEL_PACKAGES");
+        std::env::remove_var("S3CC_MANUAL_MODEL_INDEX");
+        std::env::remove_var("S3CC_REFRESH_MANUAL_MODEL");
+        std::env::remove_var("S3CC_TEST_ABORT_AFTER_FIRST_MOVE");
+        let _ = fs::remove_dir_all(&base);
+        if let Err(payload) = test_result {
+            resume_unwind(payload);
         }
     }
 }

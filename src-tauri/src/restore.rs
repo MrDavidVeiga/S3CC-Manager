@@ -1,7 +1,7 @@
 use crate::{
     workspace::ensure_writable,
     i18n::AppLanguage,
-    manifest::{read_manifest, replace_manifest_atomic, sha256_file, RestoreManifest},
+    manifest::{read_manifest, replace_manifest_atomic, sha256_file, RestoreEntry, RestoreManifest},
     resource_cfg_update::restore_cfg_if_safe,
 };
 use serde::Serialize;
@@ -76,10 +76,13 @@ pub struct RestoreExecutionResult {
 }
 
 fn is_package(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.eq_ignore_ascii_case("package"))
-        .unwrap_or(false)
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    name.ends_with(".package")
+        || name.ends_with(".package.disabled")
+        || name.ends_with(".package.duplicated")
 }
 
 fn relative_key(path: &Path) -> String {
@@ -91,6 +94,10 @@ fn relative_key(path: &Path) -> String {
         .collect::<Vec<_>>()
         .join("\\")
         .to_ascii_lowercase()
+}
+
+fn same_relative_path(left: &Path, right: &Path) -> bool {
+    relative_key(left) == relative_key(right)
 }
 
 fn safe_relative(path: &Path) -> bool {
@@ -130,12 +137,30 @@ fn path_is_within_root(root: &Path, candidate: &Path) -> bool {
         && candidate.components().count() >= root.components().count()
 }
 
-fn scan_current_packages(root: &Path) -> Result<Vec<CurrentPackage>, String> {
+fn scan_current_packages(
+    root: &Path,
+    tracked_entries: &[RestoreEntry],
+) -> Result<Vec<CurrentPackage>, String> {
     let mut packages = Vec::new();
 
     for entry in WalkDir::new(root).follow_links(false).into_iter() {
         let entry = entry.map_err(|error| format!("Could not scan restore root: {error}"))?;
-        if !entry.file_type().is_file() || !is_package(entry.path()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let relative_before_canonical = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|_| format!("Could not make relative path for {}", entry.path().display()))?;
+        let is_manifest_tracked = tracked_entries.iter().any(|tracked| {
+            same_relative_path(&tracked.original_relative_path, relative_before_canonical)
+                || same_relative_path(&tracked.organized_relative_path, relative_before_canonical)
+        });
+        // Restore must recognize inactive duplicate markers and non-package
+        // companions that this transaction explicitly recorded, while still
+        // ignoring unrelated user documents during the "new files" pass.
+        if !is_package(entry.path()) && !is_manifest_tracked {
             continue;
         }
 
@@ -242,7 +267,7 @@ pub fn preview_restore(
         }
     }
 
-    let current = scan_current_packages(&root)?;
+    let current = scan_current_packages(&root, &manifest.entries)?;
     let by_relative = current
         .iter()
         .enumerate()
