@@ -555,7 +555,11 @@ fn cleanup_scope_roots(root: &Path, plan: &OrganizationPlan) -> Vec<PathBuf> {
         let canonical = candidate
             .canonicalize()
             .unwrap_or_else(|_| candidate.clone());
-        if canonical.is_dir() && canonical.starts_with(root) {
+        let root_key = normalized_path_key(root, root);
+        let canonical_key = normalized_path_key(root, &canonical);
+        let is_within_root = canonical_key == root_key
+            || canonical_key.starts_with(&(root_key.clone() + "\\"));
+        if canonical.is_dir() && is_within_root {
             roots.insert(canonical);
         }
     }

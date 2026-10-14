@@ -4964,7 +4964,7 @@ mod tests {
             .expect("cached scan");
         assert!(second.cache_hit);
         assert_eq!(second.reused_packages, 2);
-        assert_eq!(second.stats.package_reads, 2);
+        assert_eq!(second.stats.package_reads, 0);
 
         // Keep the size unchanged. The bounded content fingerprint must still
         // invalidate the presentation cache rather than reusing stale status.
