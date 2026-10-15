@@ -50,11 +50,15 @@ pub struct CacheBuildMetrics {
     pub total_us: u128,
     pub hash_ms: u128,
     pub hash_us: u128,
+    pub hash_exclusive_us: u128,
+    pub hash_wait_us: u128,
     pub quick_fingerprint_ms: u128,
     pub quick_fingerprint_us: u128,
     pub dbpf_load_ms: u128,
     pub resource_decode_ms: u128,
     pub resource_decode_us: u128,
+    pub resource_decode_exclusive_us: u128,
+    pub resource_decode_wait_us: u128,
     pub integrity_verified: bool,
 }
 
@@ -428,7 +432,11 @@ pub fn remember_loaded_package_with_result(
 
     let hash_started = Instant::now();
     let hash_path = path.to_path_buf();
-    let hash_worker = thread::spawn(move || sha256_file(&hash_path));
+    let hash_worker = thread::spawn(move || {
+        let exclusive_started = Instant::now();
+        let result = sha256_file(&hash_path);
+        (result, exclusive_started.elapsed().as_micros())
+    });
 
     let quick_started = Instant::now();
     let quick_fingerprint = quick_fingerprint(path, size)?;
@@ -437,11 +445,12 @@ pub fn remember_loaded_package_with_result(
 
     let decode_started = Instant::now();
     let decode_result = decode_resource_fingerprints(package);
-    let (file_sha256, _) = hash_worker
+    let (hash_result, hash_exclusive_us) = hash_worker
         .join()
-        .map_err(|_| "file hash worker panicked".to_string())?
+        .map_err(|_| "file hash worker panicked".to_string())?;
+    let (file_sha256, _) = hash_result
         .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
-    let (resources, parse_error) = decode_result?;
+    let (resources, parse_error, resource_decode_exclusive_us) = decode_result?;
     let hash_ms = hash_started.elapsed().as_millis();
     let hash_us = hash_started.elapsed().as_micros();
     let resource_decode_ms = decode_started.elapsed().as_millis();
@@ -467,10 +476,15 @@ pub fn remember_loaded_package_with_result(
             total_us: total_started.elapsed().as_micros(),
             hash_ms,
             hash_us,
+            hash_exclusive_us,
+            hash_wait_us: hash_us.saturating_sub(hash_exclusive_us),
             quick_fingerprint_ms,
             quick_fingerprint_us,
             resource_decode_ms,
             resource_decode_us,
+            resource_decode_exclusive_us,
+            resource_decode_wait_us: resource_decode_us
+                .saturating_sub(resource_decode_exclusive_us),
             integrity_verified: true,
             ..CacheBuildMetrics::default()
         },
@@ -488,9 +502,9 @@ pub fn remember_loaded_package_with_result(
 /// scan into an unbounded thread or file-handle fan-out.
 fn decode_resource_fingerprints(
     package: &Package,
-) -> Result<(Vec<CachedResource>, Option<String>), String> {
+) -> Result<(Vec<CachedResource>, Option<String>, u128), String> {
     if package.entries.is_empty() {
-        return Ok((Vec::new(), None));
+        return Ok((Vec::new(), None, 0));
     }
 
     let worker_limit = thread::available_parallelism()
@@ -501,12 +515,14 @@ fn decode_resource_fingerprints(
     let chunk_size = package.entries.len().div_ceil(worker_count);
     let mut slots = vec![None; package.entries.len()];
     let mut first_error = None;
+    let mut exclusive_us = 0u128;
 
     thread::scope(|scope| {
         let mut workers = Vec::with_capacity(worker_count);
         for (chunk_index, entries) in package.entries.chunks(chunk_size).enumerate() {
             workers.push(
-                scope.spawn(move || -> Result<Vec<(usize, CachedResource)>, String> {
+                scope.spawn(move || -> Result<(Vec<(usize, CachedResource)>, u128), String> {
+                    let worker_started = Instant::now();
                     let mut data_file = File::open(&package.path).map_err(|error| {
                         format!("Could not reopen {}: {error}", package.path.display())
                     })?;
@@ -530,14 +546,15 @@ fn decode_resource_fingerprints(
                             },
                         ));
                     }
-                    Ok(results)
+                    Ok((results, worker_started.elapsed().as_micros()))
                 }),
             );
         }
 
         for worker in workers {
             match worker.join() {
-                Ok(Ok(results)) => {
+                Ok(Ok((results, worker_us))) => {
+                    exclusive_us += worker_us;
                     for (index, resource) in results {
                         slots[index] = Some(resource);
                     }
@@ -557,9 +574,13 @@ fn decode_resource_fingerprints(
     });
 
     if let Some(error) = first_error {
-        return Ok((Vec::new(), Some(error)));
+        return Ok((Vec::new(), Some(error), exclusive_us));
     }
-    Ok((slots.into_iter().flatten().collect::<Vec<CachedResource>>(), None))
+    Ok((
+        slots.into_iter().flatten().collect::<Vec<CachedResource>>(),
+        None,
+        exclusive_us,
+    ))
 }
 
 fn get_or_build_with_validation(
@@ -726,11 +747,15 @@ fn get_or_build_with_validation(
             total_us: total_started.elapsed().as_micros(),
             hash_ms,
             hash_us,
+            hash_exclusive_us: hash_us,
+            hash_wait_us: 0,
             quick_fingerprint_ms,
             quick_fingerprint_us,
             dbpf_load_ms,
             resource_decode_ms,
             resource_decode_us,
+            resource_decode_exclusive_us: resource_decode_us,
+            resource_decode_wait_us: 0,
             integrity_verified: true,
         },
     ))

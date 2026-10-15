@@ -135,6 +135,13 @@ fn copy_blocks(out: &mut Vec<u8>, offset: usize, mut len: usize) {
 }
 
 fn copy_bytes(out: &mut Vec<u8>, offset: usize, mut len: usize) {
+    if offset == 1 {
+        let value = *out
+            .last()
+            .expect("validated LZ copy offset must reference output");
+        out.resize(out.len() + len, value);
+        return;
+    }
     while len > 0 {
         // Copy one complete available pattern at a time. Recomputing the
         // source after each extension preserves the overlapping LZ semantics

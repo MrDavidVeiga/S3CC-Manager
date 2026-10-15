@@ -100,6 +100,10 @@ pub struct ScanStats {
     pub dbpf_load_ms: u128,
     pub resource_decode_ms: u128,
     #[serde(default)]
+    pub resource_decode_exclusive_ms: u128,
+    #[serde(default)]
+    pub resource_decode_wait_ms: u128,
+    #[serde(default)]
     pub reference_catalog_ms: u128,
     #[serde(default)]
     pub project_grouping_ms: u128,
@@ -108,6 +112,10 @@ pub struct ScanStats {
     /// executor/preflight still hashes again before a write.
     #[serde(default)]
     pub full_hash_ms: u128,
+    #[serde(default)]
+    pub full_hash_exclusive_ms: u128,
+    #[serde(default)]
+    pub full_hash_wait_ms: u128,
     pub package_reads: usize,
     pub cache_hit: bool,
     pub reused_packages: usize,
@@ -280,13 +288,25 @@ fn remember_latest_scan(result: &ScanResult, language: AppLanguage) {
 }
 
 pub(crate) fn current_package_signatures(root: &Path) -> HashMap<String, (u64, u128, String)> {
-    WalkDir::new(root)
+    let mut paths = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file() && package_extension(entry.path()))
-        .filter_map(|entry| {
-            let path = stable_path(entry.path());
+        .map(|entry| entry.into_path())
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    #[cfg(test)]
+    if let Some(limit) = std::env::var("S3CC_PROFILE_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        paths.truncate(limit);
+    }
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let path = stable_path(&path);
             let signature = cache::analysis_file_fingerprint(&path).ok()?;
             Some((path.to_string_lossy().to_string(), signature))
         })
@@ -3991,9 +4011,36 @@ struct ScanTiming {
     package_reads: usize,
     dbpf_load_us: u128,
     resource_decode_us: u128,
+    resource_decode_exclusive_us: u128,
+    resource_decode_wait_us: u128,
     full_hash_us: u128,
+    full_hash_exclusive_us: u128,
+    full_hash_wait_us: u128,
     reference_catalog_us: u128,
     project_grouping_us: u128,
+}
+
+impl ScanTiming {
+    fn add(&mut self, other: Self) {
+        self.package_reads += other.package_reads;
+        self.dbpf_load_us += other.dbpf_load_us;
+        self.resource_decode_us += other.resource_decode_us;
+        self.resource_decode_exclusive_us += other.resource_decode_exclusive_us;
+        self.resource_decode_wait_us += other.resource_decode_wait_us;
+        self.full_hash_us += other.full_hash_us;
+        self.full_hash_exclusive_us += other.full_hash_exclusive_us;
+        self.full_hash_wait_us += other.full_hash_wait_us;
+        self.reference_catalog_us += other.reference_catalog_us;
+        self.project_grouping_us += other.project_grouping_us;
+    }
+}
+
+struct ScanAccumulation {
+    item_slots: Vec<Option<ScanPackageItem>>,
+    cache_entries: HashMap<String, cache::CachedPackage>,
+    slider_instances: HashSet<u64>,
+    timing: ScanTiming,
+    profile_packages: Vec<(u128, String)>,
 }
 
 fn scan_one(
@@ -4110,7 +4157,12 @@ fn scan_one_with_index(
                 match cache::remember_loaded_package_with_result(path, &package, shared_index) {
                     Ok((cached, metrics)) => {
                         timing.full_hash_us += metrics.hash_us;
+                        timing.full_hash_exclusive_us += metrics.hash_exclusive_us;
+                        timing.full_hash_wait_us += metrics.hash_wait_us;
                         timing.resource_decode_us += metrics.resource_decode_us;
+                        timing.resource_decode_exclusive_us +=
+                            metrics.resource_decode_exclusive_us;
+                        timing.resource_decode_wait_us += metrics.resource_decode_wait_us;
                         shared_cached = Some(cached);
                         None
                     }
@@ -4757,7 +4809,6 @@ fn scan_packages_core_with_progress(
     }
 
     let reference_catalogs = reference_catalog::load_catalogs();
-    let mut slider_instances = HashSet::<u64>::new();
     let fix_index = fix_signatures::load_persistent_index();
     let mut timing = ScanTiming::default();
     let previous = previous_scan_for(&root, language);
@@ -4816,44 +4867,74 @@ fn scan_packages_core_with_progress(
         }
     }
 
-    let worker_count = thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(2)
-        .clamp(1, 4)
+    // A dynamic queue prevents one large/compressed package at the end of a
+    // fixed chunk from holding the whole scan open. Two package workers keep
+    // the nested resource/hash workers bounded as well; tests may override
+    // this value to compare configurations without changing release policy.
+    let configured_worker_count = {
+        #[cfg(test)]
+        {
+            std::env::var("S3CC_PACKAGE_WORKERS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
+    };
+    let worker_count = configured_worker_count.unwrap_or_else(|| {
+            thread::available_parallelism()
+                .map(|count| count.get().div_ceil(3))
+                .unwrap_or(2)
+                .clamp(1, 4)
+        })
         .min(work.len().max(1));
-    let chunk_size = work.len().max(1).div_ceil(worker_count);
+    let next_work = Arc::new(AtomicUsize::new(0));
     let completed = Arc::new(AtomicUsize::new(reused_packages));
+    let active_workers = Arc::new(AtomicUsize::new(0));
     let cancelled = Arc::new(AtomicUsize::new(0));
-    let results = Mutex::new(Vec::<(
-        usize,
-        ScanPackageItem,
-        cache::FingerprintCache,
-        ScanTiming,
-        HashSet<u64>,
-        u128,
-        String,
-    )>::new());
+    let accumulation = Mutex::new(ScanAccumulation {
+        item_slots,
+        cache_entries: HashMap::new(),
+        slider_instances: HashSet::new(),
+        timing: ScanTiming::default(),
+        profile_packages: Vec::new(),
+    });
     let total_packages = package_paths.len();
+    let persistent_cache = &shared_index;
+    let work_items = &work;
 
     thread::scope(|scope| {
-        for chunk in work.chunks(chunk_size) {
-            let results = &results;
+        for _ in 0..worker_count {
+            let accumulation = &accumulation;
+            let next_work = Arc::clone(&next_work);
             let completed = Arc::clone(&completed);
+            let active_workers = Arc::clone(&active_workers);
             let cancelled = Arc::clone(&cancelled);
             let root = &root;
             let reference_catalogs = reference_catalogs.as_ref();
             let fix_index = fix_index.as_ref();
             scope.spawn(move || {
-                let mut local_results = Vec::new();
                 let mut local_cache = cache::FingerprintCache::default();
                 let mut local_slider_instances = HashSet::new();
-                for (index, path) in chunk {
+                loop {
+                    let Some((index, path)) = work_items.get(
+                        next_work.fetch_add(1, Ordering::Relaxed),
+                    ) else {
+                        break;
+                    };
                     if let Some(kind) = operation_kind {
                         if operation::is_cancelled(kind) {
                             cancelled.store(1, Ordering::Relaxed);
                             break;
                         }
                     }
+                    if let Ok(Some(cached)) = cache::current_cached_entry(path, persistent_cache) {
+                        local_cache.entries.insert(cached.path.clone(), cached);
+                    }
+                    active_workers.fetch_add(1, Ordering::Relaxed);
                     let started = Instant::now();
                     let mut local_timing = ScanTiming::default();
                     let item = scan_one_with_index(
@@ -4874,44 +4955,53 @@ fn scan_packages_core_with_progress(
                             }
                         }
                     }
-                    local_results.push((
-                        *index,
-                        item,
-                        local_cache.clone(),
-                        local_timing,
-                        local_slider_instances.clone(),
-                        started.elapsed().as_micros(),
-                        path.to_string_lossy().into_owned(),
-                    ));
-                    local_cache.entries.clear();
-                    local_slider_instances.clear();
-                }
-                if let Ok(mut output) = results.lock() {
-                    output.extend(local_results);
+                    if let Ok(mut output) = accumulation.lock() {
+                        output.item_slots[*index] = Some(item);
+                        output.timing.add(local_timing);
+                        output.slider_instances.extend(local_slider_instances.drain());
+                        output.cache_entries.extend(std::mem::take(&mut local_cache.entries));
+                        if profile_enabled {
+                            output.profile_packages.push((
+                                started.elapsed().as_micros(),
+                                path.to_string_lossy().into_owned(),
+                            ));
+                        }
+                    }
+                    active_workers.fetch_sub(1, Ordering::Relaxed);
                 }
             });
         }
     });
+    let accumulation = accumulation
+        .into_inner()
+        .map_err(|_| "scanner accumulation lock poisoned".to_string())?;
     if cancelled.load(Ordering::Relaxed) != 0 {
+        if profile_enabled {
+            eprintln!(
+                "scanner_profile_partial completed={} total={} active_workers={} package_reads={} dbpf_load_ms={} resource_decode_ms={} resource_decode_exclusive_ms={} resource_decode_wait_ms={} full_hash_ms={} full_hash_exclusive_ms={} full_hash_wait_ms={}",
+                completed.load(Ordering::Relaxed),
+                total_packages,
+                active_workers.load(Ordering::Relaxed),
+                accumulation.timing.package_reads,
+                accumulation.timing.dbpf_load_us / 1_000,
+                accumulation.timing.resource_decode_us / 1_000,
+                accumulation.timing.resource_decode_exclusive_us / 1_000,
+                accumulation.timing.resource_decode_wait_us / 1_000,
+                accumulation.timing.full_hash_us / 1_000,
+                accumulation.timing.full_hash_exclusive_us / 1_000,
+                accumulation.timing.full_hash_wait_us / 1_000,
+            );
+        }
         return Err(CANCELLED_ERROR.to_string());
     }
-    if let Ok(results) = results.into_inner() {
-        for (index, item, local_cache, local_timing, local_sliders, elapsed, path) in results {
-            item_slots[index] = Some(item);
-            slider_instances.extend(local_sliders);
-            timing.package_reads += local_timing.package_reads;
-            timing.dbpf_load_us += local_timing.dbpf_load_us;
-            timing.resource_decode_us += local_timing.resource_decode_us;
-            timing.full_hash_us += local_timing.full_hash_us;
-            timing.reference_catalog_us += local_timing.reference_catalog_us;
-            timing.project_grouping_us += local_timing.project_grouping_us;
-            for (key, entry) in local_cache.entries {
-                shared_index.entries.insert(key, entry);
-            }
-            if profile_enabled {
-                profile_packages.push((elapsed, path));
-            }
-        }
+    item_slots = accumulation.item_slots;
+    let slider_instances = accumulation.slider_instances;
+    timing.add(accumulation.timing);
+    for (key, entry) in accumulation.cache_entries {
+        shared_index.entries.insert(key, entry);
+    }
+    if profile_enabled {
+        profile_packages = accumulation.profile_packages;
     }
     let mut items = item_slots
         .into_iter()
@@ -5002,9 +5092,13 @@ fn scan_packages_core_with_progress(
     stats.postprocess_ms = postprocess_ms;
     stats.dbpf_load_ms = timing.dbpf_load_us / 1_000;
     stats.resource_decode_ms = timing.resource_decode_us / 1_000;
+    stats.resource_decode_exclusive_ms = timing.resource_decode_exclusive_us / 1_000;
+    stats.resource_decode_wait_ms = timing.resource_decode_wait_us / 1_000;
     stats.reference_catalog_ms = timing.reference_catalog_us / 1_000;
     stats.project_grouping_ms = timing.project_grouping_us / 1_000;
     stats.full_hash_ms = timing.full_hash_us / 1_000;
+    stats.full_hash_exclusive_ms = timing.full_hash_exclusive_us / 1_000;
+    stats.full_hash_wait_ms = timing.full_hash_wait_us / 1_000;
     stats.package_reads = timing.package_reads;
     stats.cache_hit = false;
     stats.reused_packages = reused_packages;
@@ -5012,15 +5106,20 @@ fn scan_packages_core_with_progress(
     if profile_enabled {
         profile_packages.sort_by(|left, right| right.0.cmp(&left.0));
         eprintln!(
-            "scanner_profile packages={} reused={} discovery_ms={} classification_ms={} postprocess_ms={} dbpf_load_ms={} resource_decode_ms={} full_hash_ms={} reference_catalog_ms={} project_grouping_ms={} cache_hits={} cache_misses={}",
+            "scanner_profile packages={} reused={} active_workers={} discovery_ms={} classification_ms={} postprocess_ms={} dbpf_load_ms={} resource_decode_ms={} resource_decode_exclusive_ms={} resource_decode_wait_ms={} full_hash_ms={} full_hash_exclusive_ms={} full_hash_wait_ms={} reference_catalog_ms={} project_grouping_ms={} cache_hits={} cache_misses={}",
             stats.packages,
             stats.reused_packages,
+            active_workers.load(Ordering::Relaxed),
             stats.discovery_ms,
             stats.classification_ms,
             stats.postprocess_ms,
             stats.dbpf_load_ms,
             stats.resource_decode_ms,
+            stats.resource_decode_exclusive_ms,
+            stats.resource_decode_wait_ms,
             stats.full_hash_ms,
+            stats.full_hash_exclusive_ms,
+            stats.full_hash_wait_ms,
             stats.reference_catalog_ms,
             stats.project_grouping_ms,
             stats.cache_hit,
@@ -5198,7 +5297,7 @@ mod tests {
             return;
         };
         let language = crate::i18n::AppLanguage::Pt;
-        let result = super::scan_packages_core_quiet_progress(root, language, None)
+        let result = super::scan_packages_core_with_progress(root, language, None, false, true)
             .expect("external scanner profile should complete");
         eprintln!(
             "scanner_profile_result packages={} total_ms={} package_reads={} reused={}",
