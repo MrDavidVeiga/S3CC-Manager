@@ -936,6 +936,39 @@ pub async fn analyze_duplicates(folder: String, selected_paths: Option<Vec<Strin
 mod tests {
     use super::*;
 
+    #[test]
+    fn profile_external_duplicate_analysis_when_requested() {
+        let Ok(root) = std::env::var("S3CC_DUPLICATES_PROFILE_ROOT") else {
+            return;
+        };
+        let limit = std::env::var("S3CC_ANALYSIS_PROFILE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(200);
+        let mut paths = WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && is_package(entry.path()))
+            .map(|entry| entry.path().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|path| path.to_ascii_lowercase());
+        paths.truncate(limit);
+        let started = Instant::now();
+        let result = analyze_duplicates_core(root, Some(paths), None)
+            .expect("external duplicate profile should complete");
+        eprintln!(
+            "duplicates_profile packages={} total_ms={} hashing_ms={} dbpf_load_ms={} resource_decode_ms={} cache_hits={} cache_misses={}",
+            result.stats.packages_scanned,
+            started.elapsed().as_millis(),
+            result.stats.hashing_ms,
+            result.stats.dbpf_load_ms,
+            result.stats.resource_decode_ms,
+            result.stats.cache_hits,
+            result.stats.cache_misses,
+        );
+    }
+
     fn resource(type_id: u32, instance: u64, hash: &str) -> ResourceFingerprint {
         ResourceFingerprint {
             type_id,

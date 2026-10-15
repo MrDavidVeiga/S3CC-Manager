@@ -1118,6 +1118,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn profile_external_conflict_analysis_when_requested() {
+        let Ok(root) = std::env::var("S3CC_CONFLICTS_PROFILE_ROOT") else {
+            return;
+        };
+        let limit = std::env::var("S3CC_ANALYSIS_PROFILE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(200);
+        let mut paths = WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && is_package(entry.path()))
+            .map(|entry| entry.path().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|path| path.to_ascii_lowercase());
+        paths.truncate(limit);
+        let started = Instant::now();
+        let result = analyze_conflicts_core(root, Some(paths), None)
+            .expect("external conflict profile should complete");
+        eprintln!(
+            "conflicts_profile packages={} pairs={} total_ms={} hashing_ms={} dbpf_load_ms={} resource_decode_ms={} cache_hits={} cache_misses={}",
+            result.stats.packages_scanned,
+            result.stats.package_pairs,
+            started.elapsed().as_millis(),
+            result.stats.hashing_ms,
+            result.stats.dbpf_load_ms,
+            result.stats.resource_decode_ms,
+            result.stats.cache_hits,
+            result.stats.cache_misses,
+        );
+    }
+
+    #[test]
     fn mixed_text_and_unknown_overlap_requires_review_not_high_warning() {
         let impacts = [
             "potential_conflict".to_string(),

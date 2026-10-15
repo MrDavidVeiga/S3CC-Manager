@@ -25,7 +25,9 @@ assert(read("src-tauri/src/cc_catalog.rs").includes('rename = "save_cc_catalog"'
 assert(read("src-tauri/src/health.rs").includes('rename = "remove_empty_folder"'), "Empty-folder removal needs mutation coordination.");
 assert(scanner.includes("file_signatures") && scanner.includes("latest_scan_is_current"), "In-memory scans must validate external changes.");
 assert(scanner.includes("PersistentScan") && cache.includes("analysis-snapshot-v1.json"), "Scanner classifications must survive restarts only when their signatures remain current.");
-assert(unified.includes("analyze_duplicates_core") && unified.includes("analyze_conflicts_core"), "Organizer, Duplicates and Conflicts must share a coordinated backend analysis.");
+assert(scanner.includes("scan_packages_core_with_progress(folder, language, operation_kind, true, true, false)"), "Organizer scans must not prebuild full resource fingerprints.");
+assert(scanner.includes("scan_packages_core_with_progress(folder, language, operation_kind, false, false, true)"), "Legacy unified callers must retain the complete shared fingerprint path.");
+assert(unified.includes("analyze_duplicates_core") && unified.includes("analyze_conflicts_core"), "The compatibility unified path must retain shared-index analyzers.");
 assert(planner.includes("get_or_build_analysis_with_metrics"), "Plan preview must reuse the bounded analysis cache before execution revalidates SHA-256.");
 assert(planner.includes("pub async fn build_organization_plan_with_cfg"), "Planner command must be asynchronous.");
 assert(app.includes("beginToolsOperation") && app.includes("cancelToolsOperation"), "Tools operations need progress and cancellation wiring.");

@@ -4768,7 +4768,7 @@ pub fn scan_packages_core(
     language: AppLanguage,
     operation_kind: Option<&str>,
 ) -> Result<ScanResult, String> {
-    scan_packages_core_with_progress(folder, language, operation_kind, true, true)
+    scan_packages_core_with_progress(folder, language, operation_kind, true, true, false)
 }
 
 /// Variant for a coordinated analysis.  Cancellation remains cooperative,
@@ -4779,7 +4779,10 @@ pub(crate) fn scan_packages_core_quiet_progress(
     language: AppLanguage,
     operation_kind: Option<&str>,
 ) -> Result<ScanResult, String> {
-    scan_packages_core_with_progress(folder, language, operation_kind, false, false)
+    // Legacy unified callers still require the complete shared fingerprint
+    // index so their duplicate/conflict phases can reuse it. The live
+    // Organizer command uses `scan_packages_core` and does not pay this cost.
+    scan_packages_core_with_progress(folder, language, operation_kind, false, false, true)
 }
 
 fn scan_packages_core_with_progress(
@@ -4788,6 +4791,7 @@ fn scan_packages_core_with_progress(
     operation_kind: Option<&str>,
     report_progress: bool,
     allow_cached_result: bool,
+    build_fingerprint_index: bool,
 ) -> Result<ScanResult, String> {
     let total_started = Instant::now();
     if folder.trim().is_empty() {
@@ -4841,8 +4845,14 @@ fn scan_packages_core_with_progress(
     {
         package_paths.truncate(limit);
     }
-    let mut shared_index = cache::load_cache(&root);
-    cache::retain_existing(&mut shared_index, &package_paths);
+    let mut shared_index = if build_fingerprint_index {
+        cache::load_cache(&root)
+    } else {
+        cache::FingerprintCache::default()
+    };
+    if build_fingerprint_index {
+        cache::retain_existing(&mut shared_index, &package_paths);
+    }
     let discovery_ms = discovery_started.elapsed().as_millis();
 
     if report_progress {
@@ -4975,8 +4985,10 @@ fn scan_packages_core_with_progress(
                             break;
                         }
                     }
-                    if let Ok(Some(cached)) = cache::current_cached_entry(path, persistent_cache) {
-                        local_cache.entries.insert(cached.path.clone(), cached);
+                    if build_fingerprint_index {
+                        if let Ok(Some(cached)) = cache::current_cached_entry(path, persistent_cache) {
+                            local_cache.entries.insert(cached.path.clone(), cached);
+                        }
                     }
                     active_workers.fetch_add(1, Ordering::Relaxed);
                     let started = Instant::now();
@@ -4989,7 +5001,7 @@ fn scan_packages_core_with_progress(
                         fix_index,
                         &mut local_timing,
                         Some(reference_catalogs),
-                        Some(&mut local_cache),
+                        build_fingerprint_index.then_some(&mut local_cache),
                     );
                     let processed = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     if report_progress {
@@ -5047,8 +5059,10 @@ fn scan_packages_core_with_progress(
     item_slots = accumulation.item_slots;
     let slider_instances = accumulation.slider_instances;
     timing.add(accumulation.timing);
-    for (key, entry) in accumulation.cache_entries {
-        shared_index.entries.insert(key, entry);
+    if build_fingerprint_index {
+        for (key, entry) in accumulation.cache_entries {
+            shared_index.entries.insert(key, entry);
+        }
     }
     if profile_enabled {
         profile_packages = accumulation.profile_packages;
@@ -5100,7 +5114,9 @@ fn scan_packages_core_with_progress(
     let postprocess_ms = postprocess_started.elapsed().as_millis();
     // Persist only after the complete pass so a cancelled scan cannot leave a
     // partial index that looks like a full unified result.
-    let _ = cache::save_cache(&root, &shared_index);
+    if build_fingerprint_index {
+        let _ = cache::save_cache(&root, &shared_index);
+    }
 
     let mut stats = ScanStats::default();
     stats.packages = items.len();
@@ -5352,7 +5368,7 @@ mod tests {
             return;
         };
         let language = crate::i18n::AppLanguage::Pt;
-        let result = super::scan_packages_core_with_progress(root, language, None, false, true)
+        let result = super::scan_packages_core_with_progress(root, language, None, false, true, false)
             .expect("external scanner profile should complete");
         eprintln!(
             "scanner_profile_result packages={} total_ms={} package_reads={} reused={}",

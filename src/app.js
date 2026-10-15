@@ -5747,12 +5747,9 @@ function renderOperationProgress(kind) {
   const ui = operationUi(kind);
   if (!ui) return;
   const [container, bar, text, percentText, countText, cancelButton] = ui;
-  // The three page-level progress panels deliberately mirror the coordinated
-  // analysis while it is running.  They must not start three independent
-  // monitors merely to display the same operation.
-  const status = state.analysisPipelineBusy && ["scan", "duplicates", "conflicts"].includes(kind)
-    ? state.operations.unified_analysis
-    : state.operations[kind];
+  // Each page owns its operation status. Switching pages or completing one
+  // analysis must never copy a terminal/progress state from another one.
+  const status = state.operations[kind];
   const visible = operationBusy(kind);
   container.classList.toggle("hidden", !visible);
   if (!visible) return;
@@ -9164,7 +9161,10 @@ async function chooseFolder() {
   ]);
 }
 
-async function runUnifiedAnalysis(preserveSelection = false, preserveNotice = false) {
+// Retained only as a compatibility guard for stale callers from older UI
+// snapshots. Current buttons use the three independent analysis functions
+// below and never enter this eager path.
+async function legacyUnifiedAnalysis(preserveSelection = false, preserveNotice = false) {
   if (!state.folder || analysisReadsBusy() || state.auditBusy ||
       state.planning || state.executing || state.restoreBusy ||
       state.quarantineBusy || state.structureBusy || state.toolsBusy) return;
@@ -9205,7 +9205,7 @@ async function runUnifiedAnalysis(preserveSelection = false, preserveNotice = fa
   let scanSucceeded = false;
   let terminalOutcome = null;
   try {
-    const result = await invoke("analyze_unified", { folder, language: state.language });
+    const result = await Promise.reject(new Error("Eager unified analysis is disabled; select a specific analysis."));
     if (!analysisSessionMatches(folder, runId)) return;
     const scan = result.scan || {};
     state.items = scan.items || [];
@@ -9310,8 +9310,104 @@ async function runUnifiedAnalysis(preserveSelection = false, preserveNotice = fa
   }
 }
 
+// Organizer analysis is intentionally independent. It uses the shared
+// persistent package/cache index, but does not precompute duplicate or
+// conflict relationships merely because the Organizer button was clicked.
+async function runOrganizerAnalysis(preserveSelection = false, preserveNotice = false) {
+  if (!state.folder || analysisReadsBusy() || state.auditBusy ||
+      state.planning || state.executing || state.restoreBusy ||
+      state.quarantineBusy || state.structureBusy || state.toolsBusy) return;
+
+  const folder = state.folder;
+  const runId = ++state.analysisRunId;
+  const previousSelection = new Set(state.selectedForPlan);
+  const previousNotice = state.notice;
+  const previousItems = state.items;
+  const previousStats = state.stats;
+  const previousSelectedId = state.selectedId;
+  state.analysisRefreshQueued = false;
+  state.scanning = true;
+  state.analysisStatus.manager = "running";
+  state.operations.scan = null;
+  const operationToken = beginOperationMonitor("scan");
+  void monitorOperation("scan", operationToken);
+  state.error = "";
+  state.planError = "";
+  state.plan = null;
+  if (!preserveNotice) {
+    state.notice = "";
+    state.organizationReview = null;
+    state.organizationCollisionItems = [];
+  }
+  closePlanModal();
+  render();
+
+  let scanSucceeded = false;
+  let terminalOutcome = null;
+  try {
+    const result = await invoke("scan_packages", { folder, language: state.language });
+    if (!analysisSessionMatches(folder, runId)) return;
+    state.items = result.items || [];
+    state.stats = result.stats || null;
+    state.unifiedStats = null;
+    virtualViews.manager.items = null;
+    const eligibleIds = new Set(state.items.filter(eligibleForPlan).map(item => item.id));
+    state.selectedForPlan.clear();
+    if (preserveSelection) {
+      for (const id of previousSelection) if (eligibleIds.has(id)) state.selectedForPlan.add(id);
+    } else {
+      for (const id of eligibleIds) state.selectedForPlan.add(id);
+    }
+    state.selectedId = visibleItems()[0]?.id || "";
+    if (preserveNotice) state.notice = previousNotice;
+    state.analysisStatus.manager = "completed";
+    state.error = "";
+    scanSucceeded = true;
+    terminalOutcome = {
+      state: "complete",
+      title: t("scanComplete"),
+      summary: result.cacheHit ? t("cacheReused") : t("scanComplete"),
+      counters: [{ label: t("packages"), value: result.items?.length ?? 0 }],
+      warnings: result.errors || [],
+    };
+  } catch (error) {
+    const message = String(error);
+    if (message.includes("__S3CC_OPERATION_CANCELLED__")) {
+      state.notice = t("cancelled");
+      state.items = previousItems;
+      state.stats = previousStats;
+      state.selectedId = previousSelectedId;
+      state.selectedForPlan = new Set(previousSelection);
+      state.analysisStatus.manager = "not_run";
+      terminalOutcome = { state: "cancelled", title: t("cancelled"), summary: t("cancelled") };
+    } else {
+      state.error = message;
+      state.analysisStatus.manager = "failed";
+      state.items = [];
+      state.stats = null;
+      state.selectedForPlan.clear();
+      terminalOutcome = { state: "error", title: t("scanFailed"), summary: message, warnings: [message] };
+    }
+  } finally {
+    await settleOperationStatus("scan", operationToken);
+    state.scanning = false;
+    endOperationMonitor("scan", operationToken);
+    render();
+    await refreshCacheInfo();
+  }
+  if (terminalOutcome && analysisSessionMatches(folder, runId)) showOperationResult(terminalOutcome);
+  if (scanSucceeded && analysisSessionMatches(folder, runId)) {
+    void preparePlanInBackground(folder, runId).catch(error => {
+      if (analysisSessionMatches(folder, runId)) {
+        state.planError = String(error);
+        render();
+      }
+    });
+  }
+}
+
 async function scanFolder(preserveSelection = false, preserveNotice = false) {
-  return runUnifiedAnalysis(preserveSelection, preserveNotice);
+  return runOrganizerAnalysis(preserveSelection, preserveNotice);
 }
 
 async function buildPlan() {
@@ -9723,14 +9819,120 @@ async function executeRestore() {
 }
 
 async function analyzeDuplicates() {
-  // All three Analyze buttons deliberately enter the same backend operation.
-  // A fresh result therefore populates Organizer, Duplicates and Conflicts
-  // together instead of opening the DBPF corpus a second time.
-  await runUnifiedAnalysis(true, true);
+  if (!state.folder || analysisReadsBusy() || state.auditBusy || state.planning ||
+      state.executing || state.restoreBusy || state.quarantineBusy ||
+      state.structureBusy || state.toolsBusy) return;
+  const folder = state.folder;
+  const previous = state.duplicatesAnalysis;
+  const previousStatus = state.analysisStatus.duplicates;
+  state.duplicatesBusy = true;
+  state.analysisStatus.duplicates = "running";
+  state.operations.duplicates = null;
+  state.duplicatesError = "";
+  const operationToken = beginOperationMonitor("duplicates");
+  void monitorOperation("duplicates", operationToken);
+  render();
+  let terminalOutcome = null;
+  try {
+    const result = await invoke("analyze_duplicates", { folder, selectedPaths: null });
+    if (state.folder !== folder) return;
+    state.duplicatesAnalysis = result;
+    state.analysisStatus.duplicates = "completed";
+    state.duplicateSelectedId = flattenedDuplicateFindings()[0]?.id || "";
+    state.quarantineSelected.clear();
+    state.quarantinePlan = null;
+    state.duplicatesNotice = "";
+    closeDuplicateDetails();
+    terminalOutcome = {
+      state: "complete",
+      title: t("duplicatesReady"),
+      summary: t("duplicatesReady"),
+      counters: [
+        { label: t("packages"), value: result.stats?.packagesScanned ?? 0 },
+        { label: t("exactGroups"), value: result.stats?.exactGroups ?? 0 },
+      ],
+      warnings: result.errors || [],
+    };
+  } catch (error) {
+    const message = String(error);
+    if (message.includes("__S3CC_OPERATION_CANCELLED__")) {
+      state.duplicatesAnalysis = previous;
+      state.analysisStatus.duplicates = previousStatus;
+      state.duplicatesNotice = t("cancelled");
+      terminalOutcome = { state: "cancelled", title: t("cancelled"), summary: t("cancelled") };
+    } else {
+      state.duplicatesAnalysis = null;
+      state.analysisStatus.duplicates = "failed";
+      state.duplicatesError = message;
+      terminalOutcome = { state: "error", title: t("duplicatesFailed"), summary: message, warnings: [message] };
+    }
+  } finally {
+    await settleOperationStatus("duplicates", operationToken);
+    state.duplicatesBusy = false;
+    endOperationMonitor("duplicates", operationToken);
+    render();
+    await refreshCacheInfo();
+  }
+  if (terminalOutcome && state.folder === folder) showOperationResult(terminalOutcome);
 }
 
 async function analyzeConflicts() {
-  await runUnifiedAnalysis(true, true);
+  if (!state.folder || analysisReadsBusy() || state.auditBusy || state.planning ||
+      state.executing || state.restoreBusy || state.quarantineBusy ||
+      state.structureBusy || state.toolsBusy) return;
+  const folder = state.folder;
+  const previous = state.conflictsAnalysis;
+  const previousStatus = state.analysisStatus.conflicts;
+  state.conflictsBusy = true;
+  state.analysisStatus.conflicts = "running";
+  state.operations.conflicts = null;
+  state.conflictsError = "";
+  const operationToken = beginOperationMonitor("conflicts");
+  void monitorOperation("conflicts", operationToken);
+  render();
+  let terminalOutcome = null;
+  try {
+    const result = await invoke("analyze_conflicts", { folder, selectedPaths: null });
+    if (state.folder !== folder) return;
+    state.conflictsAnalysis = result;
+    state.analysisStatus.conflicts = "completed";
+    state.conflictSelectedId = state.conflictsAnalysis?.findings?.[0]?.id || "";
+    state.conflictReviewSelected.clear();
+    state.conflictsSelectedOnly = false;
+    conflictVisibleMemo.analysis = null;
+    state.conflictsNotice = "";
+    closeConflictDetails();
+    terminalOutcome = {
+      state: "complete",
+      title: t("conflictsReady"),
+      summary: t("conflictsReady"),
+      counters: [
+        { label: t("packages"), value: result.stats?.packagesScanned ?? 0 },
+        { label: t("packagePairs"), value: result.stats?.packagePairs ?? 0 },
+      ],
+      warnings: result.errors || [],
+    };
+  } catch (error) {
+    const message = String(error);
+    if (message.includes("__S3CC_OPERATION_CANCELLED__")) {
+      state.conflictsAnalysis = previous;
+      state.analysisStatus.conflicts = previousStatus;
+      state.conflictsNotice = t("cancelled");
+      terminalOutcome = { state: "cancelled", title: t("cancelled"), summary: t("cancelled") };
+    } else {
+      state.conflictsAnalysis = null;
+      state.analysisStatus.conflicts = "failed";
+      state.conflictsError = message;
+      terminalOutcome = { state: "error", title: t("conflictsFailed"), summary: message, warnings: [message] };
+    }
+  } finally {
+    await settleOperationStatus("conflicts", operationToken);
+    state.conflictsBusy = false;
+    endOperationMonitor("conflicts", operationToken);
+    render();
+    await refreshCacheInfo();
+  }
+  if (terminalOutcome && state.folder === folder) showOperationResult(terminalOutcome);
 }
 
 function selectAllVisible() {
@@ -9845,9 +10047,9 @@ document.addEventListener("keydown", (event) => {
 
 
 el.chooseFolderBtn.addEventListener("click", chooseFolder);
-el.scanCancelBtn.addEventListener("click", () => cancelAnalysis("unified_analysis"));
-el.duplicatesCancelBtn.addEventListener("click", () => cancelAnalysis("unified_analysis"));
-el.conflictsCancelBtn.addEventListener("click", () => cancelAnalysis("unified_analysis"));
+el.scanCancelBtn.addEventListener("click", () => cancelAnalysis("scan"));
+el.duplicatesCancelBtn.addEventListener("click", () => cancelAnalysis("duplicates"));
+el.conflictsCancelBtn.addEventListener("click", () => cancelAnalysis("conflicts"));
 el.loadingOverlayCancel.addEventListener("click", () => {
   const current = loadingOverlayState();
   if (current?.cancelable) void cancelLoadingOperation(current.kind);

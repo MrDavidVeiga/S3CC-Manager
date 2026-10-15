@@ -33,11 +33,19 @@ assert.match(planner, /Execution still hashes\s+\/\/ every ready source/);
 assert.match(executor, /universal_cleanup_roots/);
 assert.doesNotMatch(executor, /requires_post_execution_package_scan/);
 
-assert.match(app, /async function runUnifiedAnalysis/);
-assert.equal((app.match(/invoke\("analyze_unified"/g) || []).length, 1,
-  "Organizer, Duplicates and Conflicts must share one backend analysis entry point");
-assert.match(app, /async function analyzeDuplicates\(\)[\s\S]*runUnifiedAnalysis/);
-assert.match(app, /async function analyzeConflicts\(\)[\s\S]*runUnifiedAnalysis/);
+assert.match(app, /async function runOrganizerAnalysis/);
+assert.match(app, /runOrganizerAnalysis[\s\S]*invoke\("scan_packages"/);
+assert.equal((app.match(/invoke\("analyze_unified"/g) || []).length, 0,
+  "The three page buttons must not invoke the eager unified analysis");
+const duplicatesAction = app.slice(app.indexOf("async function analyzeDuplicates"), app.indexOf("async function analyzeConflicts"));
+const conflictsAction = app.slice(app.indexOf("async function analyzeConflicts"), app.indexOf("\nfunction selectAllVisible()"));
+assert.match(duplicatesAction, /invoke\("analyze_duplicates"/);
+assert.doesNotMatch(duplicatesAction, /runUnifiedAnalysis/);
+assert.match(conflictsAction, /invoke\("analyze_conflicts"/);
+assert.doesNotMatch(conflictsAction, /runUnifiedAnalysis/);
+assert.match(app, /scanCancelBtn\.addEventListener\("click", \(\) => cancelAnalysis\("scan"\)/);
+assert.match(app, /duplicatesCancelBtn\.addEventListener\("click", \(\) => cancelAnalysis\("duplicates"\)/);
+assert.match(app, /conflictsCancelBtn\.addEventListener\("click", \(\) => cancelAnalysis\("conflicts"\)/);
 assert.doesNotMatch(app, /runAutomaticAnalyses/);
 assert.match(app, /showOperationResult/);
 assert.match(html, /id="operation-result-modal"/);
