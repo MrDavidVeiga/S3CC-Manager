@@ -607,6 +607,58 @@ fn unique_model_directory_ignoring_age_bucket(
     (unique.len() == 1).then(|| matches.into_iter().next().unwrap())
 }
 
+// A byte-identical exemplar is evidence of identity, not permission to reuse
+// the exemplar's historical directory.  The physical destination is always
+// resolved through the active taxonomy.  In particular, old model branches
+// must not keep a package "organized" merely because the same SHA-256 still
+// exists below that branch.
+fn canonicalize_model_directory(
+    index: &ManualModelIndex,
+    model_parts: &[String],
+) -> Result<Vec<String>, String> {
+    let model_parts = strip_packages_prefix(model_parts);
+    let Some(first) = model_parts.first() else {
+        return Err("The manual model hash match has no destination directory.".to_string());
+    };
+
+    let first_key = semantic_path_component(first);
+    let (canonical_parts, reason) = match first_key.as_str() {
+        // The review bucket is a reserved Manager destination, not a model
+        // subtree.  Never recreate the historical context below it.
+        "semcategoria" => (vec!["#Sem Categoria".to_string()], "legacy review root"),
+        "nraasmods" => {
+            let mut parts = vec!["Scripts".to_string(), "NRaas".to_string()];
+            parts.extend(model_parts.iter().skip(1).cloned());
+            (parts, "legacy NRaas root")
+        }
+        "fixes" => {
+            let mut parts = vec!["Correções".to_string()];
+            parts.extend(model_parts.iter().skip(1).cloned());
+            (parts, "legacy fixes root")
+        }
+        "cabelos" => {
+            let mut parts = vec!["Cabelos e Pêlos".to_string(), "Cabelos".to_string()];
+            parts.extend(model_parts.iter().skip(1).cloned());
+            (parts, "legacy hair root")
+        }
+        _ => return Ok(model_parts.to_vec()),
+    };
+
+    let resolved = index
+        .directories
+        .get(&model_key(&canonical_parts))
+        .cloned()
+        .or_else(|| semantic_model_directory(index, &canonical_parts))
+        .or_else(|| unique_model_directory_ignoring_age_bucket(index, &canonical_parts));
+
+    resolved.ok_or_else(|| {
+        format!(
+            "The SHA-256 exemplar is below a {reason}, but no exact authorized directory exists in the active taxonomy: {}.",
+            canonical_parts.join("\\")
+        )
+    })
+}
+
 fn resolve_model_destination(
     index: &ManualModelIndex,
     root: &Path,
@@ -653,11 +705,12 @@ fn resolve_model_destination(
             .get(&directory_key)
             .cloned()
             .unwrap_or_else(|| considered[0].directory_parts.clone());
-        let parts = model_parts_for_selected_root(root, source, &model_parts)?;
+        let canonical_parts = canonicalize_model_directory(index, &model_parts)?;
+        let parts = model_parts_for_selected_root(root, source, &canonical_parts)?;
         return Ok(ModelDestination {
             parts,
             evidence: format!(
-                "Exact SHA-256 match in the manual model: {}",
+                "Exact SHA-256 identity in the manual model, reconciled to the active taxonomy: {}",
                 considered
                     .iter()
                     .map(|entry| entry.relative_path.as_str())
@@ -2304,23 +2357,10 @@ fn is_canonical_duplicate_peer(
     manual_model: &ManualModelIndex,
     resource_cfg: Option<&ResourceCfgContext>,
 ) -> bool {
-    let relative = path
-        .strip_prefix(root)
-        .map(relative_key)
-        .unwrap_or_else(|_| relative_key(path));
-    if manual_model
-        .files_by_sha256
-        .get(&sha256.to_ascii_uppercase())
-        .is_some_and(|files| {
-            files.iter().any(|file| {
-                same_relative_path(&file.relative_path, &relative)
-                    && is_disabled_package_path(path)
-                        == is_disabled_package_path(Path::new(&file.relative_path))
-            })
-        })
-    {
-        return true;
-    }
+    // Do not treat a raw model path as canonical.  The model can contain
+    // historical folders, and the SHA-256 index intentionally records those
+    // paths for evidence.  Canonicality is proven only when the planner's
+    // taxonomy-resolved destination equals the physical path.
     scan_by_canonical
         .get(path)
         .and_then(|item| {
@@ -6295,6 +6335,70 @@ mod tests {
             &["Criador".to_string(), "Sliders".to_string()],
         );
         assert!(wrong.is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn exact_model_hash_never_keeps_legacy_taxonomy_directory_as_canonical() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(format!(
+            "s3cc-legacy-model-reconciliation-{}-{nonce}",
+            std::process::id()
+        ));
+        let model = base.join("Model");
+        let selected = base.join("Selected").join("Packages");
+        let cases = [
+            (
+                vec!["Cabelos", "Masculino", "Adolescente-Jovem Adulto-Adulto-Idoso"],
+                vec![
+                    "Cabelos e Pêlos",
+                    "Cabelos",
+                    "Masculino",
+                    "Adolescente a Idoso",
+                ],
+                "hair.package",
+            ),
+            (
+                vec!["Nraas Mods", "MasterController"],
+                vec!["Scripts", "NRaas", "MasterController"],
+                "nraas.package",
+            ),
+            (
+                vec!["Fixes"],
+                vec!["Correções"],
+                "fix.package",
+            ),
+            (vec!["Sem Categoria"], vec!["#Sem Categoria"], "review.package"),
+        ];
+        for (legacy, canonical, name) in &cases {
+            std::fs::create_dir_all(model.join(legacy.iter().collect::<PathBuf>())).unwrap();
+            std::fs::create_dir_all(model.join(canonical.iter().collect::<PathBuf>())).unwrap();
+            let model_file = model.join(legacy.iter().collect::<PathBuf>()).join(name);
+            std::fs::write(&model_file, format!("bytes for {name}")).unwrap();
+            let source = selected.join("Legacy").join(name);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::copy(&model_file, &source).unwrap();
+        }
+
+        let index = build_manual_model_index(&model).unwrap();
+        for (legacy, canonical, name) in &cases {
+            let source = selected.join("Legacy").join(name);
+            let (hash, _) = sha256_file(&source).unwrap();
+            let result = resolve_model_destination(
+                &index,
+                &selected,
+                &source,
+                &hash,
+                &legacy.iter().map(|part| (*part).to_string()).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert_eq!(result.parts, canonical.iter().map(|part| (*part).to_string()).collect::<Vec<_>>());
+            assert!(!result.parts.starts_with(&legacy.iter().map(|part| (*part).to_string()).collect::<Vec<_>>()));
+        }
         std::fs::remove_dir_all(base).unwrap();
     }
 

@@ -2666,4 +2666,27 @@ mod tests {
             resume_unwind(payload);
         }
     }
+
+    // Optional physical validation hook. It is inert unless a plan path is
+    // supplied by a directed test, and therefore cannot affect production
+    // execution. Keeping the call in the real executor path proves that a
+    // serialized UI plan is accepted by the same preflight/move/cleanup code.
+    #[test]
+    fn execute_physical_plan_from_environment_when_requested() {
+        let Ok(plan_path) = std::env::var("S3CC_PHYSICAL_PLAN") else {
+            return;
+        };
+        let data = fs::read(&plan_path).expect("read directed physical plan");
+        let plan = serde_json::from_slice::<OrganizationPlan>(&data)
+            .expect("deserialize directed physical plan");
+        let result = execute_organization_plan_core(plan, AppLanguage::Pt, false, None, Vec::new())
+            .expect("execute directed physical plan");
+        if let Ok(output) = std::env::var("S3CC_PHYSICAL_RESULT") {
+            fs::write(
+                output,
+                serde_json::to_vec_pretty(&result).expect("serialize directed result"),
+            )
+            .expect("write directed physical result");
+        }
+    }
 }
