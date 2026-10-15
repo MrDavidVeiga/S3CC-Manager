@@ -13,6 +13,10 @@ use std::{
 
 const CACHE_VERSION: u32 = 1;
 
+fn digest_hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
 fn cache_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -59,6 +63,10 @@ pub struct CacheBuildMetrics {
     pub resource_decode_us: u128,
     pub resource_decode_exclusive_us: u128,
     pub resource_decode_wait_us: u128,
+    pub resource_count: usize,
+    pub compressed_bytes: u64,
+    pub decompressed_bytes: u64,
+    pub decompression_count: usize,
     pub integrity_verified: bool,
 }
 
@@ -451,6 +459,22 @@ pub fn remember_loaded_package_with_result(
     let (file_sha256, _) = hash_result
         .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
     let (resources, parse_error, resource_decode_exclusive_us) = decode_result?;
+    let resource_count = package.entries.len();
+    let compressed_bytes = package
+        .entries
+        .iter()
+        .map(|entry| u64::from(entry.file_size))
+        .sum();
+    let decompressed_bytes = package
+        .entries
+        .iter()
+        .map(|entry| u64::from(entry.mem_size))
+        .sum();
+    let decompression_count = package
+        .entries
+        .iter()
+        .filter(|entry| entry.compressed == 0xFFFF)
+        .count();
     let hash_ms = hash_started.elapsed().as_millis();
     let hash_us = hash_started.elapsed().as_micros();
     let resource_decode_ms = decode_started.elapsed().as_millis();
@@ -485,6 +509,10 @@ pub fn remember_loaded_package_with_result(
             resource_decode_exclusive_us,
             resource_decode_wait_us: resource_decode_us
                 .saturating_sub(resource_decode_exclusive_us),
+            resource_count,
+            compressed_bytes,
+            decompressed_bytes,
+            decompression_count,
             integrity_verified: true,
             ..CacheBuildMetrics::default()
         },
@@ -507,10 +535,23 @@ fn decode_resource_fingerprints(
         return Ok((Vec::new(), None, 0));
     }
 
-    let worker_limit = thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(2)
-        .clamp(1, 2);
+    let worker_limit = {
+        #[cfg(test)]
+        let configured = std::env::var("S3CC_RESOURCE_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0);
+        #[cfg(not(test))]
+        let configured: Option<usize> = None;
+        configured.unwrap_or_else(|| {
+            thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(2)
+                .div_ceil(2)
+                .clamp(1, 4)
+        })
+        .clamp(1, 4)
+    };
     let worker_count = worker_limit.min(package.entries.len());
     let chunk_size = package.entries.len().div_ceil(worker_count);
     let mut slots = vec![None; package.entries.len()];
@@ -529,8 +570,8 @@ fn decode_resource_fingerprints(
                     let start = chunk_index * chunk_size;
                     let mut results = Vec::with_capacity(entries.len());
                     for (offset, entry) in entries.iter().enumerate() {
-                        let data = package
-                            .data_from_file(&mut data_file, entry)
+                        let (data, payload_digest) = package
+                            .data_from_file_with_digest(&mut data_file, entry)
                             .map_err(|error| format!("{}: {error}", entry.key_string()))?;
                         results.push((
                             start + offset,
@@ -538,7 +579,7 @@ fn decode_resource_fingerprints(
                                 type_id: entry.type_id,
                                 group: entry.group,
                                 instance: entry.instance,
-                                payload_sha256: format!("{:X}", Sha256::digest(&data)),
+                                payload_sha256: digest_hex(&payload_digest),
                                 payload_size: data.len(),
                                 file_size: entry.file_size,
                                 mem_size: entry.mem_size,
@@ -672,6 +713,15 @@ fn get_or_build_with_validation(
     let load_started = Instant::now();
     let loaded = Package::load(path);
     let dbpf_load_ms = load_started.elapsed().as_millis();
+    let (loaded_resource_count, loaded_compressed_bytes, loaded_decompressed_bytes, loaded_decompression_count) =
+        loaded.as_ref().map(|package| {
+            (
+                package.entries.len(),
+                package.entries.iter().map(|entry| u64::from(entry.file_size)).sum(),
+                package.entries.iter().map(|entry| u64::from(entry.mem_size)).sum(),
+                package.entries.iter().filter(|entry| entry.compressed == 0xFFFF).count(),
+            )
+        }).unwrap_or_default();
 
     let decode_started = Instant::now();
     let built = match loaded {
@@ -692,13 +742,13 @@ fn get_or_build_with_validation(
                 let result = data_file
                     .as_mut()
                     .ok_or_else(|| anyhow::anyhow!("could not reopen package data"))
-                    .and_then(|file| package.data_from_file(file, entry));
+                    .and_then(|file| package.data_from_file_with_digest(file, entry));
                 match result {
-                    Ok(data) => resources.push(CachedResource {
+                    Ok((data, payload_digest)) => resources.push(CachedResource {
                         type_id: entry.type_id,
                         group: entry.group,
                         instance: entry.instance,
-                        payload_sha256: format!("{:X}", Sha256::digest(&data)),
+                        payload_sha256: digest_hex(&payload_digest),
                         payload_size: data.len(),
                         file_size: entry.file_size,
                         mem_size: entry.mem_size,
@@ -756,6 +806,10 @@ fn get_or_build_with_validation(
             resource_decode_us,
             resource_decode_exclusive_us: resource_decode_us,
             resource_decode_wait_us: 0,
+            resource_count: loaded_resource_count,
+            compressed_bytes: loaded_compressed_bytes,
+            decompressed_bytes: loaded_decompressed_bytes,
+            decompression_count: loaded_decompression_count,
             integrity_verified: true,
         },
     ))

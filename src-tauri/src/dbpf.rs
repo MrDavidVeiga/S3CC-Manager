@@ -1,10 +1,12 @@
 use crate::compression;
 use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
+use sha2::Digest;
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 const MAGIC_DBPF: u32 = 0x4650_4244;
@@ -85,6 +87,27 @@ pub struct Package {
     pub major: u32,
     pub minor: u32,
     pub entries: Vec<ResourceEntry>,
+    payload_cache: Arc<Mutex<std::collections::HashMap<(u32, u32, u64), Vec<u8>>>>,
+}
+
+fn payload_is_reused_by_scanner(type_id: u32) -> bool {
+    matches!(
+        type_id,
+        0x034A_EECB // CASP
+            | 0x319E_4F1D // OBJD
+            | 0xB52F_5055 // FBLN
+            | 0x0166_038C // NMAP
+            | 0x2205_57DA // STBL
+            | 0x073F_AA07 // S3SA
+            | 0x73E9_3EEB // manifest
+            | 0x025C_95B6 // LAYO
+            | 0x025E_D6F4 // SIME
+            | 0x0341_ACC9 // SIMO
+            // Do not retain large visual/morph payloads here. The scanner
+            // fingerprints those resources but does not reuse their decoded
+            // bytes within the same Package instance; retaining them made a
+            // few merged packages consume hundreds of megabytes each.
+    )
 }
 
 impl Package {
@@ -130,6 +153,7 @@ impl Package {
                 major,
                 minor,
                 entries: Vec::new(),
+                payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             });
         }
         if index_position == 0 {
@@ -214,6 +238,7 @@ impl Package {
             major,
             minor,
             entries,
+            payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -235,6 +260,15 @@ impl Package {
     }
 
     pub fn data_from_file(&self, file: &mut File, entry: &ResourceEntry) -> Result<Vec<u8>> {
+        self.data_from_file_with_digest(file, entry)
+            .map(|(data, _)| data)
+    }
+
+    pub fn data_from_file_with_digest(
+        &self,
+        file: &mut File,
+        entry: &ResourceEntry,
+    ) -> Result<(Vec<u8>, [u8; 32])> {
         if entry.mem_size > MAX_RESOURCE_MEMORY {
             bail!(
                 "resource {} declares unsupported decompressed size {} bytes",
@@ -242,8 +276,20 @@ impl Package {
                 entry.mem_size
             );
         }
+        let cache_key = (entry.type_id, entry.group, entry.instance);
+        if payload_is_reused_by_scanner(entry.type_id) {
+            if let Some(cached) = self
+                .payload_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("package payload cache poisoned"))?
+                .get(&cache_key)
+                .cloned()
+            {
+                return Ok((cached.clone(), sha2::Sha256::digest(&cached).into()));
+            }
+        }
         let raw = self.raw_data_from_file(file, entry)?;
-        match entry.compressed {
+        let (data, digest) = match entry.compressed {
             0x0000 => {
                 if entry.file_size != entry.mem_size {
                     bail!(
@@ -253,9 +299,9 @@ impl Package {
                         entry.mem_size
                     );
                 }
-                Ok(raw)
+                Ok((raw.clone(), sha2::Sha256::digest(&raw).into()))
             }
-            0xFFFF => compression::uncompress_stream(
+            0xFFFF => compression::uncompress_stream_with_digest(
                 &raw,
                 entry.file_size as usize,
                 entry.mem_size as usize,
@@ -265,7 +311,14 @@ impl Package {
                 "resource {} uses unsupported compression flag 0x{other:04X}",
                 entry.key_string()
             ),
+        }?;
+        if payload_is_reused_by_scanner(entry.type_id) {
+            self.payload_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("package payload cache poisoned"))?
+                .insert(cache_key, data.clone());
         }
+        Ok((data, digest))
     }
 }
 

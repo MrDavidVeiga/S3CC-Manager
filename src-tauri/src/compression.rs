@@ -1,6 +1,30 @@
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
-pub fn uncompress_stream(mut input: &[u8], file_size: usize, mem_size: usize) -> Result<Vec<u8>> {
+pub fn uncompress_stream(input: &[u8], file_size: usize, mem_size: usize) -> Result<Vec<u8>> {
+    uncompress_stream_inner(input, file_size, mem_size, None)
+}
+
+/// Decompress and hash the exact decompressed payload in one pass. The
+/// decompressed bytes remain available for consumers that classify the
+/// resource; fingerprint-only callers can use the digest without walking the
+/// output a second time.
+pub fn uncompress_stream_with_digest(
+    input: &[u8],
+    file_size: usize,
+    mem_size: usize,
+) -> Result<(Vec<u8>, [u8; 32])> {
+    let mut digest = Sha256::new();
+    let output = uncompress_stream_inner(input, file_size, mem_size, Some(&mut digest))?;
+    Ok((output, digest.finalize().into()))
+}
+
+fn uncompress_stream_inner(
+    mut input: &[u8],
+    file_size: usize,
+    mem_size: usize,
+    mut digest: Option<&mut Sha256>,
+) -> Result<Vec<u8>> {
     if input.len() < file_size {
         bail!("input shorter than declared file_size");
     }
@@ -32,7 +56,7 @@ pub fn uncompress_stream(mut input: &[u8], file_size: usize, mem_size: usize) ->
 
     let mut out = Vec::with_capacity(mem_size);
     while !input.is_empty() {
-        dechunk(&mut input, &mut out).context("dechunk failed")?;
+        dechunk(&mut input, &mut out, digest.as_deref_mut()).context("dechunk failed")?;
     }
     if out.len() != mem_size {
         bail!(
@@ -44,7 +68,11 @@ pub fn uncompress_stream(mut input: &[u8], file_size: usize, mem_size: usize) ->
     Ok(out)
 }
 
-fn dechunk(input: &mut &[u8], out: &mut Vec<u8>) -> Result<()> {
+fn dechunk(
+    input: &mut &[u8],
+    out: &mut Vec<u8>,
+    mut digest: Option<&mut Sha256>,
+) -> Result<()> {
     if input.is_empty() {
         bail!("unexpected EOF (no packing byte)");
     }
@@ -96,6 +124,7 @@ fn dechunk(input: &mut &[u8], out: &mut Vec<u8>) -> Result<()> {
         datalen = (packing & 0x03) as usize;
     }
 
+    let output_start = out.len();
     if datalen > 0 {
         if input.len() < datalen {
             bail!("unexpected EOF reading literal data");
@@ -116,6 +145,10 @@ fn dechunk(input: &mut &[u8], out: &mut Vec<u8>) -> Result<()> {
         } else {
             copy_bytes(out, copy_offset, copy_size);
         }
+    }
+
+    if let Some(digest) = digest.as_deref_mut() {
+        digest.update(&out[output_start..]);
     }
 
     Ok(())
@@ -156,7 +189,8 @@ fn copy_bytes(out: &mut Vec<u8>, offset: usize, mut len: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_blocks, copy_bytes};
+    use super::{copy_blocks, copy_bytes, uncompress_stream, uncompress_stream_with_digest};
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn non_overlapping_copy_preserves_block_order() {
@@ -177,5 +211,23 @@ mod tests {
         let mut output = b"x".to_vec();
         copy_bytes(&mut output, 1, 9);
         assert_eq!(output, b"xxxxxxxxxx");
+    }
+
+    #[test]
+    fn decompressed_digest_matches_the_exact_payload() {
+        let payload = b"abcde";
+        let compressed = [
+            0x00, 0x00, // header: three-byte decompressed-size field
+            0x00, 0x00, 0x05, // exact decompressed size
+            0xE0, b'a', b'b', b'c', b'd', // four literal bytes
+            0xFD, b'e', // one literal byte
+        ];
+        let decoded = uncompress_stream(&compressed, compressed.len(), payload.len()).unwrap();
+        let (decoded_with_digest, digest) =
+            uncompress_stream_with_digest(&compressed, compressed.len(), payload.len()).unwrap();
+        assert_eq!(decoded, payload);
+        assert_eq!(decoded_with_digest, payload);
+        let expected: [u8; 32] = Sha256::digest(payload).into();
+        assert_eq!(digest, expected);
     }
 }

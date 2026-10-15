@@ -79,6 +79,28 @@ pub struct ScanPackageItem {
     pub project_relationships: Vec<ProjectRelationship>,
     #[serde(default)]
     pub reference_evidence: Option<ReferenceEvidence>,
+    #[serde(skip)]
+    pub(crate) profile: Option<ScanPackageProfile>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ScanPackageProfile {
+    compressed_bytes: u64,
+    decompressed_bytes: u64,
+    resource_count: usize,
+    decompression_count: usize,
+    resource_decode_us: u128,
+}
+
+#[derive(Debug, Clone)]
+struct ScanPackageProfileEntry {
+    elapsed_us: u128,
+    path: String,
+    compressed_bytes: u64,
+    decompressed_bytes: u64,
+    resource_count: usize,
+    decompression_count: usize,
+    resource_decode_us: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -4040,7 +4062,7 @@ struct ScanAccumulation {
     cache_entries: HashMap<String, cache::CachedPackage>,
     slider_instances: HashSet<u64>,
     timing: ScanTiming,
-    profile_packages: Vec<(u128, String)>,
+    profile_packages: Vec<ScanPackageProfileEntry>,
 }
 
 fn scan_one(
@@ -4138,6 +4160,7 @@ fn scan_one_with_index(
                 project_evidence: ProjectTechnicalEvidence::default(),
                 project_relationships: Vec::new(),
                 reference_evidence: None,
+                profile: None,
             };
         }
     };
@@ -4147,6 +4170,7 @@ fn scan_one_with_index(
     // valid classification; those later phases fall back to their validated
     // readers and report the specific cache error.
     let mut shared_cached = None;
+    let mut profile_resource_decode_us = 0u128;
     let shared_index_error = if let Some(shared_index) = shared_index {
         match cache::current_cached_entry(path, shared_index) {
             Ok(Some(cached)) => {
@@ -4163,6 +4187,7 @@ fn scan_one_with_index(
                         timing.resource_decode_exclusive_us +=
                             metrics.resource_decode_exclusive_us;
                         timing.resource_decode_wait_us += metrics.resource_decode_wait_us;
+                        profile_resource_decode_us = metrics.resource_decode_us;
                         shared_cached = Some(cached);
                         None
                     }
@@ -4631,6 +4656,25 @@ fn scan_one_with_index(
         project_evidence,
         project_relationships: Vec::new(),
         reference_evidence,
+        profile: Some(ScanPackageProfile {
+            compressed_bytes: package
+                .entries
+                .iter()
+                .map(|entry| u64::from(entry.file_size))
+                .sum(),
+            decompressed_bytes: package
+                .entries
+                .iter()
+                .map(|entry| u64::from(entry.mem_size))
+                .sum(),
+            resource_count: package.entries.len(),
+            decompression_count: package
+                .entries
+                .iter()
+                .filter(|entry| entry.compressed == 0xFFFF)
+                .count(),
+            resource_decode_us: profile_resource_decode_us,
+        }),
     }
 }
 
@@ -4820,7 +4864,7 @@ fn scan_packages_core_with_progress(
             .collect::<HashMap<_, _>>()
     });
     let mut reused_packages = 0usize;
-    let mut profile_packages = Vec::<(u128, String)>::new();
+    let mut profile_packages = Vec::<ScanPackageProfileEntry>::new();
     let classification_started = Instant::now();
     let mut item_slots = vec![None; package_paths.len()];
     let mut work = Vec::<(usize, PathBuf)>::new();
@@ -4886,7 +4930,7 @@ fn scan_packages_core_with_progress(
     };
     let worker_count = configured_worker_count.unwrap_or_else(|| {
             thread::available_parallelism()
-                .map(|count| count.get().div_ceil(3))
+                .map(|count| count.get().div_ceil(2))
                 .unwrap_or(2)
                 .clamp(1, 4)
         })
@@ -4956,15 +5000,21 @@ fn scan_packages_core_with_progress(
                         }
                     }
                     if let Ok(mut output) = accumulation.lock() {
+                        let profile = item.profile.clone().unwrap_or_default();
                         output.item_slots[*index] = Some(item);
                         output.timing.add(local_timing);
                         output.slider_instances.extend(local_slider_instances.drain());
                         output.cache_entries.extend(std::mem::take(&mut local_cache.entries));
                         if profile_enabled {
-                            output.profile_packages.push((
-                                started.elapsed().as_micros(),
-                                path.to_string_lossy().into_owned(),
-                            ));
+                            output.profile_packages.push(ScanPackageProfileEntry {
+                                elapsed_us: started.elapsed().as_micros(),
+                                path: path.to_string_lossy().into_owned(),
+                                compressed_bytes: profile.compressed_bytes,
+                                decompressed_bytes: profile.decompressed_bytes,
+                                resource_count: profile.resource_count,
+                                decompression_count: profile.decompression_count,
+                                resource_decode_us: profile.resource_decode_us,
+                            });
                         }
                     }
                     active_workers.fetch_sub(1, Ordering::Relaxed);
@@ -5104,7 +5154,7 @@ fn scan_packages_core_with_progress(
     stats.reused_packages = reused_packages;
 
     if profile_enabled {
-        profile_packages.sort_by(|left, right| right.0.cmp(&left.0));
+        profile_packages.sort_by(|left, right| right.elapsed_us.cmp(&left.elapsed_us));
         eprintln!(
             "scanner_profile packages={} reused={} active_workers={} discovery_ms={} classification_ms={} postprocess_ms={} dbpf_load_ms={} resource_decode_ms={} resource_decode_exclusive_ms={} resource_decode_wait_ms={} full_hash_ms={} full_hash_exclusive_ms={} full_hash_wait_ms={} reference_catalog_ms={} project_grouping_ms={} cache_hits={} cache_misses={}",
             stats.packages,
@@ -5125,12 +5175,17 @@ fn scan_packages_core_with_progress(
             stats.cache_hit,
             stats.reused_packages,
         );
-        for (index, (elapsed_us, path)) in profile_packages.iter().take(20).enumerate() {
+        for (index, profile) in profile_packages.iter().take(20).enumerate() {
             eprintln!(
-                "scanner_profile_slowest rank={} elapsed_ms={} path={}",
+                "scanner_profile_slowest rank={} elapsed_ms={} resource_decode_ms={} compressed_mb={:.2} decompressed_mb={:.2} resources={} decompressions={} path={}",
                 index + 1,
-                (*elapsed_us as f64) / 1000.0,
-                path
+                (profile.elapsed_us as f64) / 1000.0,
+                (profile.resource_decode_us as f64) / 1000.0,
+                profile.compressed_bytes as f64 / 1_048_576.0,
+                profile.decompressed_bytes as f64 / 1_048_576.0,
+                profile.resource_count,
+                profile.decompression_count,
+                profile.path
             );
         }
     }
@@ -6315,6 +6370,7 @@ mod tests {
             project_evidence: ProjectTechnicalEvidence::default(),
             project_relationships: Vec::new(),
             reference_evidence: None,
+            profile: None,
         };
         assert!(!may_reclassify_as_companion(&item));
         item.catalog_resource_count = 0;
