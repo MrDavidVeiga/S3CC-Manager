@@ -133,22 +133,30 @@ fn reconcile_scan_paths(scan: &mut ScanResult, root: &Path, moves: &[(PathBuf, P
         })
         .collect::<HashMap<_, _>>();
     for item in &mut scan.items {
-        let Some(destination) = changed.get(&move_path_key(Path::new(&item.path))) else {
-            continue;
-        };
-        let destination = stable_path(destination);
-        let path = destination.to_string_lossy().to_string();
-        item.id = path.clone();
-        item.path = path;
-        item.relative_path = destination
-            .strip_prefix(root)
-            .unwrap_or(&destination)
-            .to_string_lossy()
-            .replace('/', "\\");
-        item.name = destination
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| item.name.clone());
+        if let Some(destination) = changed.get(&move_path_key(Path::new(&item.path))) {
+            let destination = stable_path(destination);
+            let path = destination.to_string_lossy().to_string();
+            item.id = path.clone();
+            item.path = path;
+            item.relative_path = destination
+                .strip_prefix(root)
+                .unwrap_or(&destination)
+                .to_string_lossy()
+                .replace('/', "\\");
+            item.name = destination
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| item.name.clone());
+        }
+        for relationship in &mut item.project_relationships {
+            if let Some(related_destination) = changed.get(&move_path_key(Path::new(
+                &relationship.related_path,
+            ))) {
+                relationship.related_path = stable_path(related_destination)
+                    .to_string_lossy()
+                    .to_string();
+            }
+        }
     }
     scan.cache_hit = true;
     scan.reused_packages = scan.items.len();

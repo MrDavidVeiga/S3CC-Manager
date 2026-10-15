@@ -21,6 +21,7 @@ pub mod operation;
 pub mod package_compare;
 pub mod package_details;
 pub mod package_family;
+pub mod project_grouping;
 pub mod planner;
 pub mod quarantine;
 pub mod resource_cfg;

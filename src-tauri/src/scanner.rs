@@ -11,6 +11,10 @@ use crate::{
         TYPE_BGEO, TYPE_BONE_DELTA, TYPE_FACE, TYPE_FBLN, TYPE_HAIR_TONE, TYPE_IMG, TYPE_S3SA,
         TYPE_SKIN_TONE,
     },
+    project_grouping::{
+        assign_project_groups, extract_package_evidence, ProjectRelationship,
+        ProjectTechnicalEvidence,
+    },
     resource_cfg::is_mods_layout_root,
     slider::{fbln_evidence, read_fbln_metadata, FblnMetadata},
     workspace::{load_workspace_for_root, split_destination},
@@ -58,6 +62,16 @@ pub struct ScanPackageItem {
     pub classifications: Vec<CatalogClassification>,
     pub classification_reason: Option<String>,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_role: Option<String>,
+    #[serde(default)]
+    pub project_confidence: Option<String>,
+    #[serde(default)]
+    pub project_evidence: ProjectTechnicalEvidence,
+    #[serde(default)]
+    pub project_relationships: Vec<ProjectRelationship>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -109,7 +123,9 @@ struct LatestScan {
     classification_context: String,
 }
 
-const PERSISTENT_SCAN_VERSION: u32 = 1;
+// Project-evidence fields are part of the serialized scan result. Bump the
+// snapshot schema so an older result cannot reintroduce stale project paths.
+const PERSISTENT_SCAN_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistentScan {
@@ -187,7 +203,7 @@ fn load_persistent_scan(root: &Path, language: AppLanguage) -> Option<LatestScan
     latest_scan_is_current(&cached).then_some(cached)
 }
 
-const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261013-1";
+const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261014-project-groups-3";
 
 fn context_file_signature(path: &Path) -> String {
     if !path.is_file() {
@@ -3302,6 +3318,68 @@ fn value_is_authoritative_mod_source(source: &str) -> bool {
     matches!(source, "NRaasInternal" | "ModName" | "CASP" | "OBJD")
 }
 
+fn apply_universal_project_grouping(items: &mut [ScanPackageItem], language: AppLanguage) {
+    let evidence = items
+        .iter()
+        .map(|item| (item.path.clone(), item.project_evidence.clone()))
+        .collect::<Vec<_>>();
+    let assignments = assign_project_groups(&evidence);
+    let scripts = localized_special_folder(language, "scripts").to_string();
+    let gameplay = localized_special_folder(language, "gameplay").to_string();
+
+    for item in items.iter_mut() {
+        let Some(assignment) = assignments.get(&item.path) else {
+            continue;
+        };
+        item.project_id = Some(assignment.group_id.clone());
+        item.project_role = Some(assignment.role.clone());
+        item.project_confidence = Some(assignment.confidence.clone());
+        item.project_relationships = assignment.relationships.clone();
+        item.detected_from.push("ProjectEvidenceGraph".to_string());
+        item.detected_from.sort();
+        item.detected_from.dedup();
+
+        // Relationships are useful even when physical regrouping is unsafe.
+        // Overrides, corrections, merged Sim packages, review states and
+        // empty destinations must never be forced into a script project.
+        let protected = assignment.confidence != "confirmed"
+            || assignment.role == "shared_dependency"
+            || item.status != "classified"
+            || item.destination_parts.is_empty()
+            || item
+                .detected_from
+                .iter()
+                .any(|source| source == "MergedSimExport")
+            || item.destination_parts.first().is_some_and(|part| {
+                part.eq_ignore_ascii_case("Overrides")
+                    || part.eq_ignore_ascii_case("Correções")
+                    || part.eq_ignore_ascii_case("Fixes")
+                    || part.starts_with('#')
+            });
+        if protected {
+            item.warnings.push(
+                "Project relationship recorded without physical regrouping because the current destination is protected or unresolved."
+                    .to_string(),
+            );
+            continue;
+        }
+
+        let destination = vec![scripts.clone(), gameplay.clone(), assignment.label.clone()];
+        if item.destination_parts == destination {
+            continue;
+        }
+        let previous = item.destination_parts.join("\\");
+        item.destination_parts = destination.clone();
+        item.destination_path = Some(destination.join("\\"));
+        item.classification_reason = Some(format!(
+            "{} | Confirmed project relationship ({}) grouped with technically linked components; previous destination was {}.",
+            item.classification_reason.clone().unwrap_or_default(),
+            assignment.role,
+            previous
+        ));
+    }
+}
+
 fn apply_named_mod_companions(items: &mut [ScanPackageItem]) {
     let mut destinations = HashMap::<String, (BTreeSet<String>, usize, String)>::new();
 
@@ -3992,9 +4070,15 @@ fn scan_one_with_index(
                 classifications: Vec::new(),
                 classification_reason: None,
                 warnings: vec![error.to_string()],
+                project_id: None,
+                project_role: None,
+                project_confidence: None,
+                project_evidence: ProjectTechnicalEvidence::default(),
+                project_relationships: Vec::new(),
             };
         }
     };
+    let project_evidence = extract_package_evidence(path, &package);
 
     // The duplicate/conflict phases need full resource fingerprints. Build
     // them now, while this DBPF is already decoded, instead of reopening it
@@ -4423,6 +4507,11 @@ fn scan_one_with_index(
         classifications,
         classification_reason,
         warnings,
+        project_id: None,
+        project_role: None,
+        project_confidence: None,
+        project_evidence,
+        project_relationships: Vec::new(),
     }
 }
 
@@ -4668,7 +4757,7 @@ fn scan_packages_core_with_progress(
     let postprocess_started = Instant::now();
     apply_slider_companion_classification(&package_paths, &mut items, &slider_instances);
     apply_nraas_family_subfolders(language, &mut items);
-    apply_named_mod_companions(&mut items);
+    apply_universal_project_grouping(&mut items, language);
     apply_manual_classifications(&root, &mut items);
 
     for item in &mut items {
@@ -4811,7 +4900,7 @@ pub fn scan_selected_package_paths(
 
     apply_slider_companion_classification(&paths, &mut items, &slider_instances);
     apply_nraas_family_subfolders(language, &mut items);
-    apply_named_mod_companions(&mut items);
+    apply_universal_project_grouping(&mut items, language);
     apply_manual_classifications(root, &mut items);
 
     for item in &mut items {
@@ -5907,6 +5996,11 @@ mod tests {
             classifications: Vec::new(),
             classification_reason: None,
             warnings: Vec::new(),
+            project_id: None,
+            project_role: None,
+            project_confidence: None,
+            project_evidence: ProjectTechnicalEvidence::default(),
+            project_relationships: Vec::new(),
         };
         assert!(!may_reclassify_as_companion(&item));
         item.catalog_resource_count = 0;

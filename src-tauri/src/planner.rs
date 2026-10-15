@@ -5327,6 +5327,11 @@ mod tests {
                 classifications: Vec::new(),
                 classification_reason: Some("synthetic regression".into()),
                 warnings: Vec::new(),
+                project_id: None,
+                project_role: None,
+                project_confidence: None,
+                project_evidence: crate::project_grouping::ProjectTechnicalEvidence::default(),
+                project_relationships: Vec::new(),
             },
         )
     }
@@ -5863,6 +5868,11 @@ mod tests {
                 classifications: Vec::new(),
                 classification_reason: None,
                 warnings: Vec::new(),
+                project_id: None,
+                project_role: None,
+                project_confidence: None,
+                project_evidence: crate::project_grouping::ProjectTechnicalEvidence::default(),
+                project_relationships: Vec::new(),
             })
             .collect::<Vec<_>>();
         let groups = index_exact_duplicates(&packages, &scan_items, &selected);
