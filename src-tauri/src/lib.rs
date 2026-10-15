@@ -22,6 +22,7 @@ pub mod package_compare;
 pub mod package_details;
 pub mod package_family;
 pub mod project_grouping;
+pub mod reference_catalog;
 pub mod planner;
 pub mod quarantine;
 pub mod resource_cfg;
@@ -122,6 +123,8 @@ pub fn run() {
             fix_signatures::build_persistent_fix_signature_index,
             fix_signatures::get_persistent_fix_signature_index_status,
             fix_signatures::rebuild_persistent_fix_signature_index,
+            reference_catalog::get_reference_catalog_status,
+            reference_catalog::build_reference_catalogs,
             technical_search::technical_search,
             package_compare::compare_packages,
             inbox::scan_inbox,

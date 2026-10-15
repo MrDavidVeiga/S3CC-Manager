@@ -8,6 +8,10 @@ default-run = "s3cc-organizer"
 name = "s3cc-organizer"
 path = "src/main.rs"
 
+[[bin]]
+name = "reference-catalog-builder"
+path = "src/bin/reference_catalog_builder.rs"
+
 [lib]
 name = "s3cc_organizer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

@@ -5332,6 +5332,7 @@ mod tests {
                 project_confidence: None,
                 project_evidence: crate::project_grouping::ProjectTechnicalEvidence::default(),
                 project_relationships: Vec::new(),
+                reference_evidence: None,
             },
         )
     }
@@ -5873,6 +5874,7 @@ mod tests {
                 project_confidence: None,
                 project_evidence: crate::project_grouping::ProjectTechnicalEvidence::default(),
                 project_relationships: Vec::new(),
+                reference_evidence: None,
             })
             .collect::<Vec<_>>();
         let groups = index_exact_duplicates(&packages, &scan_items, &selected);

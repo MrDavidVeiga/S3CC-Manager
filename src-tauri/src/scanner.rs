@@ -15,6 +15,7 @@ use crate::{
         assign_project_groups, extract_package_evidence, ProjectRelationship,
         ProjectTechnicalEvidence,
     },
+    reference_catalog::{self, ReferenceEvidence},
     resource_cfg::is_mods_layout_root,
     slider::{fbln_evidence, read_fbln_metadata, FblnMetadata},
     workspace::{load_workspace_for_root, split_destination},
@@ -72,6 +73,8 @@ pub struct ScanPackageItem {
     pub project_evidence: ProjectTechnicalEvidence,
     #[serde(default)]
     pub project_relationships: Vec<ProjectRelationship>,
+    #[serde(default)]
+    pub reference_evidence: Option<ReferenceEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -4075,10 +4078,12 @@ fn scan_one_with_index(
                 project_confidence: None,
                 project_evidence: ProjectTechnicalEvidence::default(),
                 project_relationships: Vec::new(),
+                reference_evidence: None,
             };
         }
     };
     let project_evidence = extract_package_evidence(path, &package);
+    let reference_evidence = reference_catalog::analyze_package(&package);
 
     // The duplicate/conflict phases need full resource fingerprints. Build
     // them now, while this DBPF is already decoded, instead of reopening it
@@ -4422,6 +4427,33 @@ fn scan_one_with_index(
         )
     };
 
+    if let Some(evidence) = reference_evidence.as_ref() {
+        if evidence.store_confidence.as_deref() == Some("confirmed")
+            && !evidence.store_category_parts.is_empty()
+            && (status == "unknown" || status == "needs_review")
+        {
+            detected_from.insert("StoreCatalogExact".to_string());
+            destination_parts = evidence.store_category_parts.clone();
+            destination_path = Some(destination_parts.join("\\"));
+            status = "classified".to_string();
+            classification_reason = Some(
+                "Confirmed by the persistent Sims 3 Store technical package/resource-set catalog."
+                    .to_string(),
+            );
+        }
+        if evidence.official_overlap_kind.as_deref() == Some("replacement_candidate") {
+            detected_from.insert("OfficialReplacementEvidence".to_string());
+        }
+        if evidence.official_overlap_kind.as_deref() == Some("official_copy") {
+            detected_from.insert("OfficialResourceMatch".to_string());
+        }
+        for message in &evidence.evidence {
+            if !warnings.contains(message) {
+                warnings.push(message.clone());
+            }
+        }
+    }
+
     if classification_reason.is_none() && !classifications.is_empty() {
         classification_reason = Some(
             classifications
@@ -4512,6 +4544,7 @@ fn scan_one_with_index(
         project_confidence: None,
         project_evidence,
         project_relationships: Vec::new(),
+        reference_evidence,
     }
 }
 
@@ -6001,6 +6034,7 @@ mod tests {
             project_confidence: None,
             project_evidence: ProjectTechnicalEvidence::default(),
             project_relationships: Vec::new(),
+            reference_evidence: None,
         };
         assert!(!may_reclassify_as_companion(&item));
         item.catalog_resource_count = 0;
