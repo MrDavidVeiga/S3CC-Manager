@@ -95,6 +95,10 @@ pub struct ScanStats {
     pub postprocess_ms: u128,
     pub dbpf_load_ms: u128,
     pub resource_decode_ms: u128,
+    #[serde(default)]
+    pub reference_catalog_ms: u128,
+    #[serde(default)]
+    pub project_grouping_ms: u128,
     /// Full-file hashing performed while populating the shared read-only
     /// resource index. It prevents duplicate analysis from reopening DBPFs;
     /// executor/preflight still hashes again before a write.
@@ -3984,6 +3988,8 @@ struct ScanTiming {
     dbpf_load_us: u128,
     resource_decode_us: u128,
     full_hash_us: u128,
+    reference_catalog_us: u128,
+    project_grouping_us: u128,
 }
 
 fn scan_one(
@@ -4002,6 +4008,7 @@ fn scan_one(
         fix_index,
         timing,
         None,
+        None,
     )
 }
 
@@ -4012,6 +4019,7 @@ fn scan_one_with_index(
     slider_instances: &mut HashSet<u64>,
     fix_index: Option<&FixSignatureIndex>,
     timing: &mut ScanTiming,
+    reference_catalogs: Option<&reference_catalog::ReferenceCatalogSet>,
     shared_index: Option<&mut cache::FingerprintCache>,
 ) -> ScanPackageItem {
     let relative = path
@@ -4082,19 +4090,18 @@ fn scan_one_with_index(
             };
         }
     };
-    let project_evidence = extract_package_evidence(path, &package);
-    let reference_evidence = reference_catalog::analyze_package(&package);
-
     // The duplicate/conflict phases need full resource fingerprints. Build
     // them now, while this DBPF is already decoded, instead of reopening it
     // later in the same unified analysis. A failure here does not discard a
     // valid classification; those later phases fall back to their validated
     // readers and report the specific cache error.
+    let mut shared_cached = None;
     let shared_index_error = if let Some(shared_index) = shared_index {
-        match cache::remember_loaded_package(path, &package, shared_index) {
-            Ok(metrics) => {
+        match cache::remember_loaded_package_with_result(path, &package, shared_index) {
+            Ok((cached, metrics)) => {
                 timing.full_hash_us += metrics.hash_us;
                 timing.resource_decode_us += metrics.resource_decode_us;
+                shared_cached = Some(cached);
                 None
             }
             Err(error) => Some(format!(
@@ -4104,6 +4111,18 @@ fn scan_one_with_index(
     } else {
         None
     };
+
+    let project_started = Instant::now();
+    let project_evidence = extract_package_evidence(path, &package);
+    timing.project_grouping_us += project_started.elapsed().as_micros();
+    let reference_started = Instant::now();
+    let reference_evidence = match (shared_cached.as_ref(), reference_catalogs) {
+        (Some(cached), Some(catalogs)) => {
+            reference_catalog::compare_cached_package(cached, catalogs)
+        }
+        _ => reference_catalog::analyze_package(&package),
+    };
+    timing.reference_catalog_us += reference_started.elapsed().as_micros();
 
     let mut type_set = BTreeSet::new();
     let mut type_ids = BTreeSet::new();
@@ -4638,7 +4657,7 @@ pub fn scan_packages_core(
     language: AppLanguage,
     operation_kind: Option<&str>,
 ) -> Result<ScanResult, String> {
-    scan_packages_core_with_progress(folder, language, operation_kind, true)
+    scan_packages_core_with_progress(folder, language, operation_kind, true, true)
 }
 
 /// Variant for a coordinated analysis.  Cancellation remains cooperative,
@@ -4649,7 +4668,7 @@ pub(crate) fn scan_packages_core_quiet_progress(
     language: AppLanguage,
     operation_kind: Option<&str>,
 ) -> Result<ScanResult, String> {
-    scan_packages_core_with_progress(folder, language, operation_kind, false)
+    scan_packages_core_with_progress(folder, language, operation_kind, false, false)
 }
 
 fn scan_packages_core_with_progress(
@@ -4657,6 +4676,7 @@ fn scan_packages_core_with_progress(
     language: AppLanguage,
     operation_kind: Option<&str>,
     report_progress: bool,
+    allow_cached_result: bool,
 ) -> Result<ScanResult, String> {
     let total_started = Instant::now();
     if folder.trim().is_empty() {
@@ -4671,24 +4691,26 @@ fn scan_packages_core_with_progress(
     // fingerprints, rule-version context and language/manual-index context
     // must all still match before any classified item is reused. Mutating
     // operations continue to verify full SHA-256 identities separately.
-    if let Some(mut cached) = cached_scan_for(&root, language) {
-        cached.cache_hit = true;
-        cached.reused_packages = cached.items.len();
-        cached.stats.total_ms = total_started.elapsed().as_millis();
-        cached.stats.cache_hit = true;
-        cached.stats.reused_packages = cached.items.len();
-        cached.stats.package_reads = 0;
-        cached.stats.dbpf_load_ms = 0;
-        cached.stats.resource_decode_ms = 0;
-        cached.stats.classification_ms = 0;
-        cached.stats.postprocess_ms = 0;
-        if report_progress {
-            if let Some(kind) = operation_kind {
-                operation::set_total(kind, cached.items.len());
-                operation::update(kind, cached.items.len(), None, "cache_reused");
+    if allow_cached_result {
+        if let Some(mut cached) = cached_scan_for(&root, language) {
+            cached.cache_hit = true;
+            cached.reused_packages = cached.items.len();
+            cached.stats.total_ms = total_started.elapsed().as_millis();
+            cached.stats.cache_hit = true;
+            cached.stats.reused_packages = cached.items.len();
+            cached.stats.package_reads = 0;
+            cached.stats.dbpf_load_ms = 0;
+            cached.stats.resource_decode_ms = 0;
+            cached.stats.classification_ms = 0;
+            cached.stats.postprocess_ms = 0;
+            if report_progress {
+                if let Some(kind) = operation_kind {
+                    operation::set_total(kind, cached.items.len());
+                    operation::update(kind, cached.items.len(), None, "cache_reused");
+                }
             }
+            return Ok(cached);
         }
-        return Ok(cached);
     }
 
     let discovery_started = Instant::now();
@@ -4712,6 +4734,7 @@ fn scan_packages_core_with_progress(
     }
 
     let mut items = Vec::with_capacity(package_paths.len());
+    let reference_catalogs = reference_catalog::load_catalogs();
     let mut slider_instances = HashSet::<u64>::new();
     let fix_index = fix_signatures::load_persistent_index();
     let mut timing = ScanTiming::default();
@@ -4772,6 +4795,7 @@ fn scan_packages_core_with_progress(
                 &mut slider_instances,
                 fix_index.as_ref(),
                 &mut timing,
+                Some(reference_catalogs.as_ref()),
                 Some(&mut shared_index),
             ));
         }
@@ -4790,7 +4814,9 @@ fn scan_packages_core_with_progress(
     let postprocess_started = Instant::now();
     apply_slider_companion_classification(&package_paths, &mut items, &slider_instances);
     apply_nraas_family_subfolders(language, &mut items);
+    let project_grouping_started = Instant::now();
     apply_universal_project_grouping(&mut items, language);
+    timing.project_grouping_us += project_grouping_started.elapsed().as_micros();
     apply_manual_classifications(&root, &mut items);
 
     for item in &mut items {
@@ -4868,6 +4894,8 @@ fn scan_packages_core_with_progress(
     stats.postprocess_ms = postprocess_ms;
     stats.dbpf_load_ms = timing.dbpf_load_us / 1_000;
     stats.resource_decode_ms = timing.resource_decode_us / 1_000;
+    stats.reference_catalog_ms = timing.reference_catalog_us / 1_000;
+    stats.project_grouping_ms = timing.project_grouping_us / 1_000;
     stats.full_hash_ms = timing.full_hash_us / 1_000;
     stats.package_reads = timing.package_reads;
     stats.cache_hit = false;
@@ -4926,6 +4954,7 @@ pub fn scan_selected_package_paths(
             &mut slider_instances,
             fix_index.as_ref(),
             &mut timing,
+            None,
             Some(&mut shared_index),
         ));
     }

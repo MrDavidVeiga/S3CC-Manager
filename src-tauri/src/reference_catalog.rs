@@ -110,7 +110,7 @@ pub struct OfficialCatalog {
     pub products: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ReferenceEvidence {
     pub store_match_kind: Option<String>,
@@ -1017,18 +1017,19 @@ fn package_resources(package: &Package) -> Result<Vec<ReferenceResource>> {
         .collect()
 }
 
-fn compare_package(package: &Package, catalogs: &ReferenceCatalogSet) -> Option<ReferenceEvidence> {
-    let resources = package_resources(package).ok()?;
+fn compare_resources(
+    resources: &[ReferenceResource],
+    file_hash: Option<&str>,
+    catalogs: &ReferenceCatalogSet,
+) -> Option<ReferenceEvidence> {
     if resources.is_empty() {
         return None;
     }
     let technical_signature = signatures(&resources)?.1;
-    let file_hash = sha256_path(&package.path).ok().map(|(hash, _)| hash);
     let mut result = ReferenceEvidence::default();
 
     if let Some(store) = catalogs.store.as_ref() {
         let mut candidate_indices = file_hash
-            .as_ref()
             .and_then(|hash| catalogs.store_index.by_sha256.get(hash).cloned())
             .unwrap_or_default();
         let exact = !candidate_indices.is_empty();
@@ -1079,7 +1080,7 @@ fn compare_package(package: &Package, catalogs: &ReferenceCatalogSet) -> Option<
             }
         } else {
             let mut shared_by_package: HashMap<usize, usize> = HashMap::new();
-            for resource in &resources {
+            for resource in resources {
                 for package_index in catalogs
                     .store_index
                     .by_tgi
@@ -1110,7 +1111,7 @@ fn compare_package(package: &Package, catalogs: &ReferenceCatalogSet) -> Option<
         let mut changed = 0;
         let mut unmatched = 0;
         let mut occurrences = BTreeSet::new();
-        for resource in &resources {
+        for resource in resources {
             let candidates = catalogs.official_index.by_tgi.get(&resource.key());
             let Some(candidates) = candidates else {
                 unmatched += 1;
@@ -1159,6 +1160,36 @@ fn compare_package(package: &Package, catalogs: &ReferenceCatalogSet) -> Option<
     }
 
     (result.store_match_kind.is_some() || result.official_overlap_kind.is_some()).then_some(result)
+}
+
+fn compare_package(package: &Package, catalogs: &ReferenceCatalogSet) -> Option<ReferenceEvidence> {
+    let resources = package_resources(package).ok()?;
+    let file_hash = sha256_path(&package.path).ok().map(|(hash, _)| hash);
+    compare_resources(&resources, file_hash.as_deref(), catalogs)
+}
+
+/// Compare a package against the reference catalogs using the shared DBPF
+/// fingerprint entry created by the unified scanner. This path performs no
+/// package reopen, full-file hash, or payload decode.
+pub(crate) fn compare_cached_package(
+    cached: &cache::CachedPackage,
+    catalogs: &ReferenceCatalogSet,
+) -> Option<ReferenceEvidence> {
+    if catalogs.store.is_none() && catalogs.official.is_none() {
+        return None;
+    }
+    let resources = cached
+        .resources
+        .iter()
+        .map(|resource| ReferenceResource {
+            type_id: resource.type_id,
+            group: resource.group,
+            instance: resource.instance,
+            payload_sha256: resource.payload_sha256.clone(),
+            payload_size: resource.payload_size,
+        })
+        .collect::<Vec<_>>();
+    compare_resources(&resources, Some(&cached.file_sha256), catalogs)
 }
 
 pub fn analyze_package(package: &Package) -> Option<ReferenceEvidence> {
@@ -1414,6 +1445,59 @@ mod tests {
         );
         assert_eq!(evidence.store_confidence.as_deref(), Some("review"));
         assert!(evidence.store_category_parts.is_empty());
+    }
+
+    #[test]
+    fn cached_catalog_compare_reuses_shared_fingerprints() {
+        let package = package_fixture(vec![reference("10", "one")]);
+        let mut cache = cache::FingerprintCache::default();
+        let (cached, _) = cache::remember_loaded_package_with_result(
+            &package.path,
+            &package,
+            &mut cache,
+        )
+        .unwrap();
+        let resources = cached
+            .resources
+            .iter()
+            .map(|resource| ReferenceResource {
+                type_id: resource.type_id,
+                group: resource.group,
+                instance: resource.instance,
+                payload_sha256: resource.payload_sha256.clone(),
+                payload_size: resource.payload_size,
+            })
+            .collect::<Vec<_>>();
+        let mut entry = store("cached.package", &["CAS", "Roupas"], resources);
+        entry.sha256 = cached.file_sha256.clone();
+        let catalog = StoreCatalog {
+            version: CATALOG_VERSION,
+            generated_at: String::new(),
+            source_label: STORE_LABEL.to_string(),
+            source_root: String::new(),
+            directories: vec![],
+            package_count: 1,
+            packages: vec![entry],
+            resource_count: cached.resources.len(),
+        };
+        let catalogs = catalog_set(Some(catalog), None);
+
+        let direct_started = std::time::Instant::now();
+        let direct = (0..4)
+            .map(|_| compare_package(&package, &catalogs))
+            .collect::<Vec<_>>();
+        let direct_ms = direct_started.elapsed().as_millis();
+        let cached_started = std::time::Instant::now();
+        let reused = (0..4)
+            .map(|_| compare_cached_package(&cached, &catalogs))
+            .collect::<Vec<_>>();
+        let cached_ms = cached_started.elapsed().as_millis();
+        eprintln!(
+            "reference_catalog_benchmark direct_ms={} cached_ms={} iterations=4",
+            direct_ms, cached_ms
+        );
+        assert_eq!(direct, reused);
+        assert!(cached_ms <= direct_ms);
     }
 
     fn package_fixture(resources: Vec<ReferenceResource>) -> Package {

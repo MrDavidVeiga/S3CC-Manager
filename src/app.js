@@ -257,6 +257,12 @@ const I18N = {
     comparisonTime: "Comparison",
     cacheEntries: "Cache entries",
     cacheSize: "Cache size",
+    enumerationTime: "Enumeration",
+    classificationTime: "Classification",
+    postprocessTime: "Post-processing",
+    catalogTime: "Reference catalogs",
+    projectGroupingTime: "Project grouping",
+    cacheValidationTime: "Cache validation",
     openPackageLocation: "Open Package Location",
     classificationReason: "Classification evidence",
     classificationConfidence: "Classification confidence",
@@ -899,6 +905,12 @@ const I18N = {
     comparisonTime: "Comparação",
     cacheEntries: "Itens no cache",
     cacheSize: "Tamanho do cache",
+    enumerationTime: "Enumeração",
+    classificationTime: "Classificação",
+    postprocessTime: "Pós-processamento",
+    catalogTime: "Catálogos de referência",
+    projectGroupingTime: "Agrupamento de projetos",
+    cacheValidationTime: "Validação do cache",
     openPackageLocation: "Abrir Localização do Package",
     classificationReason: "Evidência da classificação",
     classificationConfidence: "Confiança da classificação",
@@ -1540,6 +1552,12 @@ const I18N = {
     comparisonTime: "Comparación",
     cacheEntries: "Elementos en caché",
     cacheSize: "Tamaño de caché",
+    enumerationTime: "Enumeración",
+    classificationTime: "Clasificación",
+    postprocessTime: "Postprocesamiento",
+    catalogTime: "Catálogos de referencia",
+    projectGroupingTime: "Agrupación de proyectos",
+    cacheValidationTime: "Validación de caché",
     openPackageLocation: "Abrir Ubicación del Package",
     classificationReason: "Evidencia de clasificación",
     classificationConfidence: "Confianza de clasificación",
@@ -1984,6 +2002,7 @@ const state = {
   restoreError: "",
   restoreNotice: "",
   duplicatesAnalysis: null,
+  unifiedStats: null,
   duplicatesBusy: false,
   duplicatesError: "",
   duplicatesNotice: "",
@@ -2713,6 +2732,17 @@ function renderDiagnostics() {
   el.diagnosticsContent.innerHTML = "";
   if (state.stats?.totalMs != null) {
     appendDiagnostic(t("scanTime"), formatMs(state.stats.totalMs));
+  }
+  const unified = state.unifiedStats;
+  if (unified) {
+    appendDiagnostic(t("enumerationTime"), formatMs(unified.discoveryMs));
+    appendDiagnostic(t("dbpfReadTime"), formatMs(unified.dbpfLoadMs));
+    appendDiagnostic(t("hashingTime"), formatMs(unified.fullHashMs));
+    appendDiagnostic(t("classificationTime"), formatMs(unified.classificationMs));
+    appendDiagnostic(t("postprocessTime"), formatMs(unified.postprocessMs));
+    appendDiagnostic(t("catalogTime"), formatMs(unified.referenceCatalogMs));
+    appendDiagnostic(t("projectGroupingTime"), formatMs(unified.projectGroupingMs));
+    appendDiagnostic(t("cacheValidationTime"), formatMs(unified.cacheValidationMs));
   }
   const dup = state.duplicatesAnalysis?.stats;
   if (dup) {
@@ -9180,6 +9210,7 @@ async function runUnifiedAnalysis(preserveSelection = false, preserveNotice = fa
     const scan = result.scan || {};
     state.items = scan.items || [];
     state.stats = scan.stats || null;
+    state.unifiedStats = result.stats || null;
     virtualViews.manager.items = null;
 
     const eligibleIds = new Set(

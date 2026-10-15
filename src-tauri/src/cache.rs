@@ -365,6 +365,17 @@ pub fn remember_loaded_package(
     package: &Package,
     cache: &mut FingerprintCache,
 ) -> Result<CacheBuildMetrics, String> {
+    remember_loaded_package_with_result(path, package, cache).map(|(_, metrics)| metrics)
+}
+
+/// Index a DBPF that the scanner has already opened and return the resulting
+/// entry so later unified-analysis phases can query the same fingerprints
+/// without reopening or rehashing the package.
+pub fn remember_loaded_package_with_result(
+    path: &Path,
+    package: &Package,
+    cache: &mut FingerprintCache,
+) -> Result<(CachedPackage, CacheBuildMetrics), String> {
     let total_started = Instant::now();
     let key = canonical_key(path)?;
     let (size, modified_ns) = metadata_signature(path)?;
@@ -406,33 +417,34 @@ pub fn remember_loaded_package(
     let resource_decode_ms = decode_started.elapsed().as_millis();
     let resource_decode_us = decode_started.elapsed().as_micros();
 
-    cache.entries.insert(
-        key.clone(),
-        CachedPackage {
-            path: key,
-            size,
-            modified_ns,
-            file_sha256,
-            quick_fingerprint,
-            dbpf_major: Some(package.major),
-            dbpf_minor: Some(package.minor),
-            resources,
-            parse_error,
-        },
-    );
+    let cached = CachedPackage {
+        path: key,
+        size,
+        modified_ns,
+        file_sha256,
+        quick_fingerprint,
+        dbpf_major: Some(package.major),
+        dbpf_minor: Some(package.minor),
+        resources,
+        parse_error,
+    };
+    cache.entries.insert(cached.path.clone(), cached.clone());
 
-    Ok(CacheBuildMetrics {
-        total_ms: total_started.elapsed().as_millis(),
-        total_us: total_started.elapsed().as_micros(),
-        hash_ms,
-        hash_us,
-        quick_fingerprint_ms,
-        quick_fingerprint_us,
-        resource_decode_ms,
-        resource_decode_us,
-        integrity_verified: true,
-        ..CacheBuildMetrics::default()
-    })
+    Ok((
+        cached,
+        CacheBuildMetrics {
+            total_ms: total_started.elapsed().as_millis(),
+            total_us: total_started.elapsed().as_micros(),
+            hash_ms,
+            hash_us,
+            quick_fingerprint_ms,
+            quick_fingerprint_us,
+            resource_decode_ms,
+            resource_decode_us,
+            integrity_verified: true,
+            ..CacheBuildMetrics::default()
+        },
+    ))
 }
 
 fn get_or_build_with_validation(

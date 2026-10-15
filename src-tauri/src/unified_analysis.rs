@@ -33,6 +33,12 @@ pub struct UnifiedAnalysisStats {
     pub packages: usize,
     pub total_ms: u128,
     pub scanner_ms: u128,
+    pub discovery_ms: u128,
+    pub classification_ms: u128,
+    pub postprocess_ms: u128,
+    pub reference_catalog_ms: u128,
+    pub project_grouping_ms: u128,
+    pub cache_validation_ms: u128,
     pub duplicates_ms: u128,
     pub conflicts_ms: u128,
     pub package_reads: usize,
@@ -239,7 +245,10 @@ pub(crate) fn analyze_unified_core(
         return Err(format!("Folder does not exist: {}", root.display()));
     }
 
-    if let Some(mut cached) = current_cached(&root, language) {
+    let cache_validation_started = Instant::now();
+    let current = current_cached(&root, language);
+    let cache_validation_ms = cache_validation_started.elapsed().as_millis();
+    if let Some(mut cached) = current {
         // Report the work performed by *this* request, not the historical
         // cost stored with the result.  A valid reuse still walks signatures
         // for invalidation, but it does not reopen DBPFs or rerun either
@@ -247,6 +256,7 @@ pub(crate) fn analyze_unified_core(
         cached.stats = UnifiedAnalysisStats {
             packages: cached.scan.items.len(),
             total_ms: started.elapsed().as_millis(),
+            cache_validation_ms,
             scan_cache_reused: true,
             unified_cache_reused: true,
             ..UnifiedAnalysisStats::default()
@@ -308,6 +318,12 @@ pub(crate) fn analyze_unified_core(
         packages: scan.items.len(),
         total_ms: started.elapsed().as_millis(),
         scanner_ms,
+        discovery_ms: scan.stats.discovery_ms,
+        classification_ms: scan.stats.classification_ms,
+        postprocess_ms: scan.stats.postprocess_ms,
+        reference_catalog_ms: scan.stats.reference_catalog_ms,
+        project_grouping_ms: scan.stats.project_grouping_ms,
+        cache_validation_ms,
         duplicates_ms,
         conflicts_ms,
         package_reads: scan.stats.package_reads,
@@ -407,6 +423,16 @@ mod tests {
 
         let first = analyze_unified_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
             .expect("first unified analysis");
+        eprintln!(
+            "unified_benchmark first_ms={} scanner_ms={} dbpf_ms={} hash_ms={} reads={} duplicates_ms={} conflicts_ms={}",
+            first.stats.total_ms,
+            first.stats.scanner_ms,
+            first.stats.dbpf_load_ms,
+            first.stats.full_hash_ms,
+            first.stats.package_reads,
+            first.stats.duplicates_ms,
+            first.stats.conflicts_ms,
+        );
         assert_eq!(first.scan.stats.packages, 2);
         assert_eq!(first.stats.package_reads, 2);
         assert_eq!(first.stats.duplicate_passes, 1);
@@ -418,6 +444,13 @@ mod tests {
         let second =
             analyze_unified_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
                 .expect("reused unified analysis");
+        eprintln!(
+            "unified_benchmark second_ms={} cache_validation_ms={} reads={} unified_cache_reused={}",
+            second.stats.total_ms,
+            second.stats.cache_validation_ms,
+            second.stats.package_reads,
+            second.stats.unified_cache_reused,
+        );
         assert!(second.stats.unified_cache_reused);
         assert_eq!(second.stats.duplicate_passes, 0);
         assert_eq!(second.stats.conflict_passes, 0);
@@ -492,6 +525,13 @@ mod tests {
         fs::write(root.join("b.package"), minimal_dbpf(9)).unwrap();
         let third = analyze_unified_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
             .expect("incremental unified analysis");
+        eprintln!(
+            "unified_benchmark changed_ms={} scanner_ms={} reads={} reused_packages={}",
+            third.stats.total_ms,
+            third.stats.scanner_ms,
+            third.stats.package_reads,
+            third.scan.stats.reused_packages,
+        );
         assert!(!third.stats.unified_cache_reused);
         assert_eq!(third.stats.package_reads, 1);
         assert_eq!(third.duplicates.stats.cache_misses, 0);
