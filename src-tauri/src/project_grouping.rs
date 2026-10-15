@@ -221,45 +221,90 @@ fn referenced_tgis(data: &[u8]) -> Vec<String> {
 }
 
 fn project_label(evidence: &ProjectTechnicalEvidence) -> String {
+    // A full assembly identity is a better project label than its final
+    // segment: "Creator.First.Mod" and "Creator.Second.Mod" must not both
+    // become the same ambiguous directory named "Mod".
     let candidate = evidence
         .assembly_identities
         .iter()
-        .find(|value| {
-            let value = value.trim();
-            !value.to_ascii_lowercase().contains("sims3")
-                && value.chars().any(|ch| ch.is_ascii_alphabetic())
-                && value.len() <= 80
+        .find_map(|raw| {
+            let value = raw.trim();
+            let value = if value.to_ascii_lowercase().ends_with(".dll") {
+                &value[..value.len() - 4]
+            } else {
+                value
+            };
+            let lower = value.to_ascii_lowercase();
+            if value.len() > 160
+                || !value.chars().any(|ch| ch.is_ascii_alphabetic())
+                || matches!(lower.as_str(), "mscorlib" | "system" | "system.core" | "sims3.gameplay")
+                || lower.starts_with("microsoft.")
+            {
+                None
+            } else {
+                Some(value.to_owned())
+            }
         })
         .or_else(|| {
-            evidence.namespaces.iter().find(|value| {
-                let value = value.trim();
-                !value.to_ascii_lowercase().contains("sims3")
-                    && value.chars().any(|ch| ch.is_ascii_alphabetic())
-                    && value.len() <= 80
+            evidence.namespaces.iter().find_map(|raw| {
+                let value = raw.trim();
+                (value.len() <= 160 && value.contains('.')
+                    && value.chars().any(|ch| ch.is_ascii_alphabetic()))
+                .then(|| value.to_owned())
             })
         })
         .or_else(|| {
-            evidence.classes.iter().find(|value| {
-                let value = value.trim();
-                !value.to_ascii_lowercase().contains("sims3")
-                    && value.chars().any(|ch| ch.is_ascii_alphabetic())
-                    && value.len() <= 80
+            evidence.classes.iter().find_map(|raw| {
+                // Remove the implementation-class name; do not call every
+                // project "MainController" or "Instantiator".
+                let (namespace, _) = raw.rsplit_once('.')?;
+                (namespace.len() <= 160 && namespace.chars().any(|ch| ch.is_ascii_alphabetic()))
+                    .then(|| namespace.to_owned())
             })
         })
-        .map(|value| value.rsplit('.').next().unwrap_or(value))
-        .unwrap_or("Projeto");
+        .unwrap_or_default();
+
+    // Windows-safe directory segment; dots inside assembly identities are
+    // meaningful and must not be erased. Never introduce path separators.
     let mut label = candidate
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == ' ' || *ch == '-')
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if label.is_empty() {
-        label = "Projeto".to_string();
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | ' ') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    label = label.trim_matches(|ch: char| ch == ' ' || ch == '.').to_string();
+    let reserved = label.to_ascii_uppercase();
+    if label.is_empty()
+        || matches!(reserved.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (reserved.len() == 4
+            && (reserved.starts_with("COM") || reserved.starts_with("LPT"))
+            && reserved.as_bytes()[3].is_ascii_digit())
+    {
+        // A generic "Projeto" for all unidentified sources would conflate
+        // unrelated mods. Derive a stable fallback from the evidence itself.
+        let stable_input = evidence
+            .assembly_identities
+            .first()
+            .or_else(|| evidence.namespaces.first())
+            .or_else(|| evidence.classes.first())
+            .map(String::as_str)
+            .unwrap_or("unknown-project");
+        let hash = stable_project_id(stable_input);
+        return format!("Projeto-{}", &hash[8..16]);
     }
-    label.chars().take(64).collect()
+    if label.chars().count() > 64 {
+        let hash = stable_project_id(&candidate);
+        let suffix = format!("-{}", &hash[8..16]);
+        let prefix = label.chars().take(64 - suffix.len()).collect::<String>();
+        label = format!("{}{}", prefix.trim_end_matches(|ch: char| ch == ' ' || ch == '.'), suffix);
+    }
+    label
 }
+
 
 pub fn extract_package_evidence(path: &Path, package: &Package) -> ProjectTechnicalEvidence {
     let mut evidence = ProjectTechnicalEvidence {
@@ -657,7 +702,33 @@ mod tests {
         assert_eq!(assignments.len(), 2);
         assert_eq!(assignments["object.package"].confidence, "confirmed");
         assert_eq!(assignments["object.package"].role, "project_component");
-        assert_eq!(assignments["object.package"].label, "ExampleProject");
+        assert_eq!(assignments["object.package"].label, "Example.Mod");
+    }
+
+    #[test]
+    fn project_labels_preserve_distinct_assembly_identities() {
+        let left = evidence(true, "FirstCreator.Mod");
+        let right = evidence(true, "SecondCreator.Mod");
+        assert_eq!(project_label(&left), "FirstCreator.Mod");
+        assert_eq!(project_label(&right), "SecondCreator.Mod");
+        assert_ne!(project_label(&left), project_label(&right));
+    }
+
+    #[test]
+    fn project_label_accepts_custom_sims3_prefixed_assemblies() {
+        let anchor = evidence(true, "Sims3.NeoH4x0r.Core");
+        assert_eq!(project_label(&anchor), "Sims3.NeoH4x0r.Core");
+    }
+
+    #[test]
+    fn project_label_is_safe_as_a_single_windows_directory() {
+        let mut anchor = evidence(true, "Creator:Example/Mod\\Variant");
+        let label = project_label(&anchor);
+        assert!(!label.is_empty());
+        assert!(!label.contains([':', '/', '\\']));
+        assert!(!label.ends_with(' ') && !label.ends_with('.'));
+        anchor.assembly_identities = vec!["AB".repeat(80)];
+        assert!(project_label(&anchor).chars().count() <= 64);
     }
 
     #[test]
