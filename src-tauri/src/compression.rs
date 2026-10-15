@@ -125,16 +125,50 @@ fn copy_blocks(out: &mut Vec<u8>, offset: usize, mut len: usize) {
     while len > 0 {
         let chunk = offset.min(len);
         let start = out.len() - offset;
-        let src = out[start..start + chunk].to_vec();
-        out.extend_from_slice(&src);
+        // The source and destination may be adjacent, but this branch only
+        // handles non-overlapping LZ copies (chunk < offset). Vec's
+        // memmove-style range extension avoids allocating a temporary buffer
+        // for every chunk of a large compressed resource.
+        out.extend_from_within(start..start + chunk);
         len -= chunk;
     }
 }
 
 fn copy_bytes(out: &mut Vec<u8>, offset: usize, mut len: usize) {
     while len > 0 {
-        let byte = out[out.len() - offset];
-        out.push(byte);
-        len -= 1;
+        // Copy one complete available pattern at a time. Recomputing the
+        // source after each extension preserves the overlapping LZ semantics
+        // (including offset == 1) while replacing a byte-at-a-time loop with
+        // a bounded memmove.
+        let chunk = offset.min(len);
+        let start = out.len() - offset;
+        out.extend_from_within(start..start + chunk);
+        len -= chunk;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_blocks, copy_bytes};
+
+    #[test]
+    fn non_overlapping_copy_preserves_block_order() {
+        let mut output = b"012345".to_vec();
+        copy_blocks(&mut output, 3, 5);
+        assert_eq!(output, b"01234534534");
+    }
+
+    #[test]
+    fn overlapping_copy_preserves_repeating_pattern() {
+        let mut output = b"ab".to_vec();
+        copy_bytes(&mut output, 2, 8);
+        assert_eq!(output, b"ababababab");
+    }
+
+    #[test]
+    fn overlapping_single_byte_copy_preserves_run() {
+        let mut output = b"x".to_vec();
+        copy_bytes(&mut output, 1, 9);
+        assert_eq!(output, b"xxxxxxxxxx");
     }
 }

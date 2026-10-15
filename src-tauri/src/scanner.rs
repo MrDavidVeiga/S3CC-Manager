@@ -25,7 +25,11 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    thread,
     time::Instant,
 };
 use walkdir::WalkDir;
@@ -4097,15 +4101,26 @@ fn scan_one_with_index(
     // readers and report the specific cache error.
     let mut shared_cached = None;
     let shared_index_error = if let Some(shared_index) = shared_index {
-        match cache::remember_loaded_package_with_result(path, &package, shared_index) {
-            Ok((cached, metrics)) => {
-                timing.full_hash_us += metrics.hash_us;
-                timing.resource_decode_us += metrics.resource_decode_us;
+        match cache::current_cached_entry(path, shared_index) {
+            Ok(Some(cached)) => {
                 shared_cached = Some(cached);
                 None
             }
+            Ok(None) => {
+                match cache::remember_loaded_package_with_result(path, &package, shared_index) {
+                    Ok((cached, metrics)) => {
+                        timing.full_hash_us += metrics.hash_us;
+                        timing.resource_decode_us += metrics.resource_decode_us;
+                        shared_cached = Some(cached);
+                        None
+                    }
+                    Err(error) => Some(format!(
+                        "Could not add package to the shared analysis index: {error}"
+                    )),
+                }
+            }
             Err(error) => Some(format!(
-                "Could not add package to the shared analysis index: {error}"
+                "Could not validate the shared analysis index: {error}"
             )),
         }
     } else {
@@ -4722,6 +4737,14 @@ fn scan_packages_core_with_progress(
         .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
     package_paths.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    let profile_enabled = std::env::var_os("S3CC_PROFILE_ROOT").is_some();
+    #[cfg(test)]
+    if let Some(limit) = std::env::var("S3CC_PROFILE_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        package_paths.truncate(limit);
+    }
     let mut shared_index = cache::load_cache(&root);
     cache::retain_existing(&mut shared_index, &package_paths);
     let discovery_ms = discovery_started.elapsed().as_millis();
@@ -4733,7 +4756,6 @@ fn scan_packages_core_with_progress(
         }
     }
 
-    let mut items = Vec::with_capacity(package_paths.len());
     let reference_catalogs = reference_catalog::load_catalogs();
     let mut slider_instances = HashSet::<u64>::new();
     let fix_index = fix_signatures::load_persistent_index();
@@ -4747,8 +4769,10 @@ fn scan_packages_core_with_progress(
             .collect::<HashMap<_, _>>()
     });
     let mut reused_packages = 0usize;
+    let mut profile_packages = Vec::<(u128, String)>::new();
     let classification_started = Instant::now();
-
+    let mut item_slots = vec![None; package_paths.len()];
+    let mut work = Vec::<(usize, PathBuf)>::new();
     for (index, path) in package_paths.iter().enumerate() {
         if let Some(kind) = operation_kind {
             if operation::is_cancelled(kind) {
@@ -4785,30 +4809,114 @@ fn scan_packages_core_with_progress(
             });
 
         if let Some(item) = reused {
-            items.push(item.clone());
+            item_slots[index] = Some(item.clone());
             reused_packages += 1;
         } else {
-            items.push(scan_one_with_index(
-                &root,
-                path,
-                language,
-                &mut slider_instances,
-                fix_index.as_ref(),
-                &mut timing,
-                Some(reference_catalogs.as_ref()),
-                Some(&mut shared_index),
-            ));
+            work.push((index, path.clone()));
         }
+    }
 
-        if report_progress {
-            if let Some(kind) = operation_kind {
-                let processed = index + 1;
-                if processed == package_paths.len() || processed % 8 == 0 {
-                    operation::update(kind, processed, None, "scanning");
+    let worker_count = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(work.len().max(1));
+    let chunk_size = work.len().max(1).div_ceil(worker_count);
+    let completed = Arc::new(AtomicUsize::new(reused_packages));
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let results = Mutex::new(Vec::<(
+        usize,
+        ScanPackageItem,
+        cache::FingerprintCache,
+        ScanTiming,
+        HashSet<u64>,
+        u128,
+        String,
+    )>::new());
+    let total_packages = package_paths.len();
+
+    thread::scope(|scope| {
+        for chunk in work.chunks(chunk_size) {
+            let results = &results;
+            let completed = Arc::clone(&completed);
+            let cancelled = Arc::clone(&cancelled);
+            let root = &root;
+            let reference_catalogs = reference_catalogs.as_ref();
+            let fix_index = fix_index.as_ref();
+            scope.spawn(move || {
+                let mut local_results = Vec::new();
+                let mut local_cache = cache::FingerprintCache::default();
+                let mut local_slider_instances = HashSet::new();
+                for (index, path) in chunk {
+                    if let Some(kind) = operation_kind {
+                        if operation::is_cancelled(kind) {
+                            cancelled.store(1, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    let started = Instant::now();
+                    let mut local_timing = ScanTiming::default();
+                    let item = scan_one_with_index(
+                        root,
+                        path,
+                        language,
+                        &mut local_slider_instances,
+                        fix_index,
+                        &mut local_timing,
+                        Some(reference_catalogs),
+                        Some(&mut local_cache),
+                    );
+                    let processed = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if report_progress {
+                        if let Some(kind) = operation_kind {
+                            if processed == total_packages || processed % 8 == 0 {
+                                operation::update(kind, processed, None, "scanning");
+                            }
+                        }
+                    }
+                    local_results.push((
+                        *index,
+                        item,
+                        local_cache.clone(),
+                        local_timing,
+                        local_slider_instances.clone(),
+                        started.elapsed().as_micros(),
+                        path.to_string_lossy().into_owned(),
+                    ));
+                    local_cache.entries.clear();
+                    local_slider_instances.clear();
                 }
+                if let Ok(mut output) = results.lock() {
+                    output.extend(local_results);
+                }
+            });
+        }
+    });
+    if cancelled.load(Ordering::Relaxed) != 0 {
+        return Err(CANCELLED_ERROR.to_string());
+    }
+    if let Ok(results) = results.into_inner() {
+        for (index, item, local_cache, local_timing, local_sliders, elapsed, path) in results {
+            item_slots[index] = Some(item);
+            slider_instances.extend(local_sliders);
+            timing.package_reads += local_timing.package_reads;
+            timing.dbpf_load_us += local_timing.dbpf_load_us;
+            timing.resource_decode_us += local_timing.resource_decode_us;
+            timing.full_hash_us += local_timing.full_hash_us;
+            timing.reference_catalog_us += local_timing.reference_catalog_us;
+            timing.project_grouping_us += local_timing.project_grouping_us;
+            for (key, entry) in local_cache.entries {
+                shared_index.entries.insert(key, entry);
+            }
+            if profile_enabled {
+                profile_packages.push((elapsed, path));
             }
         }
     }
+    let mut items = item_slots
+        .into_iter()
+        .map(|item| item.expect("scanner worker did not return an item"))
+        .collect::<Vec<_>>();
 
     let classification_ms = classification_started.elapsed().as_millis();
     let postprocess_started = Instant::now();
@@ -4900,6 +5008,33 @@ fn scan_packages_core_with_progress(
     stats.package_reads = timing.package_reads;
     stats.cache_hit = false;
     stats.reused_packages = reused_packages;
+
+    if profile_enabled {
+        profile_packages.sort_by(|left, right| right.0.cmp(&left.0));
+        eprintln!(
+            "scanner_profile packages={} reused={} discovery_ms={} classification_ms={} postprocess_ms={} dbpf_load_ms={} resource_decode_ms={} full_hash_ms={} reference_catalog_ms={} project_grouping_ms={} cache_hits={} cache_misses={}",
+            stats.packages,
+            stats.reused_packages,
+            stats.discovery_ms,
+            stats.classification_ms,
+            stats.postprocess_ms,
+            stats.dbpf_load_ms,
+            stats.resource_decode_ms,
+            stats.full_hash_ms,
+            stats.reference_catalog_ms,
+            stats.project_grouping_ms,
+            stats.cache_hit,
+            stats.reused_packages,
+        );
+        for (index, (elapsed_us, path)) in profile_packages.iter().take(20).enumerate() {
+            eprintln!(
+                "scanner_profile_slowest rank={} elapsed_ms={} path={}",
+                index + 1,
+                (*elapsed_us as f64) / 1000.0,
+                path
+            );
+        }
+    }
 
     let result = ScanResult {
         root: root.to_string_lossy().to_string(),
@@ -5057,6 +5192,23 @@ pub async fn scan_packages(folder: String, language: AppLanguage) -> Result<Scan
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn profile_external_corpus_when_requested() {
+        let Ok(root) = std::env::var("S3CC_PROFILE_ROOT") else {
+            return;
+        };
+        let language = crate::i18n::AppLanguage::Pt;
+        let result = super::scan_packages_core_quiet_progress(root, language, None)
+            .expect("external scanner profile should complete");
+        eprintln!(
+            "scanner_profile_result packages={} total_ms={} package_reads={} reused={}",
+            result.stats.packages,
+            result.stats.total_ms,
+            result.stats.package_reads,
+            result.stats.reused_packages,
+        );
+    }
+
     use super::*;
     use serde::Deserialize;
 

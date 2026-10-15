@@ -7,6 +7,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
+    thread,
     time::{Instant, UNIX_EPOCH},
 };
 
@@ -165,6 +166,28 @@ pub fn analysis_file_fingerprint(path: &Path) -> Result<(u64, u128, String), Str
     let (size, modified_ns) = metadata_signature(path)?;
     let fingerprint = quick_fingerprint(path, size)?;
     Ok((size, modified_ns, fingerprint))
+}
+
+/// Return a complete read-only index entry when its bounded on-disk
+/// fingerprint still matches. This is intentionally not an integrity proof;
+/// write paths continue to recalculate the full SHA-256 before acting.
+pub fn current_cached_entry(
+    path: &Path,
+    cache: &FingerprintCache,
+) -> Result<Option<CachedPackage>, String> {
+    let key = canonical_key(path)?;
+    let Some(existing) = cache.entries.get(&key) else {
+        return Ok(None);
+    };
+    let (size, modified_ns, quick) = analysis_file_fingerprint(path)?;
+    if existing.size == size
+        && existing.modified_ns == modified_ns
+        && existing.quick_fingerprint.eq_ignore_ascii_case(&quick)
+    {
+        Ok(Some(existing.clone()))
+    } else {
+        Ok(None)
+    }
 }
 
 fn canonical_key(path: &Path) -> Result<String, String> {
@@ -380,11 +403,32 @@ pub fn remember_loaded_package_with_result(
     let key = canonical_key(path)?;
     let (size, modified_ns) = metadata_signature(path)?;
 
+    if let Some(existing) = cache.entries.get(&key) {
+        let quick_started = Instant::now();
+        let quick = quick_fingerprint(path, size)?;
+        let quick_us = quick_started.elapsed().as_micros();
+        if existing.size == size
+            && existing.modified_ns == modified_ns
+            && existing.quick_fingerprint.eq_ignore_ascii_case(&quick)
+        {
+            return Ok((
+                existing.clone(),
+                CacheBuildMetrics {
+                    cache_hit: true,
+                    total_ms: total_started.elapsed().as_millis(),
+                    total_us: total_started.elapsed().as_micros(),
+                    quick_fingerprint_ms: quick_us / 1_000,
+                    quick_fingerprint_us: quick_us,
+                    integrity_verified: false,
+                    ..CacheBuildMetrics::default()
+                },
+            ));
+        }
+    }
+
     let hash_started = Instant::now();
-    let (file_sha256, _) =
-        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
-    let hash_ms = hash_started.elapsed().as_millis();
-    let hash_us = hash_started.elapsed().as_micros();
+    let hash_path = path.to_path_buf();
+    let hash_worker = thread::spawn(move || sha256_file(&hash_path));
 
     let quick_started = Instant::now();
     let quick_fingerprint = quick_fingerprint(path, size)?;
@@ -392,28 +436,14 @@ pub fn remember_loaded_package_with_result(
     let quick_fingerprint_us = quick_started.elapsed().as_micros();
 
     let decode_started = Instant::now();
-    let mut resources = Vec::with_capacity(package.entries.len());
-    let mut parse_error = None;
-    let mut data_file = File::open(&package.path)
-        .map_err(|error| format!("Could not reopen {}: {error}", package.path.display()))?;
-    for entry in &package.entries {
-        match package.data_from_file(&mut data_file, entry) {
-            Ok(data) => resources.push(CachedResource {
-                type_id: entry.type_id,
-                group: entry.group,
-                instance: entry.instance,
-                payload_sha256: format!("{:X}", Sha256::digest(&data)),
-                payload_size: data.len(),
-                file_size: entry.file_size,
-                mem_size: entry.mem_size,
-                compressed: entry.compressed,
-            }),
-            Err(error) => {
-                parse_error = Some(format!("{}: {error}", entry.key_string()));
-                break;
-            }
-        }
-    }
+    let decode_result = decode_resource_fingerprints(package);
+    let (file_sha256, _) = hash_worker
+        .join()
+        .map_err(|_| "file hash worker panicked".to_string())?
+        .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let (resources, parse_error) = decode_result?;
+    let hash_ms = hash_started.elapsed().as_millis();
+    let hash_us = hash_started.elapsed().as_micros();
     let resource_decode_ms = decode_started.elapsed().as_millis();
     let resource_decode_us = decode_started.elapsed().as_micros();
 
@@ -445,6 +475,91 @@ pub fn remember_loaded_package_with_result(
             ..CacheBuildMetrics::default()
         },
     ))
+}
+
+/// Decode and fingerprint the resources of a package with bounded parallelism.
+///
+/// Resource payload hashing is required by the duplicate/conflict index, but
+/// the old implementation decoded every resource sequentially. Large merged
+/// packages can contain hundreds of compressed resources, making that loop the
+/// dominant cold-scan cost. Workers use independent read handles and return
+/// results by original index, so the serialized cache and all consumers retain
+/// exactly the same ordering and hashes. A small bound avoids turning a large
+/// scan into an unbounded thread or file-handle fan-out.
+fn decode_resource_fingerprints(
+    package: &Package,
+) -> Result<(Vec<CachedResource>, Option<String>), String> {
+    if package.entries.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+
+    let worker_limit = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2)
+        .clamp(1, 2);
+    let worker_count = worker_limit.min(package.entries.len());
+    let chunk_size = package.entries.len().div_ceil(worker_count);
+    let mut slots = vec![None; package.entries.len()];
+    let mut first_error = None;
+
+    thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(worker_count);
+        for (chunk_index, entries) in package.entries.chunks(chunk_size).enumerate() {
+            workers.push(
+                scope.spawn(move || -> Result<Vec<(usize, CachedResource)>, String> {
+                    let mut data_file = File::open(&package.path).map_err(|error| {
+                        format!("Could not reopen {}: {error}", package.path.display())
+                    })?;
+                    let start = chunk_index * chunk_size;
+                    let mut results = Vec::with_capacity(entries.len());
+                    for (offset, entry) in entries.iter().enumerate() {
+                        let data = package
+                            .data_from_file(&mut data_file, entry)
+                            .map_err(|error| format!("{}: {error}", entry.key_string()))?;
+                        results.push((
+                            start + offset,
+                            CachedResource {
+                                type_id: entry.type_id,
+                                group: entry.group,
+                                instance: entry.instance,
+                                payload_sha256: format!("{:X}", Sha256::digest(&data)),
+                                payload_size: data.len(),
+                                file_size: entry.file_size,
+                                mem_size: entry.mem_size,
+                                compressed: entry.compressed,
+                            },
+                        ));
+                    }
+                    Ok(results)
+                }),
+            );
+        }
+
+        for worker in workers {
+            match worker.join() {
+                Ok(Ok(results)) => {
+                    for (index, resource) in results {
+                        slots[index] = Some(resource);
+                    }
+                }
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(_) => {
+                    if first_error.is_none() {
+                        first_error = Some("resource fingerprint worker panicked".to_string());
+                    }
+                }
+            }
+        }
+    });
+
+    if let Some(error) = first_error {
+        return Ok((Vec::new(), Some(error)));
+    }
+    Ok((slots.into_iter().flatten().collect::<Vec<CachedResource>>(), None))
 }
 
 fn get_or_build_with_validation(
