@@ -9,6 +9,14 @@ fn main() {
         std::process::exit(2);
     }
 
+    // The desktop app uses the platform data directories by default.  The
+    // standalone builder can be pointed at a stable local app-data directory
+    // so its persistent catalogs/cache are not redirected into a disposable
+    // sandbox by the host running this utility.
+    if std::env::var_os("S3CC_MANAGER_DATA_ROOT").is_none() {
+        eprintln!("S3CC_MANAGER_DATA_ROOT is not set; using the platform app-data directory");
+    }
+
     match s3cc_organizer_lib::reference_catalog::build_reference_catalogs_sync(
         Path::new(&store),
         Path::new(&official),

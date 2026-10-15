@@ -184,7 +184,9 @@ fn legacy_cache_path(root: &Path) -> PathBuf {
 }
 
 pub fn cache_path(root: &Path) -> PathBuf {
-    let base = dirs::cache_dir()
+    let base = std::env::var_os("S3CC_MANAGER_CACHE_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| dirs::cache_dir())
         .or_else(dirs::data_local_dir)
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| root.parent().unwrap_or(root).to_path_buf());
@@ -264,8 +266,27 @@ pub fn save_cache(root: &Path, cache: &FingerprintCache) -> Result<(), String> {
         }
     }
 
-    fs::rename(&temp, &path)
-        .map_err(|error| format!("Could not commit cache {}: {error}", path.display()))
+    match fs::rename(&temp, &path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            // A Windows security provider can deny the rename even though
+            // the cache bytes were fully written and all handles are closed.
+            // Preserve the same destination semantics with a flushed copy;
+            // callers still treat the full cache as an optimization only.
+            fs::copy(&temp, &path).map_err(|error| {
+                format!(
+                    "Could not commit cache {} after rename failed ({rename_error}): {error}",
+                    path.display()
+                )
+            })?;
+            fs::remove_file(&temp).map_err(|error| {
+                format!(
+                    "Could not remove cache temp {} after commit: {error}",
+                    temp.display()
+                )
+            })
+        }
+    }
 }
 
 /// Rename cache keys after a verified same-volume file move. The resource
@@ -362,8 +383,10 @@ pub fn remember_loaded_package(
     let decode_started = Instant::now();
     let mut resources = Vec::with_capacity(package.entries.len());
     let mut parse_error = None;
+    let mut data_file = File::open(&package.path)
+        .map_err(|error| format!("Could not reopen {}: {error}", package.path.display()))?;
     for entry in &package.entries {
-        match package.data(entry) {
+        match package.data_from_file(&mut data_file, entry) {
             Ok(data) => resources.push(CachedResource {
                 type_id: entry.type_id,
                 group: entry.group,
@@ -507,9 +530,22 @@ fn get_or_build_with_validation(
         Ok(package) => {
             let mut resources = Vec::with_capacity(package.entries.len());
             let mut parse_error = None;
+            let mut data_file = File::open(&package.path).ok();
 
-            for entry in &package.entries {
-                match package.data(entry) {
+            for (entry_index, entry) in package.entries.iter().enumerate() {
+                if entry_index % 1000 == 0 && package.entries.len() >= 1000 {
+                    eprintln!(
+                        "reference cache: {} resource {}/{}",
+                        package.path.display(),
+                        entry_index + 1,
+                        package.entries.len()
+                    );
+                }
+                let result = data_file
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("could not reopen package data"))
+                    .and_then(|file| package.data_from_file(file, entry));
+                match result {
                     Ok(data) => resources.push(CachedResource {
                         type_id: entry.type_id,
                         group: entry.group,

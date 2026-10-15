@@ -9,6 +9,11 @@ use std::{
 
 const MAGIC_DBPF: u32 = 0x4650_4244;
 const INDEX_VERSION: u32 = 3;
+// A malformed DBPF can advertise an enormous decompressed size and otherwise
+// make a read-only catalog/health scan allocate unbounded memory. Legitimate
+// Sims 3 resources are well below this limit; exceeding it is reported as a
+// parse error and never treated as an identity match.
+const MAX_RESOURCE_MEMORY: u32 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct IndexRecord {
@@ -214,6 +219,10 @@ impl Package {
 
     pub fn raw_data(&self, entry: &ResourceEntry) -> Result<Vec<u8>> {
         let mut file = File::open(&self.path)?;
+        self.raw_data_from_file(&mut file, entry)
+    }
+
+    pub fn raw_data_from_file(&self, file: &mut File, entry: &ResourceEntry) -> Result<Vec<u8>> {
         file.seek(SeekFrom::Start(entry.chunk_offset as u64))?;
         let mut data = vec![0u8; entry.file_size as usize];
         file.read_exact(&mut data)?;
@@ -221,7 +230,19 @@ impl Package {
     }
 
     pub fn data(&self, entry: &ResourceEntry) -> Result<Vec<u8>> {
-        let raw = self.raw_data(entry)?;
+        let mut file = File::open(&self.path)?;
+        self.data_from_file(&mut file, entry)
+    }
+
+    pub fn data_from_file(&self, file: &mut File, entry: &ResourceEntry) -> Result<Vec<u8>> {
+        if entry.mem_size > MAX_RESOURCE_MEMORY {
+            bail!(
+                "resource {} declares unsupported decompressed size {} bytes",
+                entry.key_string(),
+                entry.mem_size
+            );
+        }
+        let raw = self.raw_data_from_file(file, entry)?;
         match entry.compressed {
             0x0000 => {
                 if entry.file_size != entry.mem_size {
