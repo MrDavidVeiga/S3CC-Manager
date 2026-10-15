@@ -134,6 +134,7 @@ pub fn run() {
             history::get_operation_history,
             quarantine::build_quarantine_plan_async,
             quarantine::build_exact_duplicate_quarantine_plan_async,
+            quarantine::list_existing_quarantine,
             quarantine::execute_quarantine_async,
             quarantine::execute_exact_duplicate_quarantine_async,
             quarantine::restore_quarantine_async,

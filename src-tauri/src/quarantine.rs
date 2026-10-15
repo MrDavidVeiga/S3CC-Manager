@@ -11,6 +11,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
+use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +55,24 @@ pub struct QuarantineResult {
     pub status: String,
     pub cleanup_removed: usize,
     pub cleanup_warnings: Vec<String>,
+}
+
+/// A read-only view of files already placed in the user's flat `#Duplicados`
+/// area.  This is intentionally separate from QuarantinePlan: opening the
+/// view must never prepare, reserve, or move a file.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingQuarantineItem {
+    pub path: String,
+    pub relative_path: String,
+    pub original_name: String,
+    pub state: String,
+    pub size: u64,
+    pub sha256: String,
+    pub restore_available: bool,
+    pub restore_manifest: Option<String>,
+    pub restore_source: Option<String>,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +235,93 @@ fn manifest_from_plan(plan: &QuarantinePlan, status: &str) -> QuarantineManifest
         quarantine_root: plan.quarantine_root.clone(),
         items: plan.items.clone(),
     }
+}
+
+fn existing_quarantine_restore_index(
+    root: &Path,
+) -> HashMap<String, (String, String)> {
+    let mut index = HashMap::new();
+    let Ok(entries) = fs::read_dir(manifest_base(root)) else {
+        return index;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let Ok(manifest) = serde_json::from_str::<QuarantineManifest>(&text) else { continue };
+        if !matches!(manifest.status.as_str(), "PENDING" | "COMPLETED" | "RESTORED" | "ROLLED_BACK") {
+            continue;
+        }
+        for item in manifest.items {
+            index.entry(item.sha256.to_ascii_lowercase()).or_insert_with(|| (
+                path.to_string_lossy().into_owned(),
+                item.source_relative_path,
+            ));
+        }
+    }
+    index
+}
+
+/// List files already present in `Packages\\#Duplicados` without planning or
+/// mutating anything. Nested entries are reported as legacy layout so the UI
+/// can expose them instead of silently treating them as a new quarantine.
+#[tauri::command(rename = "list_existing_quarantine")]
+pub fn list_existing_quarantine(folder: String) -> Result<Vec<ExistingQuarantineItem>, String> {
+    let root = canonical_root(&folder)?;
+    let quarantine = root.join("#Duplicados");
+    let metadata = match fs::symlink_metadata(&quarantine) {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("Could not inspect #Duplicados: {error}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("#Duplicados is not a regular directory.".into());
+    }
+
+    let restore_index = existing_quarantine_restore_index(&root);
+    let mut result = Vec::new();
+    for entry in WalkDir::new(&quarantine).follow_links(false).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|error| format!("Could not calculate quarantine path: {error}"))?;
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("Could not inspect quarantined file {}: {error}", path.display()))?;
+        let (sha256, _size) = sha256_file(path)
+            .map_err(|error| format!("Could not hash quarantined file {}: {error}", path.display()))?;
+        let lower_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+        let state = if lower_name.ends_with(".package.duplicated") {
+            "duplicated"
+        } else if lower_name.ends_with(".package.disabled") {
+            "disabled"
+        } else {
+            "active"
+        };
+        let restore = restore_index.get(&sha256.to_ascii_lowercase());
+        result.push(ExistingQuarantineItem {
+            path: path.to_string_lossy().into_owned(),
+            relative_path: relative_text(relative),
+            original_name: path.file_name().map(|value| value.to_string_lossy().into_owned()).unwrap_or_default(),
+            state: state.into(),
+            size: metadata.len(),
+            sha256,
+            restore_available: restore.is_some(),
+            restore_manifest: restore.map(|value| value.0.clone()),
+            restore_source: restore.map(|value| value.1.clone()),
+            warning: if relative.components().count() > 2 {
+                Some("Legacy nested duplicate path; the canonical quarantine is flat.".into())
+            } else {
+                None
+            },
+        });
+    }
+    result.sort_by(|left, right| left.relative_path.to_ascii_lowercase().cmp(&right.relative_path.to_ascii_lowercase()));
+    Ok(result)
 }
 
 fn write_manifest_atomic(path: &Path, manifest: &QuarantineManifest) -> Result<(), String> {
@@ -1090,6 +1196,23 @@ mod tests {
         assert!(verify_exact_survivors(&mods, &plan, &one).is_err());
         fs::remove_file(&first).unwrap();
         assert!(verify_exact_survivors(&mods, &plan, &retain).is_err());
+        cleanup(&mods);
+    }
+
+    #[test]
+    fn existing_flat_quarantine_is_listed_without_preparing_a_transaction() {
+        let mods = isolated_mods_root();
+        let flat = mods.join("#Duplicados");
+        fs::create_dir_all(flat.join("legacy")).unwrap();
+        fs::write(flat.join("copy.package.duplicated"), b"duplicate-bytes").unwrap();
+        fs::write(flat.join("legacy/old.package.disabled"), b"disabled-bytes").unwrap();
+
+        let items = list_existing_quarantine(mods.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| item.state == "duplicated" && !item.restore_available));
+        assert!(items.iter().any(|item| item.state == "disabled" && item.warning.is_some()));
+        assert!(flat.join("copy.package.duplicated").is_file());
+        assert!(flat.join("legacy/old.package.disabled").is_file());
         cleanup(&mods);
     }
 

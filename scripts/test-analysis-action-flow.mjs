@@ -71,10 +71,21 @@ for (const key of [
 assert.match(html, /id="conflict-previous-btn"[^>]*data-i18n="previousConflict"/);
 assert.match(html, /id="conflict-next-btn"[^>]*data-i18n="nextConflict"/);
 assert.match(css, /\.analysis-more-actions-menu\s*\{[\s\S]*position:\s*absolute[\s\S]*max-height/);
+assert.match(css, /\.analysis-more-actions-menu button\s*\{[\s\S]*width:\s*100%/,
+  "nested More Actions buttons must share the menu width");
 assert.match(css, /\.analysis-action-bar\s*>\s*\.primary-btn,[\s\S]*flex:\s*1 1 190px/);
 assert.match(css, /@media\s*\(max-width:\s*480px\)[\s\S]*\.analysis-more-actions/);
 assert.match(app, /function reviewSelectedConflicts\(\)[\s\S]*prioritizeSelectedConflicts\(\)[\s\S]*openConflictDetails\(\)/);
-assert.match(app, /function reviewSelectedDuplicates\(\)[\s\S]*openDuplicateDetails\(\)/);
+assert.match(app, /function reviewSelectedDuplicates\(\)[\s\S]*duplicateReviewQueue[\s\S]*openDuplicateDetails\(\)/,
+  "duplicate review must queue every selected exact group");
+assert.match(app, /function openExistingQuarantine\(\)[\s\S]*invoke\("list_existing_quarantine"/,
+  "View Quarantine must read existing files instead of preparing a new transaction");
+assert.match(app, /el\.duplicatesPreviewAllBtn\.addEventListener\("click", openExistingQuarantine\)/);
+assert.match(app, /el\.conflictsSelectDetectedBtn\.addEventListener\("click", selectAllVisibleConflicts\)/,
+  "primary conflict selection must respect the active filter");
+assert.match(app, /function navigateDuplicateReview\(direction\)/);
+assert.match(app, /function visibleConflictFindings\(includeSelectedOnly = true\)/);
+assert.match(app, /selectedVisibleOfTotal/);
 assert.match(app, /function openConflictResourceCfg\(\)[\s\S]*analyzeHealth\(\)/);
 assert.match(app, /function setConflictView\(filter\)/);
 assert.match(app, /function navigateConflictDetails\(direction\)[\s\S]*renderConflictsPreview\(\)/);

@@ -5142,7 +5142,7 @@ body.release-v1 .conflicts-results {
   box-shadow: 0 12px 30px var(--winui-shadow, rgba(0,0,0,.24));
 }
 
-.analysis-more-actions-menu > button {
+.analysis-more-actions-menu button {
   width: 100%;
   min-width: 0;
   white-space: normal;
@@ -5172,6 +5172,39 @@ body.release-v1 .conflicts-results {
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+}
+.duplicate-details-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.duplicate-details-footer > span:first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.duplicate-review-navigation {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.duplicate-review-navigation > button,
+.duplicate-details-footer > #duplicate-details-close-footer-btn {
+  width: auto;
+  min-width: 96px;
+}
+.quarantine-existing-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(58vh, 620px);
+  overflow: auto;
+  padding-inline-end: 4px;
+}
+.quarantine-existing-item .duplicate-member-body {
+  width: 100%;
 }
 .conflict-details-footer > span:first-child {
   flex: 1 1 260px;
