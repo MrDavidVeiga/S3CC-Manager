@@ -5,6 +5,20 @@ import { open } from "@tauri-apps/plugin-dialog";
 const I18N = {
   en: {
     moreActions: "More Actions",
+    reviewSelection: "Review Selection",
+    selectionSection: "Selection",
+    managementSection: "Management",
+    toolsSection: "Tools",
+    visualizationSection: "Visualization",
+    selectSafeExcessCopies: "Select Safe Excess Copies",
+    restoreFiles: "Restore Files",
+    consultHistory: "Consult History",
+    openDuplicatesFolder: "Open Duplicates Folder",
+    showPendingConflicts: "Show Pending Conflicts",
+    showIntentionalOverrides: "Show Intentional Overrides",
+    showIgnoredConflicts: "Show Ignored Conflicts",
+    revertDecision: "Revert Decision",
+    consultResourceCfg: "Consult Resource.cfg",
     selectExactDuplicatesMain: "Select Exact Duplicates",
     viewQuarantine: "View Quarantine",
     selectForReview: "Select for Review",
@@ -622,6 +636,20 @@ const I18N = {
   },
   pt: {
     moreActions: "Mais Ações",
+    reviewSelection: "Revisar Seleção",
+    selectionSection: "Seleção",
+    managementSection: "Gerenciamento",
+    toolsSection: "Ferramentas",
+    visualizationSection: "Visualização",
+    selectSafeExcessCopies: "Selecionar cópias excedentes seguras",
+    restoreFiles: "Restaurar arquivos",
+    consultHistory: "Consultar histórico",
+    openDuplicatesFolder: "Abrir pasta de duplicados",
+    showPendingConflicts: "Mostrar conflitos pendentes",
+    showIntentionalOverrides: "Mostrar overrides intencionais",
+    showIgnoredConflicts: "Mostrar conflitos ignorados",
+    revertDecision: "Reverter decisão registrada",
+    consultResourceCfg: "Consultar Resource.cfg",
     selectExactDuplicatesMain: "Selecionar Duplicados Exatos",
     viewQuarantine: "Visualizar Quarentena",
     selectForReview: "Selecionar para Revisão",
@@ -1238,6 +1266,20 @@ const I18N = {
   },
   es: {
     moreActions: "Más acciones",
+    reviewSelection: "Revisar selección",
+    selectionSection: "Selección",
+    managementSection: "Gestión",
+    toolsSection: "Herramientas",
+    visualizationSection: "Visualización",
+    selectSafeExcessCopies: "Seleccionar copias excedentes seguras",
+    restoreFiles: "Restaurar archivos",
+    consultHistory: "Consultar historial",
+    openDuplicatesFolder: "Abrir carpeta de duplicados",
+    showPendingConflicts: "Mostrar conflictos pendientes",
+    showIntentionalOverrides: "Mostrar overrides intencionales",
+    showIgnoredConflicts: "Mostrar conflictos ignorados",
+    revertDecision: "Revertir decisión registrada",
+    consultResourceCfg: "Consultar Resource.cfg",
     selectExactDuplicatesMain: "Seleccionar Duplicados Exactos",
     viewQuarantine: "Ver Cuarentena",
     selectForReview: "Seleccionar para Revisión",
@@ -2308,11 +2350,15 @@ const el = {
   exportAuditButtons: [...document.querySelectorAll("[data-export-audit]")],
   openReportFolderButtons: [...document.querySelectorAll("[data-open-report-folder]")],
   duplicatesClearListBtn: document.querySelector("#duplicates-clear-list-btn"),
+  duplicatesReviewSelectionBtn: document.querySelector("#duplicates-review-selection-btn"),
   duplicatesSelectExactBtn: document.querySelector("#duplicates-select-exact-btn"),
   duplicatesSelectCurrentBtn: document.querySelector("#duplicates-select-current-btn"),
   duplicatesSelectVisibleBtn: document.querySelector("#duplicates-select-visible-btn"),
   duplicatesPreviewAllBtn: document.querySelector("#duplicates-preview-all-btn"),
   duplicatesClearSelectionBtn: document.querySelector("#duplicates-clear-selection-btn"),
+  duplicatesRestoreFilesBtn: document.querySelector("#duplicates-restore-files-btn"),
+  duplicatesHistoryBtn: document.querySelector("#duplicates-history-btn"),
+  duplicatesOpenFolderBtn: document.querySelector("#duplicates-open-folder-btn"),
   duplicatesBatchSummary: document.querySelector("#duplicates-batch-summary"),
   duplicatesBatchPreview: document.querySelector("#duplicates-batch-preview"),
   conflictsClearListBtn: document.querySelector("#conflicts-clear-list-btn"),
@@ -2325,6 +2371,11 @@ const el = {
   conflictsMarkReviewedBtn: document.querySelector("#conflicts-mark-reviewed-btn"),
   conflictsMarkIgnoredBtn: document.querySelector("#conflicts-mark-ignored-btn"),
   conflictsClearMarksBtn: document.querySelector("#conflicts-clear-marks-btn"),
+  conflictsShowPendingBtn: document.querySelector("#conflicts-show-pending-btn"),
+  conflictsShowIntentionalBtn: document.querySelector("#conflicts-show-intentional-btn"),
+  conflictsShowIgnoredBtn: document.querySelector("#conflicts-show-ignored-btn"),
+  conflictsHistoryBtn: document.querySelector("#conflicts-history-btn"),
+  conflictsResourceCfgBtn: document.querySelector("#conflicts-resourcecfg-btn"),
   conflictsReviewSelectionCount: document.querySelector("#conflicts-review-selection-count"),
   conflictsPrioritizeBtn: document.querySelector("#conflicts-prioritize-btn"),
   conflictsPreviewQuarantineBtn: document.querySelector("#conflicts-preview-quarantine-btn"),
@@ -3213,14 +3264,14 @@ function renderAuditPanel() {
     }
   }
 
-  el.duplicatesClearListBtn.disabled =
+  if (el.duplicatesClearListBtn) el.duplicatesClearListBtn.disabled =
     !state.duplicatesAnalysis || state.duplicatesBusy || state.conflictsBusy ||
     state.scanning || state.quarantineBusy || state.auditBusy;
   el.duplicatesSelectExactBtn.disabled =
     !exactDuplicateGroups().length || state.duplicatesBusy || state.conflictsBusy ||
     state.scanning || state.analysisPipelineBusy || state.quarantineBusy ||
     state.auditBusy || workspaceReadOnly();
-  el.conflictsClearListBtn.disabled =
+  if (el.conflictsClearListBtn) el.conflictsClearListBtn.disabled =
     !state.conflictsAnalysis || state.conflictsBusy || state.duplicatesBusy ||
     state.scanning || state.reviewBusy || state.auditBusy || state.quarantineBusy;
 }
@@ -3544,6 +3595,46 @@ async function selectExactCopiesForQuarantine() {
   state.duplicatesNotice = `${t("bulkExactSummary")} (${groups.length} / ${selected.size})`;
   renderDuplicates();
   await buildQuarantinePreview();
+}
+
+function reviewSelectedDuplicates() {
+  if (!state.duplicatesAnalysis || state.quarantineBusy || state.analysisPipelineBusy) return;
+  const selectedPaths = state.quarantineSelected;
+  const selectedGroup = exactDuplicateGroups().find(group =>
+    (group.members || []).some(member => selectedPaths.has(member.path))
+  );
+  const fallback = exactDuplicateGroups().find(group => group.id === state.duplicateSelectedId);
+  const group = selectedGroup || fallback;
+  if (!group) {
+    state.duplicatesNotice = t("selectDuplicateFinding");
+    renderDuplicates();
+    return;
+  }
+  state.duplicateSelectedId = group.id;
+  openDuplicateDetails();
+}
+
+function openDuplicateHistory() {
+  state.tab = "tools";
+  state.toolsTab = "history";
+  persistPreferences();
+  render();
+  if (state.folder) void refreshOperationHistory();
+}
+
+function openDuplicateRestore() {
+  state.tab = "tools";
+  state.toolsTab = "history";
+  state.toolsNotice = t("restoreFiles");
+  persistPreferences();
+  render();
+  if (state.folder) void refreshOperationHistory();
+}
+
+function openDuplicatesFolder() {
+  if (!state.folder) return;
+  const root = String(state.folder).replace(/[\\/]+$/, "");
+  void openDirectorySafe(`${root}\\#Duplicados`);
 }
 
 function selectFilteredExactDuplicateGroups() {
@@ -4211,6 +4302,9 @@ function renderDuplicateBatchControls() {
     state.scanning || state.duplicatesBusy || state.conflictsBusy ||
     state.auditBusy || state.executing;
   const count = state.quarantineSelected.size;
+  if (el.duplicatesReviewSelectionBtn) {
+    el.duplicatesReviewSelectionBtn.disabled = !hasAnalysis || !count || busy;
+  }
   el.duplicatesSelectExactBtn.disabled = !hasAnalysis ||
     !exactDuplicateGroups().length || busy || workspaceReadOnly();
   el.duplicatesSelectCurrentBtn.disabled = !hasAnalysis || busy || workspaceReadOnly() ||
@@ -4481,6 +4575,35 @@ function prioritizeSelectedConflicts() {
   conflictVisibleMemo.analysis = null;
   renderConflicts();
   renderConflictVirtualRows(visibleConflictFindings(), true);
+}
+
+function setConflictView(filter) {
+  if (!state.conflictsAnalysis) return;
+  state.conflictsSelectedOnly = false;
+  state.conflictsFilter = filter;
+  state.conflictsSearch = "";
+  if (el.conflictsFilter) el.conflictsFilter.value = filter;
+  if (el.conflictsSearch) el.conflictsSearch.value = "";
+  persistPreferences();
+  conflictVisibleMemo.analysis = null;
+  renderConflicts();
+}
+
+function openConflictHistory() {
+  state.tab = "tools";
+  state.toolsTab = "history";
+  persistPreferences();
+  render();
+  if (state.folder) void refreshOperationHistory();
+}
+
+async function openConflictResourceCfg() {
+  if (!state.folder) return;
+  state.tab = "tools";
+  state.toolsTab = "health";
+  persistPreferences();
+  render();
+  if (!state.healthReport && !state.toolsBusy) await analyzeHealth();
 }
 
 function reviewSelectedConflicts() {
@@ -5227,27 +5350,32 @@ function renderConflictBatchControls() {
   const busy = state.quarantineBusy || state.analysisPipelineBusy ||
     state.scanning || state.conflictsBusy || state.duplicatesBusy ||
     state.auditBusy || state.reviewBusy || state.structureBusy;
-  el.conflictsPrioritizeBtn.disabled = !state.conflictsAnalysis || busy;
-  el.conflictsSelectAllBtn.disabled = !state.conflictsAnalysis || busy ||
+  if (el.conflictsPrioritizeBtn) el.conflictsPrioritizeBtn.disabled = !state.conflictsAnalysis || busy;
+  if (el.conflictsSelectAllBtn) el.conflictsSelectAllBtn.disabled = !state.conflictsAnalysis || busy ||
     !visibleConflictFindings().length;
-  el.conflictsSelectDetectedBtn.disabled = !state.conflictsAnalysis || busy ||
+  if (el.conflictsSelectDetectedBtn) el.conflictsSelectDetectedBtn.disabled = !state.conflictsAnalysis || busy ||
     !(state.conflictsAnalysis.findings || []).some(finding =>
       finding.kind !== "shared_identical" && finding.differentPayloadCount > 0);
-  el.conflictsReviewSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
-  el.conflictsClearReviewBtn.disabled = busy || !state.conflictReviewSelected.size;
-  el.conflictsPrioritizeSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
+  if (el.conflictsReviewSelectedBtn) el.conflictsReviewSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
+  if (el.conflictsClearReviewBtn) el.conflictsClearReviewBtn.disabled = busy || !state.conflictReviewSelected.size;
+  if (el.conflictsPrioritizeSelectedBtn) el.conflictsPrioritizeSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
   for (const button of [el.conflictsMarkIntentionalBtn, el.conflictsMarkReviewedBtn,
                         el.conflictsMarkIgnoredBtn, el.conflictsClearMarksBtn]) {
-    button.disabled = busy || !state.conflictReviewSelected.size;
+    if (button) button.disabled = busy || !state.conflictReviewSelected.size;
   }
-  el.conflictsReviewSelectionCount.textContent = state.conflictsAnalysis
+  if (el.conflictsReviewSelectionCount) el.conflictsReviewSelectionCount.textContent = state.conflictsAnalysis
     ? `${t("conflictReviewSelectedCount")}: ${state.conflictReviewSelected.size}`
     : "";
-  el.conflictsPreviewQuarantineBtn.disabled =
+  if (el.conflictsPreviewQuarantineBtn) el.conflictsPreviewQuarantineBtn.disabled =
     !state.conflictsAnalysis || !state.conflictQuarantineSelected.size ||
     !conflictSelectionSafe() || busy || workspaceReadOnly();
-  el.conflictsClearQuarantineBtn.disabled =
+  if (el.conflictsClearQuarantineBtn) el.conflictsClearQuarantineBtn.disabled =
     !state.conflictQuarantineSelected.size || busy;
+  if (el.conflictsShowPendingBtn) el.conflictsShowPendingBtn.disabled = !state.conflictsAnalysis || busy;
+  if (el.conflictsShowIntentionalBtn) el.conflictsShowIntentionalBtn.disabled = !state.conflictsAnalysis || busy;
+  if (el.conflictsShowIgnoredBtn) el.conflictsShowIgnoredBtn.disabled = !state.conflictsAnalysis || busy;
+  if (el.conflictsHistoryBtn) el.conflictsHistoryBtn.disabled = busy;
+  if (el.conflictsResourceCfgBtn) el.conflictsResourceCfgBtn.disabled = busy || !state.folder;
   renderConflictNavigation();
 }
 
@@ -9545,7 +9673,8 @@ for (const button of el.openReportFolderButtons) {
     openDirectorySafe(state.auditReports[button.dataset.openReportFolder]?.directory)
   );
 }
-el.duplicatesClearListBtn.addEventListener("click", clearDuplicateList);
+if (el.duplicatesClearListBtn) el.duplicatesClearListBtn.addEventListener("click", clearDuplicateList);
+el.duplicatesReviewSelectionBtn.addEventListener("click", reviewSelectedDuplicates);
 el.duplicatesSelectExactBtn.addEventListener("click", selectExactCopiesForQuarantine);
 el.duplicatesSelectCurrentBtn.addEventListener("click", selectOnlyCurrentExactDuplicateGroup);
 el.duplicatesSelectVisibleBtn.addEventListener("click", selectFilteredExactDuplicateGroups);
@@ -9556,6 +9685,9 @@ el.duplicatesList.addEventListener("keydown", event => {
   }
 });
 el.duplicatesPreviewAllBtn.addEventListener("click", buildQuarantinePreview);
+el.duplicatesRestoreFilesBtn.addEventListener("click", openDuplicateRestore);
+el.duplicatesHistoryBtn.addEventListener("click", openDuplicateHistory);
+el.duplicatesOpenFolderBtn.addEventListener("click", openDuplicatesFolder);
 el.duplicatesClearSelectionBtn.addEventListener("click", () => {
   state.quarantineSelected.clear();
   state.quarantinePlan = null;
@@ -9563,15 +9695,13 @@ el.duplicatesClearSelectionBtn.addEventListener("click", () => {
   renderDuplicates();
   renderDuplicatesPreview();
 });
-el.conflictsClearListBtn.addEventListener("click", clearConflictList);
+if (el.conflictsClearListBtn) el.conflictsClearListBtn.addEventListener("click", clearConflictList);
 el.conflictsSelectAllBtn.addEventListener("click", selectAllVisibleConflicts);
 el.conflictsSelectDetectedBtn.addEventListener("click", selectAllDetectedConflicts);
 el.conflictsReviewSelectedBtn.addEventListener("click", reviewSelectedConflicts);
 el.conflictsClearReviewBtn.addEventListener("click", clearConflictReviewSelection);
-el.conflictsPrioritizeSelectedBtn.addEventListener("click", prioritizeSelectedConflicts);
+if (el.conflictsPrioritizeSelectedBtn) el.conflictsPrioritizeSelectedBtn.addEventListener("click", prioritizeSelectedConflicts);
 el.conflictsMarkIntentionalBtn.addEventListener("click", () => applySelectedConflictReviewMark("intentional"));
-el.conflictsMarkReviewedBtn.addEventListener("click", () => applySelectedConflictReviewMark("reviewed"));
-el.conflictsMarkIgnoredBtn.addEventListener("click", () => applySelectedConflictReviewMark("ignored"));
 el.conflictsClearMarksBtn.addEventListener("click", () => applySelectedConflictReviewMark("clear"));
 el.conflictsList.addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
@@ -9579,20 +9709,11 @@ el.conflictsList.addEventListener("keydown", event => {
     selectAllVisibleConflicts();
   }
 });
-el.conflictsPrioritizeBtn.addEventListener("click", () => {
-  state.conflictsSelectedOnly = false;
-  conflictVisibleMemo.analysis = null;
-  state.conflictsFilter = "attention";
-  el.conflictsFilter.value = "attention";
-  persistPreferences();
-  renderConflicts();
-});
-el.conflictsPreviewQuarantineBtn.addEventListener("click", buildConflictQuarantinePreview);
-el.conflictsClearQuarantineBtn.addEventListener("click", () => {
-  state.conflictQuarantineSelected.clear();
-  state.conflictQuarantinePlan = null;
-  renderConflicts();
-});
+el.conflictsShowPendingBtn.addEventListener("click", () => setConflictView("attention"));
+el.conflictsShowIntentionalBtn.addEventListener("click", () => setConflictView("intentional_override"));
+el.conflictsShowIgnoredBtn.addEventListener("click", () => setConflictView("ignored_session"));
+el.conflictsHistoryBtn.addEventListener("click", openConflictHistory);
+el.conflictsResourceCfgBtn.addEventListener("click", () => void openConflictResourceCfg());
 el.conflictPreviousBtn.addEventListener("click", () => navigateConflictDetails(-1));
 el.conflictNextBtn.addEventListener("click", () => navigateConflictDetails(1));
 el.structureUpBtn.addEventListener("click", () => {

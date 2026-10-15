@@ -5149,6 +5149,24 @@ body.release-v1 .conflicts-results {
   text-align: start;
 }
 
+.analysis-menu-section {
+  display: grid;
+  gap: 6px;
+  padding: 2px 0 5px;
+}
+.analysis-menu-section + .analysis-menu-section {
+  padding-top: 8px;
+  border-top: 1px solid var(--winui-control-stroke, var(--border));
+}
+.analysis-menu-heading {
+  padding: 2px 4px 1px;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
 .conflict-details-footer {
   display: flex;
   flex-wrap: wrap;

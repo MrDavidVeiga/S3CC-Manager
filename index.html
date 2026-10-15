@@ -295,17 +295,29 @@
             <div class="analysis-list-footer" data-report-panel="duplicates">
               <span class="analysis-audit-status" data-audit-status="duplicates" aria-live="polite"></span>
               <div class="analysis-action-bar duplicates-action-bar" role="toolbar" aria-label="Duplicate actions">
-                <button id="duplicates-select-exact-btn" class="primary-btn" type="button" data-i18n="selectExactDuplicatesMain">Select Exact Duplicates</button>
-                <button id="duplicates-preview-all-btn" class="secondary-btn" type="button" data-i18n="viewQuarantine">View Quarantine</button>
+                <button id="duplicates-review-selection-btn" class="primary-btn" type="button" data-i18n="reviewSelection">Review Selection</button>
                 <details class="analysis-more-actions">
                   <summary data-i18n="moreActions">More Actions</summary>
                   <div class="analysis-more-actions-menu" role="menu">
-                    <button id="duplicates-select-current-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectCurrentDuplicateGroup">Select Only This Group</button>
-                    <button id="duplicates-select-visible-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectVisibleExactGroups">Select Filtered Exact Groups</button>
-                    <button id="duplicates-clear-selection-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearSelection">Clear Selection</button>
-                    <button class="secondary-btn" type="button" role="menuitem" data-export-audit="duplicates" data-i18n="exportAuditReport">Export Report</button>
-                    <button class="secondary-btn hidden" type="button" role="menuitem" data-open-report-folder="duplicates" data-i18n="openReportFolder">Open Reports</button>
-                    <button id="duplicates-clear-list-btn" class="danger-btn" type="button" role="menuitem" data-i18n="clearList">Clear List</button>
+                    <div class="analysis-menu-section">
+                      <span class="analysis-menu-heading" data-i18n="selectionSection">Selection</span>
+                      <button id="duplicates-select-exact-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectSafeExcessCopies">Select Safe Excess Copies</button>
+                      <button id="duplicates-select-current-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectCurrentDuplicateGroup">Select Only This Group</button>
+                      <button id="duplicates-select-visible-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectVisibleExactGroups">Select Filtered Exact Groups</button>
+                      <button id="duplicates-clear-selection-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearSelection">Clear Selection</button>
+                    </div>
+                    <div class="analysis-menu-section">
+                      <span class="analysis-menu-heading" data-i18n="managementSection">Management</span>
+                      <button id="duplicates-preview-all-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="viewQuarantine">View Quarantine</button>
+                      <button id="duplicates-restore-files-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="restoreFiles">Restore Files</button>
+                      <button id="duplicates-history-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="consultHistory">Consult History</button>
+                    </div>
+                    <div class="analysis-menu-section">
+                      <span class="analysis-menu-heading" data-i18n="toolsSection">Tools</span>
+                      <button id="duplicates-open-folder-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="openDuplicatesFolder">Open Duplicates Folder</button>
+                      <button class="secondary-btn" type="button" role="menuitem" data-export-audit="duplicates" data-i18n="exportAuditReport">Export Report</button>
+                      <button class="secondary-btn hidden" type="button" role="menuitem" data-open-report-folder="duplicates" data-i18n="openReportFolder">Open Reports</button>
+                    </div>
                   </div>
                 </details>
               </div>
@@ -371,19 +383,29 @@
                 <details class="analysis-more-actions">
                   <summary data-i18n="moreActions">More Actions</summary>
                   <div class="analysis-more-actions-menu" role="menu">
-                    <button id="conflicts-select-all-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectAllVisibleConflicts">Select Visible Conflicts</button>
-                    <button id="conflicts-clear-review-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearReviewSelection">Clear Review Selection</button>
-                    <button id="conflicts-prioritize-selected-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="prioritizeSelectedConflicts">Prioritize Selected</button>
-                    <button id="conflicts-mark-intentional-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="markSelectedIntentional">Mark Selected Intentional</button>
-                    <button id="conflicts-mark-reviewed-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="markSelectedReviewed">Mark Selected Reviewed (Session)</button>
-                    <button id="conflicts-mark-ignored-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="ignoreSelectedSession">Ignore Selected (Session)</button>
-                    <button id="conflicts-clear-marks-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearSelectedMarks">Clear Selected Marks</button>
-                    <button id="conflicts-prioritize-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="prioritizeConflicts">Prioritize All</button>
-                    <button id="conflicts-preview-quarantine-btn" class="primary-btn" type="button" role="menuitem" data-i18n="previewSelectedQuarantine">Preview Selected Quarantine</button>
-                    <button id="conflicts-clear-quarantine-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearSelection">Clear Selection</button>
-                    <button class="secondary-btn" type="button" role="menuitem" data-export-audit="conflicts" data-i18n="exportAuditReport">Export Report</button>
-                    <button class="secondary-btn hidden" type="button" role="menuitem" data-open-report-folder="conflicts" data-i18n="openReportFolder">Open Reports</button>
-                    <button id="conflicts-clear-list-btn" class="danger-btn" type="button" role="menuitem" data-i18n="clearList">Clear List</button>
+                    <div class="analysis-menu-section">
+                      <span class="analysis-menu-heading" data-i18n="selectionSection">Selection</span>
+                      <button id="conflicts-select-all-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectAllVisibleConflicts">Select Visible Conflicts</button>
+                      <button id="conflicts-clear-review-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearReviewSelection">Clear Review Selection</button>
+                    </div>
+                    <div class="analysis-menu-section">
+                      <span class="analysis-menu-heading" data-i18n="visualizationSection">Visualization</span>
+                      <button id="conflicts-show-pending-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="showPendingConflicts">Show Pending Conflicts</button>
+                      <button id="conflicts-show-intentional-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="showIntentionalOverrides">Show Intentional Overrides</button>
+                      <button id="conflicts-show-ignored-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="showIgnoredConflicts">Show Ignored Conflicts</button>
+                    </div>
+                    <div class="analysis-menu-section">
+                      <span class="analysis-menu-heading" data-i18n="managementSection">Management</span>
+                      <button id="conflicts-mark-intentional-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="markSelectedIntentional">Mark Selected Intentional</button>
+                      <button id="conflicts-clear-marks-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="revertDecision">Revert Decision</button>
+                      <button id="conflicts-history-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="consultHistory">Consult History</button>
+                    </div>
+                    <div class="analysis-menu-section">
+                      <span class="analysis-menu-heading" data-i18n="toolsSection">Tools</span>
+                      <button id="conflicts-resourcecfg-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="consultResourceCfg">Consult Resource.cfg</button>
+                      <button class="secondary-btn" type="button" role="menuitem" data-export-audit="conflicts" data-i18n="exportAuditReport">Export Report</button>
+                      <button class="secondary-btn hidden" type="button" role="menuitem" data-open-report-folder="conflicts" data-i18n="openReportFolder">Open Reports</button>
+                    </div>
                   </div>
                 </details>
               </div>
