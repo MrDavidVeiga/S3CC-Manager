@@ -2,6 +2,21 @@
 
 Beta 2 focuses on safer automatic organization, clearer classification evidence, broader The Sims 3 package recognition and a more polished WinUI-inspired interface.
 
+## Compared with Beta 1
+
+Beta 2 introduces the following user-visible changes over the first public beta:
+
+- More resource-based CASP, OBJD, FBLN, script, pose, animation and object-family recognition.
+- Safer planning for unknown, mixed, invalid, duplicate and collision cases, with no silent overwrites.
+- Reversible organization, quarantine, restore manifests and rollback protections that preserve the active keeper.
+- More conservative Resource.cfg handling and clearer Before → After planning evidence.
+- Independent Organizer, Duplicates and Conflicts workflows with reusable scan data and incremental cache validation.
+- Expanded PT / EN / ES localization, theme selection and a Fluent/WinUI-inspired shell with responsive result lists.
+- Improved list virtualization, search and filtering responsiveness, plus clearer operation progress and result diagnostics.
+- More complete Sims3Pack conversion naming, thumbnail preservation and no-overwrite output handling.
+
+Relative to Beta 1, automatic moves are deliberately more conservative: uncertain packages and unresolved collisions remain available for review instead of being relocated on weak evidence.
+
 ## Classification and organization
 
 - Added dedicated internal-signature detection for NRaas packages.

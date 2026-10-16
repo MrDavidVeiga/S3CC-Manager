@@ -99,7 +99,8 @@ function applyThemeSwatches() {
   };
   const palettes = [
     [".system-swatch", "system"],
-    [".veiga-swatch", "veiga-light"],
+    [".veiga-light-swatch", "veiga-light"],
+    [".veiga-dark-swatch", "veiga-dark"],
     [".mean-girls-swatch", "mean-girls"],
     [".ea-app-swatch", "ea-app"],
     [".winui-light-swatch", "winui-light"],

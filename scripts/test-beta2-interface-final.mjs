@@ -43,8 +43,11 @@ expect(converter.includes('chooseFiles:"Select .sims3pack"'), "English converter
 expect(converter.includes('chooseFiles:"Seleccionar .sims3pack"'), "Spanish converter label is compact");
 expect(html.includes('class="theme-swatch winui-light-swatch"'), "WinUI Light has its own swatch");
 expect(html.includes('class="theme-swatch winui-dark-swatch"'), "WinUI Dark has its own swatch");
+expect(html.includes('class="theme-swatch veiga-light-swatch"'), "Veiga Light has its own swatch");
+expect(html.includes('class="theme-swatch veiga-dark-swatch"'), "Veiga Dark has its own swatch");
 expect(app.includes('body.classList.toggle("utility-page"'), "Tools and Restore use the full-width layout");
 expect(theme.includes('surfaceFor'), "Theme swatches pair the accent with the actual surface");
+expect(theme.includes('[".veiga-dark-swatch", "veiga-dark"]'), "Veiga Dark uses its dark palette surface");
 expect(fluent.includes("#duplicates-batch-preview.quarantine-preview"), "Quarantine preflight is compact and revealed on demand");
 expect(fluent.includes(".winui-social-footer .social-icons-list a:focus-visible"), "Social keyboard focus remains visible");
 const css = fs.readFileSync(path.join(root, "src", "style.css"), "utf8");
