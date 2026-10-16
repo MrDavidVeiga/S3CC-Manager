@@ -17,14 +17,16 @@ assert.match(duplicates, /id="duplicates-review-selection-btn"[^>]*data-i18n="re
 assert.match(duplicates, /<details class="analysis-more-actions">[\s\S]*data-i18n="actions"/);
 for (const id of [
   "duplicates-select-exact-btn",
-  "duplicates-select-current-btn",
-  "duplicates-select-visible-btn",
-  "duplicates-clear-selection-btn",
   "duplicates-preview-all-btn",
   "duplicates-restore-files-btn",
   "duplicates-history-btn",
-  "duplicates-open-folder-btn",
 ]) assert.match(duplicates, new RegExp(`id="${id}"`));
+for (const id of [
+  "duplicates-select-current-btn",
+  "duplicates-select-visible-btn",
+  "duplicates-clear-selection-btn",
+  "duplicates-open-folder-btn",
+]) assert.doesNotMatch(duplicates, new RegExp(`id="${id}"`));
 assert.doesNotMatch(duplicates, /id="duplicates-clear-list-btn"/);
 for (const key of ["selectionSection", "managementSection", "toolsSection"]) {
   assert.match(duplicates, new RegExp(`data-i18n="${key}"`));
@@ -54,7 +56,7 @@ assert.equal((conflicts.match(/id="conflicts-(?:select-detected|review-selected)
 for (const key of [
   "actions",
   "reviewSelection",
-  "selectSafeExcessCopies",
+  "quarantineEligibleCopies",
   "showPendingConflicts",
   "showIntentionalOverrides",
   "showIgnoredConflicts",

@@ -11,6 +11,7 @@ const I18N = {
     managementSection: "Management",
     toolsSection: "Tools",
     visualizationSection: "Visualization",
+    quarantineEligibleCopies: "Quarantine Eligible Copies",
     selectSafeExcessCopies: "Select Safe Excess Copies",
     restoreFiles: "Restore Files",
     consultHistory: "Consult History",
@@ -676,6 +677,7 @@ const I18N = {
     managementSection: "Gerenciamento",
     toolsSection: "Ferramentas",
     visualizationSection: "Visualização",
+    quarantineEligibleCopies: "Enviar duplicatas elegíveis à quarentena",
     selectSafeExcessCopies: "Selecionar cópias excedentes seguras",
     restoreFiles: "Restaurar arquivos",
     consultHistory: "Consultar histórico",
@@ -1340,6 +1342,7 @@ const I18N = {
     managementSection: "Gestión",
     toolsSection: "Herramientas",
     visualizationSection: "Visualización",
+    quarantineEligibleCopies: "Enviar duplicados elegibles a cuarentena",
     selectSafeExcessCopies: "Seleccionar copias excedentes seguras",
     restoreFiles: "Restaurar archivos",
     consultHistory: "Consultar historial",
@@ -2475,13 +2478,9 @@ const el = {
   duplicatesClearReviewVisibleBtn: document.querySelector("#duplicates-clear-review-visible-btn"),
   duplicatesReviewSelectionBtn: document.querySelector("#duplicates-review-selection-btn"),
   duplicatesSelectExactBtn: document.querySelector("#duplicates-select-exact-btn"),
-  duplicatesSelectCurrentBtn: document.querySelector("#duplicates-select-current-btn"),
-  duplicatesSelectVisibleBtn: document.querySelector("#duplicates-select-visible-btn"),
   duplicatesPreviewAllBtn: document.querySelector("#duplicates-preview-all-btn"),
-  duplicatesClearSelectionBtn: document.querySelector("#duplicates-clear-selection-btn"),
   duplicatesRestoreFilesBtn: document.querySelector("#duplicates-restore-files-btn"),
   duplicatesHistoryBtn: document.querySelector("#duplicates-history-btn"),
-  duplicatesOpenFolderBtn: document.querySelector("#duplicates-open-folder-btn"),
   duplicatesBatchSummary: document.querySelector("#duplicates-batch-summary"),
   duplicatesBatchPreview: document.querySelector("#duplicates-batch-preview"),
   conflictsClearListBtn: document.querySelector("#conflicts-clear-list-btn"),
@@ -4922,14 +4921,9 @@ function renderDuplicateBatchControls() {
   const hasQuarantineEligibleGroup = exactDuplicateGroups().some(group => activeExactMembers(group).length >= 2);
   el.duplicatesSelectExactBtn.disabled = !hasAnalysis ||
     !hasQuarantineEligibleGroup || busy || workspaceReadOnly();
-  el.duplicatesSelectCurrentBtn.disabled = !hasAnalysis || busy || workspaceReadOnly() ||
-    !exactDuplicateGroups().some(item => item.id === state.duplicateSelectedId && activeExactMembers(item).length >= 2);
-  el.duplicatesSelectVisibleBtn.disabled = !hasAnalysis || busy || workspaceReadOnly() ||
-    !visibleDuplicateFindings().some(item => item.findingType === "group" && item.kind === "exact_duplicate" && activeExactMembers(item).length >= 2);
   // This button lists files already in #Duplicados; it is not the preview for
   // a new quarantine selection.
   el.duplicatesPreviewAllBtn.disabled = !state.folder || busy;
-  el.duplicatesClearSelectionBtn.disabled = !count || busy;
   el.duplicatesBatchSummary.textContent = hasAnalysis
     ? t("duplicateSelectedCount").replace("{selected}", String(reviewCount)).replace("{total}", String(visibleDuplicateFindings().length))
       + (count ? ` · ${t("quarantineSelectionCount")}: ${count}` : "")
@@ -9888,7 +9882,6 @@ async function legacyUnifiedAnalysis(preserveSelection = false, preserveNotice =
   closePlanModal();
   render();
 
-  let scanSucceeded = false;
   let terminalOutcome = null;
   try {
     const result = await Promise.reject(new Error("Eager unified analysis is disabled; select a specific analysis."));
@@ -9937,7 +9930,6 @@ async function legacyUnifiedAnalysis(preserveSelection = false, preserveNotice =
     state.analysisStatus.conflicts = "completed";
     state.duplicateSelectedId = flattenedDuplicateFindings()[0]?.id || "";
     state.conflictSelectedId = state.conflictsAnalysis?.findings?.[0]?.id || "";
-    scanSucceeded = true;
     terminalOutcome = {
       state: "complete",
       title: t("scanComplete"),
@@ -9985,18 +9977,6 @@ async function legacyUnifiedAnalysis(preserveSelection = false, preserveNotice =
     await refreshCacheInfo();
   }
   if (terminalOutcome && analysisSessionMatches(folder, runId)) showOperationResult(terminalOutcome);
-  if (scanSucceeded && analysisSessionMatches(folder, runId)) {
-    // Prepare the exact plan once the scan has supplied a valid, current
-    // classification snapshot.  The request is asynchronous and keyed to
-    // this scan/selection, so opening the modal later reuses it instead of
-    // starting another planner pass on the user's click.
-    void preparePlanInBackground(folder, runId).catch(error => {
-      if (analysisSessionMatches(folder, runId)) {
-        state.planError = String(error);
-        render();
-      }
-    });
-  }
 }
 
 // Organizer analysis is intentionally independent. It uses the shared
@@ -10031,10 +10011,12 @@ async function runOrganizerAnalysis(preserveSelection = false, preserveNotice = 
   closePlanModal();
   render();
 
-  let scanSucceeded = false;
+  const requestStarted = performance.now();
+  let responseMs = null;
   let terminalOutcome = null;
   try {
     const result = await invoke("scan_packages", { folder, language: state.language });
+    responseMs = performance.now() - requestStarted;
     if (!analysisSessionMatches(folder, runId)) return;
     state.items = result.items || [];
     state.stats = result.stats || null;
@@ -10051,7 +10033,6 @@ async function runOrganizerAnalysis(preserveSelection = false, preserveNotice = 
     if (preserveNotice) state.notice = previousNotice;
     state.analysisStatus.manager = "completed";
     state.error = "";
-    scanSucceeded = true;
     terminalOutcome = {
       state: "complete",
       title: t("scanComplete"),
@@ -10078,21 +10059,23 @@ async function runOrganizerAnalysis(preserveSelection = false, preserveNotice = 
       terminalOutcome = { state: "error", title: t("scanFailed"), summary: message, warnings: [message] };
     }
   } finally {
+    const finalizationStarted = performance.now();
     await settleOperationStatus("scan", operationToken);
     state.scanning = false;
     endOperationMonitor("scan", operationToken);
+    const renderStarted = performance.now();
     render();
+    const renderMs = performance.now() - renderStarted;
+    const cacheRefreshStarted = performance.now();
     await refreshCacheInfo();
-  }
-  if (terminalOutcome && analysisSessionMatches(folder, runId)) showOperationResult(terminalOutcome);
-  if (scanSucceeded && analysisSessionMatches(folder, runId)) {
-    void preparePlanInBackground(folder, runId).catch(error => {
-      if (analysisSessionMatches(folder, runId)) {
-        state.planError = String(error);
-        render();
-      }
+    console.info("[S3CC timings] organizer", {
+      backendResponseMs: responseMs,
+      uiFinalizationMs: performance.now() - finalizationStarted,
+      renderMs,
+      cacheRefreshMs: performance.now() - cacheRefreshStarted,
     });
   }
+  if (terminalOutcome && analysisSessionMatches(folder, runId)) showOperationResult(terminalOutcome);
 }
 
 async function scanFolder(preserveSelection = false, preserveNotice = false) {
@@ -10812,8 +10795,6 @@ if (el.duplicatesClearListBtn) el.duplicatesClearListBtn.addEventListener("click
 el.duplicatesReviewSelectionBtn.addEventListener("click", reviewSelectedDuplicates);
 el.duplicatesSelectVisibleReviewBtn?.addEventListener("click", selectAllVisibleDuplicates);
 el.duplicatesSelectExactBtn.addEventListener("click", selectExactCopiesForQuarantine);
-el.duplicatesSelectCurrentBtn.addEventListener("click", selectOnlyCurrentExactDuplicateGroup);
-el.duplicatesSelectVisibleBtn.addEventListener("click", selectFilteredExactDuplicateGroups);
 el.duplicatesList.addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
     event.preventDefault();
@@ -10828,15 +10809,6 @@ el.duplicatesSort?.addEventListener("change", () => {
 el.duplicatesPreviewAllBtn.addEventListener("click", openExistingQuarantine);
 el.duplicatesRestoreFilesBtn.addEventListener("click", openDuplicateRestore);
 el.duplicatesHistoryBtn.addEventListener("click", openDuplicateHistory);
-el.duplicatesOpenFolderBtn.addEventListener("click", openDuplicatesFolder);
-el.duplicatesClearSelectionBtn.addEventListener("click", () => {
-  state.duplicateReviewSelected.clear();
-  state.quarantineSelected.clear();
-  state.quarantinePlan = null;
-  state.quarantineExactBatch = false;
-  renderDuplicates();
-  renderDuplicatesPreview();
-});
 el.duplicatesClearReviewVisibleBtn?.addEventListener("click", () => {
   state.duplicateReviewSelected.clear();
   state.lastDuplicateReviewAnchor = null;

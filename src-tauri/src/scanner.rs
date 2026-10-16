@@ -4862,8 +4862,27 @@ fn scan_packages_core_with_progress(
         }
     }
 
+    let reference_catalog_started = Instant::now();
     let reference_catalogs = reference_catalog::load_catalogs();
+    if profile_enabled {
+        eprintln!(
+            "scanner_profile_catalog_load_ms={} store_packages={} official_archives={}",
+            reference_catalog_started.elapsed().as_millis(),
+            reference_catalogs.store.as_ref().map_or(0, |catalog| catalog.packages.len()),
+            reference_catalogs
+                .official
+                .as_ref()
+                .map_or(0, |catalog| catalog.archives.len()),
+        );
+    }
+    let fix_index_started = Instant::now();
     let fix_index = fix_signatures::load_persistent_index();
+    if profile_enabled {
+        eprintln!(
+            "scanner_profile_fix_index_load_ms={}",
+            fix_index_started.elapsed().as_millis()
+        );
+    }
     let mut timing = ScanTiming::default();
     let previous = previous_scan_for(&root, language);
     let previous_items = previous.as_ref().map(|scan| {
@@ -5003,6 +5022,13 @@ fn scan_packages_core_with_progress(
                         Some(reference_catalogs),
                         build_fingerprint_index.then_some(&mut local_cache),
                     );
+                    if std::env::var_os("S3CC_PROFILE_PACKAGE_LOG").is_some() {
+                        eprintln!(
+                            "scanner_profile_package path={} elapsed_ms={}",
+                            path.display(),
+                            started.elapsed().as_millis()
+                        );
+                    }
                     let processed = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     if report_progress {
                         if let Some(kind) = operation_kind {

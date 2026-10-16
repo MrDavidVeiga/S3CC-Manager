@@ -676,7 +676,12 @@ pub fn analyze_duplicates_core(
     selected_paths: Option<Vec<String>>,
     operation_kind: Option<&str>,
 ) -> Result<DuplicateAnalysis, String> {
-    analyze_duplicates_core_with_index(folder, selected_paths, operation_kind, false)
+    // Duplicate analysis is read-only. Reuse a validated analysis-cache entry
+    // (bounded metadata probe plus the previously computed full SHA/resource
+    // fingerprints) instead of reopening and decoding an unchanged package.
+    // Planner/executor still perform their own full SHA-256 preflight before
+    // any mutation, so this does not weaken write safety.
+    analyze_duplicates_core_with_index(folder, selected_paths, operation_kind, true)
 }
 
 /// Uses resource fingerprints produced by the scanner in the same unified

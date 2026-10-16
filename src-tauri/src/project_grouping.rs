@@ -430,15 +430,25 @@ fn usable_identity(value: &str) -> bool {
         && !lower.contains("version")
 }
 
-fn intersection(left: &[String], right: &[String]) -> Vec<String> {
-    let right = right
-        .iter()
-        .map(|value| normalize(value))
-        .collect::<HashSet<_>>();
-    left.iter()
-        .filter(|value| right.contains(&normalize(value)))
-        .cloned()
-        .collect()
+fn add_indexed_matches(
+    values: &[String],
+    index: &HashMap<String, Vec<usize>>,
+    matches: &mut HashMap<usize, Vec<String>>,
+    seen: &mut HashMap<usize, HashSet<String>>,
+    predicate: impl Fn(&String) -> bool,
+) {
+    for value in values.iter().filter(|value| predicate(value)) {
+        let key = normalize(value);
+        let Some(anchors) = index.get(&key) else {
+            continue;
+        };
+        for anchor in anchors {
+            let already_seen = seen.entry(*anchor).or_default().insert(key.clone());
+            if already_seen {
+                matches.entry(*anchor).or_default().push(value.clone());
+            }
+        }
+    }
 }
 
 pub fn assign_project_groups(
@@ -450,26 +460,99 @@ pub fn assign_project_groups(
         .filter(|(_, (_, evidence))| evidence.has_s3sa && !evidence.assembly_identities.is_empty())
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
+
+    // Build inverted evidence indexes once. The previous implementation
+    // rebuilt a HashSet for every package/anchor pair and therefore repeated
+    // the same normalization work O(packages × anchors) times. These indexes
+    // preserve the exact relation precedence below while turning candidate
+    // discovery into lookups over only anchors that share evidence.
+    let mut classes_by_anchor = HashMap::<String, Vec<usize>>::new();
+    let mut assemblies_by_anchor = HashMap::<String, Vec<usize>>::new();
+    let mut tgis_by_anchor = HashMap::<String, Vec<usize>>::new();
+    let mut identifiers_by_anchor = HashMap::<String, Vec<usize>>::new();
+    for anchor in &anchors {
+        let (_, evidence) = &packages[*anchor];
+        for value in &evidence.classes {
+            classes_by_anchor
+                .entry(normalize(value))
+                .or_default()
+                .push(*anchor);
+        }
+        for value in &evidence.assembly_identities {
+            assemblies_by_anchor
+                .entry(normalize(value))
+                .or_default()
+                .push(*anchor);
+        }
+        for value in &evidence.resource_tgis {
+            tgis_by_anchor
+                .entry(normalize(value))
+                .or_default()
+                .push(*anchor);
+        }
+        for value in &evidence.identifiers {
+            identifiers_by_anchor
+                .entry(normalize(value))
+                .or_default()
+                .push(*anchor);
+        }
+    }
     let mut edges = Vec::new();
     for (index, (path, evidence)) in packages.iter().enumerate() {
-        for anchor in &anchors {
-            if index == *anchor {
+        let mut script_matches = HashMap::new();
+        let mut script_seen = HashMap::new();
+        let mut assembly_matches = HashMap::new();
+        let mut assembly_seen = HashMap::new();
+        let mut tgi_matches = HashMap::new();
+        let mut tgi_seen = HashMap::new();
+        let mut identifier_matches = HashMap::new();
+        let mut identifier_seen = HashMap::new();
+        add_indexed_matches(
+            &evidence.script_classes,
+            &classes_by_anchor,
+            &mut script_matches,
+            &mut script_seen,
+            |_| true,
+        );
+        add_indexed_matches(
+            &evidence.identifiers,
+            &assemblies_by_anchor,
+            &mut assembly_matches,
+            &mut assembly_seen,
+            |value| usable_identity(value),
+        );
+        add_indexed_matches(
+            &evidence.referenced_tgis,
+            &tgis_by_anchor,
+            &mut tgi_matches,
+            &mut tgi_seen,
+            |value| usable_tgi(value),
+        );
+        add_indexed_matches(
+            &evidence.identifiers,
+            &identifiers_by_anchor,
+            &mut identifier_matches,
+            &mut identifier_seen,
+            |value| value.len() >= 10 && value.contains('.'),
+        );
+
+        let mut candidate_anchors = BTreeSet::new();
+        candidate_anchors.extend(script_matches.keys().copied());
+        candidate_anchors.extend(assembly_matches.keys().copied());
+        candidate_anchors.extend(tgi_matches.keys().copied());
+        candidate_anchors.extend(identifier_matches.keys().copied());
+
+        for anchor in candidate_anchors {
+            if index == anchor {
                 continue;
             }
-            let (_, anchor_evidence) = &packages[*anchor];
-            let script = intersection(&evidence.script_classes, &anchor_evidence.classes);
-            let assembly =
-                intersection(&evidence.identifiers, &anchor_evidence.assembly_identities)
-                    .into_iter()
-                    .filter(|value| usable_identity(value))
-                    .collect::<Vec<_>>();
-            let tgi = intersection(&evidence.referenced_tgis, &anchor_evidence.resource_tgis)
+            let script = script_matches.remove(&anchor).unwrap_or_default();
+            let assembly = assembly_matches.remove(&anchor).unwrap_or_default();
+            let tgi = tgi_matches.remove(&anchor).unwrap_or_default();
+            let identifier = identifier_matches
+                .remove(&anchor)
+                .unwrap_or_default()
                 .into_iter()
-                .filter(|value| usable_tgi(value))
-                .collect::<Vec<_>>();
-            let identifier = intersection(&evidence.identifiers, &anchor_evidence.identifiers)
-                .into_iter()
-                .filter(|value| value.len() >= 10 && value.contains('.'))
                 .take(3)
                 .collect::<Vec<_>>();
             let (relation, evidence_text, confidence, dependency_kind) = if !script.is_empty() {
@@ -517,14 +600,14 @@ pub fn assign_project_groups(
             };
             edges.push(Edge {
                 left: index,
-                right: *anchor,
+                right: anchor,
                 relation: relation.to_string(),
                 evidence: evidence_text,
                 confidence: confidence.to_string(),
                 dependency_kind: dependency_kind.to_string(),
             });
-            let _ = path;
         }
+        let _ = path;
     }
 
     let mut assignments = HashMap::new();
