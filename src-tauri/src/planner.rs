@@ -1243,6 +1243,19 @@ fn relative_key(path: &Path) -> String {
         .join("\\")
 }
 
+/// Convert the Windows-style relative keys persisted in manifests and plans
+/// into a native filesystem path before touching the filesystem. The Manager
+/// intentionally serializes relative paths with `\\` on every platform so
+/// plans remain portable; `Path::new` alone would treat that separator as a
+/// literal character on Unix.
+fn path_from_relative_key(value: &str) -> PathBuf {
+    PathBuf::from(
+        value
+            .replace('\\', std::path::MAIN_SEPARATOR_STR)
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    )
+}
+
 /// Normalize a planned filesystem path without requiring the destination to
 /// exist. Windows may represent the same path with `/`, a `\\?\` prefix,
 /// different casing, or `.`/`..` components. Both absolute and relative plan
@@ -1319,7 +1332,8 @@ fn exact_model_relative_path_matches(current: &str, canonical: &str) -> bool {
     // This is deliberately an exact, component-by-component comparison. A
     // folder such as "#6 Slider" or "Creator\\Sliders" is not equivalent to
     // the model's "Sliders", even when the final component looks familiar.
-    relative_key(Path::new(current)) == relative_key(Path::new(canonical))
+    relative_key(&path_from_relative_key(current))
+        == relative_key(&path_from_relative_key(canonical))
 }
 
 fn add_missing_directories(root: &Path, parts: &[String], output: &mut BTreeSet<String>) {
@@ -1338,8 +1352,8 @@ fn fallback_relative_path(
     source_relative: &str,
     source_hash: &str,
 ) -> Result<(PathBuf, Vec<String>), String> {
-    let source_relative = Path::new(source_relative);
-    if source_uses_overrides(root, &root.join(source_relative)) {
+    let source_relative = path_from_relative_key(source_relative);
+    if source_uses_overrides(root, &root.join(&source_relative)) {
         // An uncategorized/colliding Override must never be redirected into
         // Packages or an unsupported Overrides subfolder.
         return Ok((source_relative.to_path_buf(), Vec::new()));
@@ -4820,7 +4834,7 @@ mod tests {
         assert!(path.starts_with("Packages"));
         assert_eq!(
             path,
-            PathBuf::from("Packages\\#Sem Categoria\\PenisButtBones.package")
+            path_from_relative_key(r"Packages\#Sem Categoria\PenisButtBones.package")
         );
         assert!(!path.to_string_lossy().contains("Pns (TS3)"));
         assert!(!path.to_string_lossy().contains("Rigged"));
@@ -4834,7 +4848,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             override_path,
-            PathBuf::from("Overrides\\Overhaul\\unknown.package")
+            path_from_relative_key(r"Overrides\Overhaul\unknown.package")
         );
         assert!(override_parts.is_empty());
         std::fs::remove_dir_all(base).unwrap();
@@ -5021,8 +5035,11 @@ mod tests {
         .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].plan_status, "ready_duplicate_quarantine_migration");
+        let destination = path_from_relative_key(
+            items[0].destination_relative_path.as_deref().unwrap(),
+        );
         assert_eq!(
-            Path::new(items[0].destination_relative_path.as_deref().unwrap()).parent(),
+            destination.parent(),
             Some(Path::new("#Duplicados"))
         );
         assert!(!items[0]

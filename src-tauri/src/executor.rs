@@ -2415,7 +2415,8 @@ mod tests {
                     "nested duplicate source must be executable once"
                 );
                 assert!(plan.items.iter().any(|item| {
-                    item.source_path.ends_with("Other\\Same.package")
+                    normalized_path_key(&packages, Path::new(&item.source_path))
+                        == normalized_path_key(&packages, &conflicting_b)
                         && item.plan_status == "collision_different_content"
                 }));
                 assert!(plan.items.iter().any(|item| {
@@ -2547,7 +2548,8 @@ mod tests {
                 );
                 assert!(idempotent_plan.items.iter().any(|item| {
                     item.plan_status == "collision_different_content"
-                        && item.source_path.ends_with("Other\\Same.package")
+                        && normalized_path_key(&packages, Path::new(&item.source_path))
+                            == normalized_path_key(&packages, &conflicting_b)
                 }));
 
                 let manifest = result.manifest_path.clone().expect("restore manifest");
