@@ -37,12 +37,12 @@ assert.equal((app.match(/invoke\("build_organization_plan_with_cfg"/g) || []).le
   "the UI must have one deduplicated planner invocation path");
 assert.match(app, /loading-overlay/);
 assert.match(app, /loadingPhaseDuplicates/);
-assert.match(app, /continueLoadingInBackground/);
+assert.doesNotMatch(app, /continueLoadingInBackground/);
 assert.match(app, /cancelLoadingOperation/);
 assert.match(app, /s3cc-operation-progress/);
 assert.match(app, /planStatDuplicatesReady/);
 assert.match(html, /id="loading-overlay"/);
-assert.match(html, /id="loading-overlay-continue"/);
+assert.doesNotMatch(html, /id="loading-overlay-continue"/);
 assert.match(html, /id="loading-overlay-cancel"/);
 assert.match(css, /\.loading-overlay/);
 assert.match(css, /pointer-events: auto/);

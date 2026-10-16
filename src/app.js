@@ -6,7 +6,6 @@ const I18N = {
   en: {
     actions: "Actions",
     moreActions: "More Actions",
-    reviewSelection: "Review Selection",
     selectionSection: "Selection",
     managementSection: "Management",
     toolsSection: "Tools",
@@ -43,7 +42,6 @@ const I18N = {
     reviewNextGroup: "Next group",
     selectedVisibleOfTotal: "{selected} selected · {visible} visible · {total} total",
     selectForReview: "Select for Review",
-    reviewSelected: "Review Selected",
     previousConflict: "Previous",
     nextConflict: "Next",
     moreConflictActions: "More review and quarantine actions",
@@ -163,17 +161,12 @@ const I18N = {
     loadingPhaseIntegrity: "Checking integrity",
     loadingPhaseCleanup: "Cleaning legacy folders",
     loadingPhaseRestore: "Restoring files",
-    loadingPhaseTools: "Working in the background",
+    loadingPhaseTools: "Running operation",
     loadingPhaseFinishing: "Finalizing results",
     loadingModeCold: "First analysis",
     loadingModeReuse: "Reusing validated cache",
     loadingModeIncremental: "Updating changed files",
     loadingModeUnknown: "Preparing analysis",
-    continueInBackground: "Continue in Background",
-    loadingPhrase1: "Reading the files selected in the Manager.",
-    loadingPhrase2: "Comparing details before preparing the next step.",
-    loadingPhrase3: "Checking the collection for a safe, consistent result.",
-    loadingPhrase4: "Recording the work for review or restoration.",
     collisions: "Collisions",
     planCollisionsSkipped: "Collisions to Review",
     organizationResult: "Organization Result",
@@ -676,7 +669,6 @@ const I18N = {
   pt: {
     actions: "Ações",
     moreActions: "Mais Ações",
-    reviewSelection: "Revisar Seleção",
     selectionSection: "Seleção",
     managementSection: "Gerenciamento",
     toolsSection: "Ferramentas",
@@ -713,7 +705,6 @@ const I18N = {
     reviewNextGroup: "Próximo grupo",
     selectedVisibleOfTotal: "{selected} selecionados · {visible} visíveis · {total} no total",
     selectForReview: "Selecionar para Revisão",
-    reviewSelected: "Revisar Selecionados",
     previousConflict: "Anterior",
     nextConflict: "Próximo",
     moreConflictActions: "Mais ações de revisão e quarentena",
@@ -833,17 +824,12 @@ const I18N = {
     loadingPhaseIntegrity: "Verificando integridade",
     loadingPhaseCleanup: "Limpando pastas legadas",
     loadingPhaseRestore: "Restaurando arquivos",
-    loadingPhaseTools: "Trabalhando em segundo plano",
+    loadingPhaseTools: "Executando operação",
     loadingPhaseFinishing: "Finalizando resultados",
     loadingModeCold: "Primeira análise",
     loadingModeReuse: "Reutilizando cache validado",
     loadingModeIncremental: "Atualizando arquivos alterados",
     loadingModeUnknown: "Preparando análise",
-    continueInBackground: "Continuar em Segundo Plano",
-    loadingPhrase1: "Lendo os arquivos selecionados no Manager.",
-    loadingPhrase2: "Comparando os detalhes antes de preparar a próxima etapa.",
-    loadingPhrase3: "Conferindo o acervo para manter um resultado seguro e consistente.",
-    loadingPhrase4: "Registrando o trabalho para revisão ou restauração.",
     collisions: "Colisões",
     planCollisionsSkipped: "Colisões para revisar",
     organizationResult: "Resultado da Organização",
@@ -1345,7 +1331,6 @@ const I18N = {
   es: {
     actions: "Acciones",
     moreActions: "Más acciones",
-    reviewSelection: "Revisar selección",
     selectionSection: "Selección",
     managementSection: "Gestión",
     toolsSection: "Herramientas",
@@ -1382,7 +1367,6 @@ const I18N = {
     reviewNextGroup: "Siguiente grupo",
     selectedVisibleOfTotal: "{selected} seleccionados · {visible} visibles · {total} en total",
     selectForReview: "Seleccionar para Revisión",
-    reviewSelected: "Revisar Seleccionados",
     previousConflict: "Anterior",
     nextConflict: "Siguiente",
     moreConflictActions: "Más acciones de revisión y cuarentena",
@@ -1502,17 +1486,12 @@ const I18N = {
     loadingPhaseIntegrity: "Comprobando integridad",
     loadingPhaseCleanup: "Limpiando carpetas antiguas",
     loadingPhaseRestore: "Restaurando archivos",
-    loadingPhaseTools: "Trabajando en segundo plano",
+    loadingPhaseTools: "Ejecutando operación",
     loadingPhaseFinishing: "Finalizando resultados",
     loadingModeCold: "Primera análisis",
     loadingModeReuse: "Reutilizando caché validada",
     loadingModeIncremental: "Actualizando archivos modificados",
     loadingModeUnknown: "Preparando análisis",
-    continueInBackground: "Continuar en Segundo Plano",
-    loadingPhrase1: "Leyendo los archivos seleccionados en el Manager.",
-    loadingPhrase2: "Comparando los detalles antes de preparar el siguiente paso.",
-    loadingPhrase3: "Revisando el contenido para mantener un resultado seguro y coherente.",
-    loadingPhrase4: "Registrando el trabajo para revisarlo o restaurarlo.",
     collisions: "Colisiones",
     planCollisionsSkipped: "Colisiones para revisar",
     organizationResult: "Resultado de la Organización",
@@ -2202,10 +2181,6 @@ const virtualViews = {
   conflicts: { items: null, start: -1, end: -1, raf: 0 },
 };
 let conflictMarksVersion = 0;
-let loadingPhraseIndex = -1;
-let loadingPhraseAt = 0;
-let loadingPhraseKey = "";
-let loadingOverlayDismissedKey = "";
 let operationMonitorSequence = 0;
 const operationMonitorTokens = new Map();
 let toolsOperationSequence = 0;
@@ -2372,7 +2347,6 @@ const el = {
   loadingOverlayCount: document.querySelector("#loading-overlay-count"),
   loadingOverlayPhrase: document.querySelector("#loading-overlay-phrase"),
   loadingOverlayCancel: document.querySelector("#loading-overlay-cancel"),
-  loadingOverlayContinue: document.querySelector("#loading-overlay-continue"),
   organizationReviewPanel: document.querySelector("#organization-review-panel"),
   organizationReviewSummary: document.querySelector("#organization-review-summary"),
   organizationReviewLeftovers: document.querySelector("#organization-review-leftovers"),
@@ -2489,7 +2463,6 @@ const el = {
   duplicatesClearListBtn: document.querySelector("#duplicates-clear-list-btn"),
   duplicatesSelectVisibleReviewBtn: document.querySelector("#duplicates-select-visible-review-btn"),
   duplicatesClearReviewVisibleBtn: document.querySelector("#duplicates-clear-review-visible-btn"),
-  duplicatesReviewSelectionBtn: document.querySelector("#duplicates-review-selection-btn"),
   duplicatesSelectExactBtn: document.querySelector("#duplicates-select-exact-btn"),
   duplicatesPreviewAllBtn: document.querySelector("#duplicates-preview-all-btn"),
   duplicatesRestoreFilesBtn: document.querySelector("#duplicates-restore-files-btn"),
@@ -2502,7 +2475,6 @@ const el = {
   conflictsClearReviewMainBtn: document.querySelector("#conflicts-clear-review-main-btn"),
   conflictsSelectAllBtn: document.querySelector("#conflicts-select-all-btn"),
   conflictsSelectDetectedBtn: document.querySelector("#conflicts-select-detected-btn"),
-  conflictsReviewSelectedBtn: document.querySelector("#conflicts-review-selected-btn"),
   conflictsClearReviewBtn: document.querySelector("#conflicts-clear-review-btn"),
   conflictsPrioritizeSelectedBtn: document.querySelector("#conflicts-prioritize-selected-btn"),
   conflictsMarkIntentionalBtn: document.querySelector("#conflicts-mark-intentional-btn"),
@@ -3821,16 +3793,6 @@ function navigateDuplicateReview(direction) {
   renderDuplicateReviewNavigation();
 }
 
-function reviewSelectedDuplicates() {
-  if (!state.duplicatesAnalysis || !state.duplicateReviewSelected.size || state.duplicatesBusy) return;
-  const first = visibleDuplicateFindings().find((finding) => state.duplicateReviewSelected.has(finding.id));
-  if (first) {
-    state.duplicateSelectedId = first.id;
-    state.duplicateExpandedId = first.id;
-  }
-  renderDuplicates();
-}
-
 function renderDuplicateReviewNavigation() {
   const previous = document.querySelector("#duplicate-review-previous-btn");
   const next = document.querySelector("#duplicate-review-next-btn");
@@ -4773,7 +4735,7 @@ function createDuplicateFindingRow(finding) {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.checked = state.duplicateReviewSelected.has(finding.id);
-  checkbox.setAttribute("aria-label", `${t("reviewSelection")}: ${duplicateFindingLabel(finding)}`);
+  checkbox.setAttribute("aria-label", `${t("selectForReview")}: ${duplicateFindingLabel(finding)}`);
   checkbox.addEventListener("click", (event) => event.stopPropagation());
   checkbox.addEventListener("change", (event) => {
     const checked = event.currentTarget.checked;
@@ -4951,9 +4913,6 @@ function renderDuplicateBatchControls() {
     state.auditBusy || state.executing;
   const count = state.quarantineSelected.size;
   const reviewCount = state.duplicateReviewSelected.size;
-  if (el.duplicatesReviewSelectionBtn) {
-    el.duplicatesReviewSelectionBtn.disabled = !hasAnalysis || !reviewCount || busy;
-  }
   if (el.duplicatesSelectVisibleReviewBtn) el.duplicatesSelectVisibleReviewBtn.disabled = !hasAnalysis || busy || !visibleDuplicateFindings().length;
   if (el.duplicatesClearReviewVisibleBtn) el.duplicatesClearReviewVisibleBtn.disabled = busy || !reviewCount;
   const hasQuarantineEligibleGroup = exactDuplicateGroups().some(group => activeExactMembers(group).length >= 2);
@@ -6194,16 +6153,6 @@ function renderConflictVirtualRows(findings, force = false) {
   el.conflictsList.replaceChildren(fragment);
 }
 
-function reviewSelectedConflicts() {
-  if (!state.conflictsAnalysis || !state.conflictReviewSelected.size || state.reviewBusy) return;
-  const first = visibleConflictFindings().find((finding) => state.conflictReviewSelected.has(finding.id));
-  if (first) {
-    state.conflictSelectedId = first.id;
-    state.conflictExpandedId = first.id;
-  }
-  renderConflicts();
-}
-
 function scheduleConflictVirtualRows() {
   const view = virtualViews.conflicts;
   if (view.raf) return;
@@ -6216,7 +6165,6 @@ function scheduleConflictVirtualRows() {
 }
 
 function renderConflictBatchControls() {
-  if (!el.conflictsReviewSelectedBtn) return;
   const busy = state.quarantineBusy || state.analysisPipelineBusy ||
     state.scanning || state.conflictsBusy || state.duplicatesBusy ||
     state.auditBusy || state.reviewBusy || state.structureBusy;
@@ -6228,7 +6176,6 @@ function renderConflictBatchControls() {
   if (el.conflictsSelectDetectedBtn) el.conflictsSelectDetectedBtn.disabled = !state.conflictsAnalysis || busy ||
     !(state.conflictsAnalysis.findings || []).some(finding =>
       finding.kind !== "shared_identical" && finding.differentPayloadCount > 0);
-  if (el.conflictsReviewSelectedBtn) el.conflictsReviewSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
   if (el.conflictsClearReviewBtn) el.conflictsClearReviewBtn.disabled = busy || !state.conflictReviewSelected.size;
   if (el.conflictsClearReviewMainBtn) el.conflictsClearReviewMainBtn.disabled = busy || !state.conflictReviewSelected.size;
   if (el.conflictsPrioritizeSelectedBtn) el.conflictsPrioritizeSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
@@ -6513,18 +6460,18 @@ function loadingOverlayState() {
     return { key: `${operationKey}:${status.phase || "planning"}`, operationKey,
       kind: "organize", status,
       phase: ({ moving: "loadingPhaseOrganization", integrity_check: "loadingPhaseIntegrity", cleaning: "loadingPhaseCleanup" }[status.phase] || "loadingPhaseOrganization"),
-      blocking: true, cancelable: false, continueable: false };
+      blocking: true, cancelable: false };
   }
   if (state.restoreOperationActive) {
     const status = state.restoreOperationStatus || {};
     const operationKey = `restore:${status.startedUnixMs || "active"}`;
     return { key: `${operationKey}:${status.phase || "restoring"}`, operationKey,
       kind: "restore", status, phase: "loadingPhaseRestore",
-      blocking: true, cancelable: false, continueable: false };
+      blocking: true, cancelable: false };
   }
   if (state.planning) {
     return { key: "planning", operationKey: "planning", kind: "planning", status: {},
-      phase: "loadingPhasePlan", blocking: false, cancelable: false, continueable: true };
+      phase: "loadingPhasePlan", blocking: false, cancelable: false };
   }
   if (state.toolsBusy && state.toolsOperation) {
     const kind = state.toolsOperation;
@@ -6533,7 +6480,7 @@ function loadingOverlayState() {
     const blocking = ["inbox_import", "sims3pack_convert"].includes(kind);
     return { key: `${operationKey}:${status.phase || "working"}`, operationKey, kind, status,
       phase: kind === "health" ? "loadingPhaseAnalysis" : "loadingPhaseTools",
-      blocking, cancelable: !blocking, continueable: !blocking };
+      blocking, cancelable: !blocking };
   }
   if (state.externalOperation?.active) {
     const { kind, status = {} } = state.externalOperation;
@@ -6541,7 +6488,7 @@ function loadingOverlayState() {
     const blocking = kind === "sims3pack_convert";
     return { key: `${operationKey}:${status.phase || "working"}`, operationKey, kind, status,
       phase: kind === "sims3pack_inspect" ? "loadingPhaseAnalysis" : "loadingPhaseTools",
-      blocking, cancelable: !blocking, continueable: !blocking };
+      blocking, cancelable: !blocking };
   }
   for (const kind of ["unified_analysis", "scan", "duplicates", "conflicts"]) {
     // The local owner is the source of truth for the lifecycle.  A terminal
@@ -6563,7 +6510,6 @@ function loadingOverlayState() {
       phase: scanPhase,
       blocking: false,
       cancelable: true,
-      continueable: true,
     };
   }
   return null;
@@ -6572,15 +6518,9 @@ function loadingOverlayState() {
 function renderLoadingOverlay() {
   if (!el.loadingOverlay) return;
   const current = loadingOverlayState();
-  const dismissed = current && loadingOverlayDismissedKey === current.operationKey;
-  el.loadingOverlay.classList.toggle("hidden", !current || dismissed);
-  if (!current || dismissed) {
+  el.loadingOverlay.classList.toggle("hidden", !current);
+  if (!current) {
     el.loadingOverlay.setAttribute("aria-hidden", "true");
-    if (!current) {
-      loadingOverlayDismissedKey = "";
-      loadingPhraseKey = "";
-      loadingPhraseAt = 0;
-    }
     return;
   }
 
@@ -6612,34 +6552,26 @@ function renderLoadingOverlay() {
     track.setAttribute("aria-valuetext", el.loadingOverlayPhase.textContent);
   }
 
-  const now = Date.now();
-  if (loadingPhraseKey !== current.key || now - loadingPhraseAt > 5200) {
-    const phrases = [t("loadingPhrase1"), t("loadingPhrase2"), t("loadingPhrase3"), t("loadingPhrase4")];
-    let next = (loadingPhraseIndex + 1) % phrases.length;
-    if (phrases.length > 1 && next === loadingPhraseIndex) next = (next + 1) % phrases.length;
-    loadingPhraseIndex = next;
-    loadingPhraseAt = now;
-    loadingPhraseKey = current.key;
-    el.loadingOverlayPhrase.textContent = phrases[next];
-  }
+  const detailKey = {
+    planning: "loadingPhasePlan",
+    reading_packages: "loadingPhaseIdentification",
+    identifying_contents: "loadingPhaseAnalysis",
+    comparing_duplicates: "loadingPhaseDuplicates",
+    finalizing_results: "loadingPhaseFinishing",
+    cache_reused: "loadingModeReuse",
+    moving: "loadingPhaseOrganization",
+    integrity_check: "loadingPhaseIntegrity",
+    cleaning: "loadingPhaseCleanup",
+    restoring: "loadingPhaseRestore",
+  }[String(status.phase || "")] || current.phase || "loadingModeUnknown";
+  // Keep one short, phase-specific line below the count. Cache mode remains
+  // in its compact status line and is never inferred from file presence.
+  el.loadingOverlayPhrase.textContent = t(detailKey);
 
   const canCancel = current.cancelable && !status.cancelRequested;
   el.loadingOverlayCancel.classList.toggle("hidden", !current.cancelable);
   el.loadingOverlayCancel.disabled = !canCancel;
   el.loadingOverlayCancel.textContent = status.cancelRequested ? t("cancelling") : t("cancelAnalysis");
-  if (el.loadingOverlayContinue) {
-    const canContinue = current.continueable && !status.cancelRequested;
-    el.loadingOverlayContinue.classList.toggle("hidden", !canContinue);
-    el.loadingOverlayContinue.disabled = !canContinue;
-    el.loadingOverlayContinue.textContent = t("continueInBackground");
-  }
-}
-
-function continueLoadingInBackground() {
-  const current = loadingOverlayState();
-  if (!current?.continueable) return;
-  loadingOverlayDismissedKey = current.operationKey;
-  renderLoadingOverlay();
 }
 
 function beginOperationMonitor(kind) {
@@ -10793,7 +10725,6 @@ el.loadingOverlayCancel.addEventListener("click", () => {
   const current = loadingOverlayState();
   if (current?.cancelable) void cancelLoadingOperation(current.kind);
 });
-el.loadingOverlayContinue?.addEventListener("click", continueLoadingInBackground);
 el.operationResultOk.addEventListener("click", closeOperationResult);
 el.operationResultModal.addEventListener("click", (event) => {
   if (event.target === el.operationResultModal) closeOperationResult();
@@ -10862,7 +10793,6 @@ for (const button of el.openReportFolderButtons) {
   );
 }
 if (el.duplicatesClearListBtn) el.duplicatesClearListBtn.addEventListener("click", clearDuplicateList);
-el.duplicatesReviewSelectionBtn.addEventListener("click", reviewSelectedDuplicates);
 el.duplicatesSelectVisibleReviewBtn?.addEventListener("click", selectAllVisibleDuplicates);
 el.duplicatesQuarantinePreflightBtn?.addEventListener("click", () => void verifyQuarantinePreflight());
 el.duplicatesSelectExactBtn.addEventListener("click", selectExactCopiesForQuarantine);
@@ -10890,7 +10820,6 @@ el.conflictsSelectVisibleMainBtn?.addEventListener("click", selectAllVisibleConf
 el.conflictsClearReviewMainBtn?.addEventListener("click", clearConflictReviewSelection);
 el.conflictsSelectAllBtn?.addEventListener("click", selectAllVisibleConflicts);
 el.conflictsSelectDetectedBtn?.addEventListener("click", selectAllVisibleConflicts);
-el.conflictsReviewSelectedBtn.addEventListener("click", reviewSelectedConflicts);
 el.conflictsClearReviewBtn?.addEventListener("click", clearConflictReviewSelection);
 if (el.conflictsPrioritizeSelectedBtn) el.conflictsPrioritizeSelectedBtn.addEventListener("click", prioritizeSelectedConflicts);
 el.conflictsMarkIntentionalBtn.addEventListener("click", () => applySelectedConflictReviewMark("intentional"));

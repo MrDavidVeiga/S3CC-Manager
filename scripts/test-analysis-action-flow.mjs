@@ -13,7 +13,7 @@ const duplicates = html.slice(duplicatesStart, conflictsStart);
 const conflictsEnd = html.indexOf("</section>", conflictsStart);
 const conflicts = html.slice(conflictsStart, conflictsEnd);
 
-assert.match(duplicates, /id="duplicates-review-selection-btn"[^>]*data-i18n="reviewSelection"/);
+assert.doesNotMatch(duplicates, /id="duplicates-review-selection-btn"/);
 assert.match(duplicates, /<details class="analysis-more-actions">[\s\S]*data-i18n="actions"/);
 for (const id of [
   "duplicates-select-exact-btn",
@@ -36,7 +36,7 @@ assert.equal((duplicates.match(/class="analysis-action-bar/g) || []).length, 1,
 assert.match(duplicates, /id="duplicates-quarantine-preflight-btn"[^>]*data-i18n="verifyQuarantine"/);
 
 assert.match(conflicts, /id="conflicts-select-visible-main-btn"[^>]*data-i18n="selectAllVisible"/);
-assert.match(conflicts, /id="conflicts-review-selected-btn"[^>]*data-i18n="reviewSelected"/);
+assert.doesNotMatch(conflicts, /id="conflicts-review-selected-btn"/);
 assert.doesNotMatch(conflicts, /id="conflicts-select-detected-btn"/);
 assert.doesNotMatch(conflicts, /id="conflicts-select-all-btn"/);
 assert.doesNotMatch(conflicts, /id="conflicts-clear-review-btn"/);
@@ -52,19 +52,17 @@ for (const id of [
 ]) assert.match(conflicts, new RegExp(`id="${id}"`));
 assert.doesNotMatch(conflicts, /id="conflicts-clear-list-btn"/);
 assert.doesNotMatch(conflicts, /id="conflicts-preview-quarantine-btn"/);
-assert.equal((conflicts.match(/id="conflicts-(?:select-visible-main|review-selected)-btn"/g) || []).length, 2,
-  "conflicts must expose Select All and Review Selected as its primary actions");
+assert.equal((conflicts.match(/id="conflicts-(?:select-visible-main|clear-review-main)-btn"/g) || []).length, 2,
+  "conflicts must expose Select All and Clear Selection as its primary actions");
 
 for (const key of [
   "actions",
-  "reviewSelection",
   "quarantineEligibleCopies",
   "showPendingConflicts",
   "showIntentionalOverrides",
   "showIgnoredConflicts",
   "consultResourceCfg",
   "selectForReview",
-  "reviewSelected",
   "previousConflict",
   "nextConflict",
 ]) {
@@ -79,10 +77,8 @@ assert.match(css, /\.analysis-more-actions-menu button\s*\{[\s\S]*width:\s*100%/
   "nested More Actions buttons must share the menu width");
 assert.match(css, /\.analysis-action-bar\s*>\s*\.primary-btn,[\s\S]*flex:\s*1 1 190px/);
 assert.match(css, /@media\s*\(max-width:\s*480px\)[\s\S]*\.analysis-more-actions/);
-assert.match(app, /function reviewSelectedConflicts\(\)[\s\S]*conflictExpandedId\s*=/,
-  "conflict review must expand selected findings inline");
-assert.match(app, /function reviewSelectedDuplicates\(\)[\s\S]*duplicateExpandedId\s*=/,
-  "duplicate review must expand selected findings inline");
+assert.doesNotMatch(app, /function reviewSelectedConflicts\(/);
+assert.doesNotMatch(app, /function reviewSelectedDuplicates\(/);
 assert.match(app, /function openExistingQuarantine\(\)[\s\S]*invoke\("list_existing_quarantine"/,
   "View Quarantine must read existing files instead of preparing a new transaction");
 assert.match(app, /el\.duplicatesPreviewAllBtn\.addEventListener\("click", openExistingQuarantine\)/);
@@ -96,6 +92,6 @@ assert.match(app, /function setConflictView\(filter\)/);
 assert.match(app, /function navigateConflictDetails\(direction\)[\s\S]*renderConflictsPreview\(\)/);
 assert.match(app, /el\.conflictPreviousBtn\.addEventListener\("click",[\s\S]*navigateConflictDetails\(-1\)/);
 assert.match(app, /el\.conflictNextBtn\.addEventListener\("click",[\s\S]*navigateConflictDetails\(1\)/);
-assert.match(app, /el\.conflictsReviewSelectedBtn\.disabled = busy \|\| !state\.conflictReviewSelected\.size/);
+assert.doesNotMatch(app, /conflictsReviewSelectedBtn/);
 
 console.log("Duplicates/Conflicts approved action-flow regression: PASS (two primary actions, accessible More Actions, filtered selection, navigation)");

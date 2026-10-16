@@ -40,10 +40,11 @@ assert.match(app, /renderOperationProgress\("conflicts"\)/);
 assert.match(app, /const visible = operationBusy\(kind\);/);
 assert.match(app, /if \(message\.includes\("__S3CC_OPERATION_CANCELLED__"\)\)/);
 
-// Continue-in-background is still a real state transition, while terminal
-// converter events are identified so delayed events cannot reopen the overlay.
-assert.match(app, /loadingOverlayDismissedKey = current\.operationKey/);
-assert.match(app, /const canContinue = current\.continueable && !status\.cancelRequested/);
+// The modal remains present until the operation reaches a terminal state;
+// there is no detached/background mode without tray integration.
+assert.doesNotMatch(app, /loadingOverlayDismissedKey/);
+assert.doesNotMatch(app, /continueLoadingInBackground/);
+assert.doesNotMatch(app, /continueable/);
 assert.match(app, /const completedExternalOperationIds = new Set\(\)/);
 assert.match(app, /completedExternalOperationIds\.has\(operationId\)/);
 assert.match(app, /detail\.status\.running === false/);
@@ -69,8 +70,8 @@ for (const forbidden of [
 assert.match(app, /Working through your content/);
 assert.match(app, /Processando seus conteúdos/);
 assert.match(app, /Procesando tus contenidos/);
-assert.match(app, /Reading the files selected in the Manager/);
-assert.match(app, /Lendo os arquivos selecionados no Manager/);
-assert.match(app, /Leyendo los archivos seleccionados en el Manager/);
+assert.match(app, /loadingPhaseIdentification/);
+assert.match(app, /loadingPhaseFinishing/);
+assert.match(app, /el\.loadingOverlayPhrase\.textContent = t\(detailKey\)/);
 
 console.log("loading overlay lifecycle and localized copy checks passed");

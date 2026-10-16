@@ -1149,13 +1149,9 @@ button:disabled {
   width: 100%;
 }
 
-.operation-result-modal {
-  text-align: left;
-}
+.operation-result-modal { text-align: center; }
 
-.operation-result-modal .confirm-icon {
-  margin-left: 0;
-}
+.operation-result-modal .confirm-icon { margin: 0 auto 12px; }
 
 .operation-result-counts {
   display: grid;
@@ -1175,6 +1171,7 @@ button:disabled {
   border: 1px solid var(--panel-border, rgba(186,196,206,.28));
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface, #0c1014) 88%, transparent);
+  text-align: center;
 }
 
 .operation-result-counts b,
@@ -1195,6 +1192,7 @@ button:disabled {
   color: var(--muted);
   font-size: .78rem;
   line-height: 1.45;
+  text-align: left;
 }
 
 .operation-result-modal[data-result-state="error"] .confirm-icon {
@@ -5367,8 +5365,8 @@ body.release-v1 .conflicts-results {
 }
 
 /* Lightweight Sims-inspired progress overlay. It is modal while visible so
-   blurred content cannot receive accidental clicks; read-only operations can
-   be dismissed with Continue in Background without cancelling the task. */
+   blurred content cannot receive accidental clicks and remains visible until
+   the operation reaches a terminal state. */
 .loading-overlay {
   position: fixed;
   inset: 0;
@@ -5398,7 +5396,7 @@ body.release-v1 .conflicts-results {
 .loading-progress-track > span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent-dark-1, #435c17), var(--accent, #618422)); transition: width .22s ease; }
 .loading-overlay[data-fluent-progress="indeterminate"] .loading-progress-track > span { width: 34%; animation: loading-sweep 1.35s ease-in-out infinite; }
 .loading-count { min-height: 1.1em; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; }
-.loading-dialog p { min-height: 2.4em; margin: 14px 0 18px; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+.loading-dialog p { min-height: 1.2em; margin: 12px 0 18px; color: var(--muted); font-size: .82rem; line-height: 1.35; }
 .loading-dialog .secondary-btn { width: auto; min-width: 110px; }
 .loading-dialog .secondary-btn + .secondary-btn { margin-left: 8px; }
 .loading-sim-spinner { display: flex; justify-content: center; gap: 7px; min-height: 15px; margin-bottom: 2px; }
