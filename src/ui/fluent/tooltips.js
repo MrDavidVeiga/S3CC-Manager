@@ -10,6 +10,7 @@ document.body.appendChild(tooltip);
 let current=null;
 let originalDescription=null;
 let fromKeyboard=false;
+let suppressedNode=null;
 function closeTooltip() {
   if (!current) return;
   if(!current.hasAttribute("title") && current.dataset.fluentTooltipTitle!==undefined){
@@ -24,6 +25,7 @@ function closeTooltip() {
 }
 function showTooltip(node,keyboard=false) {
   if(!node || !(node instanceof Element))return;
+  if(suppressedNode && (node===suppressedNode || suppressedNode.contains(node)))return;
   if(node===current)return;
   closeTooltip();
   const title=node.getAttribute("title");
@@ -49,6 +51,8 @@ document.addEventListener("pointerover",event=>{
   if(target && !target.closest(".fluent-tooltip"))showTooltip(target);
 });
 document.addEventListener("pointerout",event=>{
+  if(suppressedNode && event.target instanceof Element && suppressedNode.contains(event.target) &&
+     !suppressedNode.contains(event.relatedTarget))suppressedNode=null;
   if(current && event.target instanceof Element && current.contains(event.target) &&
      !current.contains(event.relatedTarget))closeTooltip();
 });
@@ -57,10 +61,22 @@ document.addEventListener("focusin",event=>{
   if(target)showTooltip(target,true);
 });
 document.addEventListener("focusout",event=>{
+  if(suppressedNode && event.target instanceof Element && suppressedNode.contains(event.target) &&
+     !suppressedNode.contains(event.relatedTarget))suppressedNode=null;
   if(current && current.contains(event.target) &&
      !current.contains(event.relatedTarget))closeTooltip();
+});
+document.addEventListener("pointerdown",event=>{
+  if(suppressedNode && event.target instanceof Element &&
+     (event.target===suppressedNode || suppressedNode.contains(event.target)))suppressedNode=null;
 });
 document.addEventListener("keydown",event=>{if(event.key==="Escape")closeTooltip();});
 window.addEventListener("scroll",closeTooltip,true);
 window.addEventListener("blur",closeTooltip);
-export { showTooltip, closeTooltip };
+function suppressTooltipUntilPointerLeave(node) {
+  if(!(node instanceof Element))return;
+  suppressedNode=node;
+  closeTooltip();
+}
+
+export { showTooltip, closeTooltip, suppressTooltipUntilPointerLeave };

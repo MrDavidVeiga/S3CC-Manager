@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { closeTooltip } from "./ui/fluent/tooltips.js";
+import { closeTooltip, suppressTooltipUntilPointerLeave } from "./ui/fluent/tooltips.js";
 
 const THEME_KEY = "s3cc-manager-theme";
 const VALID_THEMES = new Set(["system","veiga-light","veiga-dark","mean-girls","ea-app","winui-light","winui-dark"]);
@@ -152,7 +152,7 @@ themeButton?.addEventListener("click",event=>{
 });
 themeFlyout?.addEventListener("click",event=>event.stopPropagation());
 document.querySelectorAll(".theme-option").forEach(option=>option.addEventListener("click",()=>{
-  closeTooltip();
+  suppressTooltipUntilPointerLeave(themeButton);
   applyTheme(option.dataset.theme || "system");
   closeThemeFlyout();
 }));

@@ -34,6 +34,7 @@ expect(!app.includes("el.duplicatesList.scrollTop = 0"), "Duplicates rendering d
 expect(app.includes("verifyQuarantinePreflight"), "Quarantine preflight is an explicit non-executing action");
 expect(app.includes('invoke("open_external_url", { url })'), "Social links use the Tauri external URL command");
 expect(theme.includes('closeTooltip'), "Theme selection closes tooltip state");
+expect(theme.includes('suppressTooltipUntilPointerLeave'), "Theme selection suppresses tooltip re-opening until a new interaction");
 expect(theme.includes("linear-gradient(135deg"), "Theme swatches use two real palette colors");
 expect(!theme.includes('swatch.style.background=systemAccent()'), "System theme swatches keep their bicolor treatment");
 
