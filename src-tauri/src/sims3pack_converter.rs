@@ -15,6 +15,8 @@ const TYPE_KEY: u32 = 0x0166_038C;
 const TYPE_MERGE_SKIP: u32 = 0x7672_F0C5;
 const TYPE_OBJD: u32 = 0x319E_4F1D;
 const TYPE_OBJK: u32 = 0x02DC_343F;
+// Store Featured Set membership list (not a normal lamp or lighting resource).
+const TYPE_FEATURED_SET_MEMBERS: u32 = 0x082D_0369;
 const CACHE_THUMB_TYPES: &[u32] = &[
     0x0580_A2B4, 0x0580_A2B5, 0x0580_A2B6,
     0x0589_DC44, 0x0589_DC45, 0x0589_DC46,
@@ -63,6 +65,10 @@ pub struct Sims3PackConversionItem {
     pub display_name: String,
     pub name_source: String,
     pub content_type: String,
+    pub store_set: bool,
+    pub recommended_folder: String,
+    pub package_title: Option<String>,
+    pub package_id: Option<String>,
     pub size: u64,
     pub convertible: bool,
     pub warning: Option<String>,
@@ -557,7 +563,7 @@ fn inspect_payload(
     payload: &[u8],
     index: usize,
     language: AppLanguage,
-) -> Result<(Option<String>, Option<String>), String> {
+) -> Result<(ManifestNames, Option<String>, bool), String> {
     if payload.len() < 96 || &payload[..4] != b"DBPF" {
         return Err("Embedded file is not a supported Sims 3 DBPF package.".to_string());
     }
@@ -566,12 +572,112 @@ fn inspect_payload(
         fs::write(&temp, payload).map_err(|e| format!("Could not stage embedded package: {e}"))?;
         let package = Package::load(&temp).map_err(|e| format!("Invalid embedded package: {e}"))?;
         let manifest = package_manifest_names(&package);
-        let manifest_name = best_manifest_name(&manifest, language);
         let casp_name = package_casp_name(&package);
-        Ok((manifest_name, casp_name))
+        let store_set = package_is_featured_set(&package);
+        Ok((manifest, casp_name, store_set))
     })();
     let _ = fs::remove_file(&temp);
     result
+}
+
+
+// The membership resource alone can also occur in override mods. Requiring the
+// catalog object definitions lets us recognize actual Store Featured Set entries.
+fn has_featured_set_signature(types: impl IntoIterator<Item = u32>) -> bool {
+    let mut members = false;
+    let mut object_definition = false;
+    let mut object_key = false;
+    for kind in types {
+        match kind {
+            TYPE_FEATURED_SET_MEMBERS => members = true,
+            TYPE_OBJD => object_definition = true,
+            TYPE_OBJK => object_key = true,
+            _ => {}
+        }
+    }
+    members && object_definition && object_key
+}
+
+fn package_is_featured_set(package: &Package) -> bool {
+    has_featured_set_signature(package.entries.iter().map(|entry| entry.type_id))
+}
+
+fn is_safe_conversion_item(item: &Sims3PackConversionItem) -> bool {
+    !item.store_set && is_merge_safe(&item.content_type)
+}
+
+fn content_extension(content_type: &str) -> &'static str {
+    match content_type.trim().to_ascii_lowercase().as_str() {
+        "world" => "world",
+        "sim" => "sim",
+        _ => "package",
+    }
+}
+
+fn recommended_folder(content_type: &str) -> &'static str {
+    match content_type.trim().to_ascii_lowercase().as_str() {
+        "world" => "InstalledWorlds",
+        "lot" | "household" | "residentiallot" | "communitylot" => "Library",
+        "sim" => "SavedSims",
+        "preset" => "Review",
+        _ => "Mods/Packages",
+    }
+}
+
+fn is_merge_safe(content_type: &str) -> bool {
+    matches!(
+        content_type.trim().to_ascii_lowercase().as_str(),
+        "object" | "cas" | "caspart" | "clothing" | "hair" |
+        "accessory" | "pattern" | "build" | "buy"
+    )
+}
+
+// Use the embedded package title to distinguish collisions within the same destination.
+fn disambiguate_output_names(items: &mut [Sims3PackConversionItem]) {
+    let mut counts = BTreeMap::<(String, String), usize>::new();
+    for item in items.iter().filter(|item| item.convertible) {
+        let key = (item.recommended_folder.to_ascii_lowercase(), item.proposed_file_name.to_ascii_lowercase());
+        *counts.entry(key).or_default() += 1;
+    }
+    let mut used = HashSet::<(String, String)>::new();
+    for item in items.iter_mut().filter(|item| item.convertible) {
+        let key = (item.recommended_folder.to_ascii_lowercase(), item.proposed_file_name.to_ascii_lowercase());
+        if counts.get(&key).copied().unwrap_or(0) > 1 || used.contains(&key) {
+            let original_stem = Path::new(&item.proposed_file_name).file_stem()
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Converted Package".to_string());
+            let disambiguator = item.package_title.as_deref()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| item.package_id.as_deref().filter(|v| !v.trim().is_empty()))
+                .unwrap_or(&item.packaged_name);
+            let suffix = sanitize_file_stem(disambiguator);
+            let new_stem = if suffix.eq_ignore_ascii_case(&original_stem) {
+                format!("{original_stem} - {}", item.index + 1)
+            } else {
+                format!("{original_stem} - {suffix}")
+            };
+            item.proposed_file_name = format!("{new_stem}.{}", content_extension(&item.content_type));
+            item.name_source = "manifest_disambiguated".to_string();
+        }
+        let folder = item.recommended_folder.to_ascii_lowercase();
+        let mut final_key = (folder.clone(), item.proposed_file_name.to_ascii_lowercase());
+        if used.contains(&final_key) {
+            let stem = Path::new(&item.proposed_file_name).file_stem()
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Converted Package".to_string());
+            let mut counter = item.index + 1;
+            loop {
+                let candidate = format!("{stem} - {counter}.{}", content_extension(&item.content_type));
+                final_key = (folder.clone(), candidate.to_ascii_lowercase());
+                if !used.contains(&final_key) {
+                    item.proposed_file_name = candidate;
+                    break;
+                }
+                counter += 1;
+            }
+        }
+        used.insert(final_key);
+    }
 }
 
 fn proposed_name(
@@ -583,30 +689,31 @@ fn proposed_name(
     index: usize,
     language: AppLanguage,
 ) -> (String, String, String) {
+    let extension = content_extension(&packaged.content_type);
     if let Some(value) = manifest_name.filter(|v| !v.trim().is_empty()) {
         let stem = sanitize_file_stem(value);
-        return (format!("{stem}.package"), stem, "manifest".to_string());
+        return (format!("{stem}.{extension}"), stem, "manifest".to_string());
     }
 
     if valid_package_count == 1 {
         if let Some(value) = best_manifest_name(&pack.manifest, language) {
             let stem = sanitize_file_stem(&value);
-            return (format!("{stem}.package"), stem, "sims3pack_manifest".to_string());
+            return (format!("{stem}.{extension}"), stem, "sims3pack_manifest".to_string());
         }
     }
 
     if let Some(value) = casp_name.filter(|v| !v.trim().is_empty()) {
         let stem = sanitize_file_stem(value);
-        return (format!("{stem}.package"), stem, "casp".to_string());
+        return (format!("{stem}.{extension}"), stem, "casp".to_string());
     }
 
     if let Some(value) = meaningful_packaged_name(&packaged.name) {
         let stem = sanitize_file_stem(&value);
-        return (format!("{stem}.package"), stem, "packaged_file".to_string());
+        return (format!("{stem}.{extension}"), stem, "packaged_file".to_string());
     }
 
     let fallback = format!("Converted Package {}", index + 1);
-    (format!("{fallback}.package"), fallback, "fallback".to_string())
+    (format!("{fallback}.{extension}"), fallback, "fallback".to_string())
 }
 
 fn inspect_one(path: &Path, language: AppLanguage) -> Result<Sims3PackInspection, String> {
@@ -638,7 +745,11 @@ fn inspect_one(path: &Path, language: AppLanguage) -> Result<Sims3PackInspection
     for (index, packaged, payload, prewarning) in staged {
         if let Some(payload) = payload {
             match inspect_payload(&payload, index, language) {
-                Ok((manifest_name, casp_name)) => {
+                Ok((manifest, casp_name, featured_set_signature)) => {
+                    let store_set = featured_set_signature && packaged.content_type.eq_ignore_ascii_case("object");
+                    let manifest_name = best_manifest_name(&manifest, language);
+                    let package_title = manifest.package_title.clone();
+                    let package_id = manifest.package_id.clone();
                     let (file_name, display_name, name_source) = proposed_name(
                         &pack,
                         packaged,
@@ -655,6 +766,10 @@ fn inspect_one(path: &Path, language: AppLanguage) -> Result<Sims3PackInspection
                         display_name,
                         name_source,
                         content_type: packaged.content_type.clone(),
+                        store_set,
+                        recommended_folder: recommended_folder(&packaged.content_type).to_string(),
+                        package_title,
+                        package_id,
                         size: packaged.length as u64,
                         convertible: true,
                         warning: prewarning,
@@ -671,6 +786,10 @@ fn inspect_one(path: &Path, language: AppLanguage) -> Result<Sims3PackInspection
                         display_name: packaged.name.clone(),
                         name_source: "invalid".to_string(),
                         content_type: packaged.content_type.clone(),
+                        store_set: false,
+                        recommended_folder: recommended_folder(&packaged.content_type).to_string(),
+                        package_title: None,
+                        package_id: None,
                         size: packaged.length as u64,
                         convertible: false,
                         warning: Some(error),
@@ -689,6 +808,10 @@ fn inspect_one(path: &Path, language: AppLanguage) -> Result<Sims3PackInspection
                 display_name: packaged.name.clone(),
                 name_source: "non_package".to_string(),
                 content_type: packaged.content_type.clone(),
+                store_set: false,
+                recommended_folder: recommended_folder(&packaged.content_type).to_string(),
+                package_title: None,
+                package_id: None,
                 size: packaged.length as u64,
                 convertible: false,
                 warning: Some(warning),
@@ -697,6 +820,8 @@ fn inspect_one(path: &Path, language: AppLanguage) -> Result<Sims3PackInspection
             });
         }
     }
+
+    disambiguate_output_names(&mut items);
 
     let display_name = best_manifest_name(&pack.manifest, language)
         .or_else(|| path.file_stem().map(|v| v.to_string_lossy().to_string()))
@@ -1154,6 +1279,18 @@ pub fn convert_sims3packs(
         };
 
         if combined {
+            let forbidden = inspection.items.iter()
+                .filter(|item| item.convertible && !is_safe_conversion_item(item))
+                .map(|item| format!("{} ({})", item.display_name, item.content_type))
+                .collect::<Vec<_>>();
+            if !forbidden.is_empty() {
+                result.skipped += inspection.items.len();
+                result.errors.push(format!(
+                    "{}: Combined conversion blocked for non-mergeable content: {}. Use separate conversion.",
+                    source.display(), forbidden.join(", ")
+                ));
+                continue;
+            }
             let (file_name, name_source) = combined_output_name(&source, &pack, language);
             let mut target = unique_output_path(&destination, &file_name);
             loop {
@@ -1202,6 +1339,15 @@ pub fn convert_sims3packs(
         };
 
         for item in inspection.items.iter().filter(|item| item.convertible) {
+            let category_folder = output_root.join(&item.recommended_folder);
+            if let Err(error) = fs::create_dir_all(&category_folder) {
+                result.skipped += 1;
+                result.errors.push(format!(
+                    "{} / {}: Could not create {}: {error}",
+                    source.display(), item.packaged_name, category_folder.display()
+                ));
+                continue;
+            }
             let Some(packaged) = pack.packaged_files.get(item.index) else {
                 result.skipped += 1;
                 result.errors.push(format!(
@@ -1224,12 +1370,12 @@ pub fn convert_sims3packs(
                 }
             };
 
-            let mut target = unique_output_path(&output_root, &item.proposed_file_name);
+            let mut target = unique_output_path(&category_folder, &item.proposed_file_name);
             loop {
                 match write_no_replace(&target, &payload) {
                     Ok(()) => break,
                     Err(_error) if target.exists() => {
-                        target = unique_output_path(&output_root, &item.proposed_file_name);
+                        target = unique_output_path(&category_folder, &item.proposed_file_name);
                     }
                     Err(error) => {
                         result.skipped += 1;
@@ -1243,7 +1389,10 @@ pub fn convert_sims3packs(
                 continue;
             }
 
-            let _ = restore_cached_thumbnails(&target);
+            // Preserve byte-for-byte payloads for worlds, lots, households, and Sims.
+            if is_safe_conversion_item(item) {
+                let _ = restore_cached_thumbnails(&target);
+            }
             result.converted += 1;
             result.items.push(Sims3PackConvertedItem {
                 source_path: source.to_string_lossy().to_string(),
@@ -1309,4 +1458,88 @@ mod tests {
     fn file_name_sanitizer_keeps_readable_names() {
         assert_eq!(sanitize_file_stem("Cool: Hair / Set"), "Cool_ Hair _ Set");
     }
+    #[test]
+    fn installation_folders_and_extensions_respect_sims3pack_content_types() {
+        assert_eq!(content_extension("world"), "world");
+        assert_eq!(recommended_folder("world"), "InstalledWorlds");
+        assert_eq!(content_extension("lot"), "package");
+        assert_eq!(recommended_folder("lot"), "Library");
+        assert_eq!(recommended_folder("household"), "Library");
+        assert_eq!(content_extension("sim"), "sim");
+        assert_eq!(recommended_folder("sim"), "SavedSims");
+        assert_eq!(recommended_folder("object"), "Mods/Packages");
+    }
+
+    #[test]
+    fn combined_conversion_rejects_special_content_types() {
+        assert!(is_merge_safe("object"));
+        assert!(is_merge_safe("CASPart"));
+        for value in ["world", "lot", "household", "sim", "preset", "unknown"] {
+            assert!(!is_merge_safe(value));
+        }
+    }
+
+    #[test]
+    fn same_display_names_are_disambiguated_by_internal_titles() {
+        let mut items = ["AuroraSkies_Gold", "AuroraSkies_World"].iter().enumerate()
+            .map(|(index, title)| Sims3PackConversionItem {
+                index,
+                packaged_name: format!("{index}.package"),
+                proposed_file_name: "Aurora Skies.package".to_string(),
+                display_name: "Aurora Skies".to_string(),
+                name_source: "manifest".to_string(),
+                content_type: "object".to_string(),
+                store_set: true,
+                recommended_folder: "Mods/Packages".to_string(),
+                package_title: Some((*title).to_string()),
+                package_id: None,
+                size: 100,
+                convertible: true,
+                warning: None,
+                casp_name: None,
+                manifest_name: Some("Aurora Skies".to_string()),
+            })
+            .collect::<Vec<_>>();
+        disambiguate_output_names(&mut items);
+        assert_eq!(items[0].proposed_file_name, "Aurora Skies - AuroraSkies_Gold.package");
+        assert_eq!(items[1].proposed_file_name, "Aurora Skies - AuroraSkies_World.package");
+    }
+
+    #[test]
+    fn store_featured_set_signature_distinguishes_world_sets_from_streetlights() {
+        let featured_set = [
+            TYPE_FEATURED_SET_MEMBERS, TYPE_OBJD, TYPE_OBJK, TYPE_MANIFEST
+        ];
+        let ordinary_streetlight = [TYPE_OBJD, TYPE_OBJK, TYPE_MANIFEST];
+        let standalone_override = [TYPE_FEATURED_SET_MEMBERS];
+        assert!(has_featured_set_signature(featured_set));
+        assert!(!has_featured_set_signature(ordinary_streetlight));
+        assert!(!has_featured_set_signature(standalone_override));
+        assert!(!has_featured_set_signature([TYPE_FEATURED_SET_MEMBERS, TYPE_OBJD]));
+    }
+
+    #[test]
+    fn store_featured_sets_are_not_merged_even_when_manifest_says_object() {
+        let item = Sims3PackConversionItem {
+            index: 0,
+            packaged_name: "featured_set.package".into(),
+            proposed_file_name: "AuroraSkies_Gold.package".into(),
+            display_name: "Aurora Skies".into(),
+            name_source: "manifest".into(),
+            content_type: "object".into(),
+            store_set: true,
+            recommended_folder: "Mods/Packages".into(),
+            package_title: Some("AuroraSkies_Gold".into()),
+            package_id: None,
+            size: 100,
+            convertible: true,
+            warning: None,
+            casp_name: None,
+            manifest_name: Some("Aurora Skies".into()),
+        };
+        assert!(!is_safe_conversion_item(&item));
+        let ordinary = Sims3PackConversionItem { store_set: false, ..item };
+        assert!(is_safe_conversion_item(&ordinary));
+    }
+
 }
