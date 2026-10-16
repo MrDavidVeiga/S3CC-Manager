@@ -517,6 +517,13 @@ const I18N = {
     relatedVariants: "Related Variants",
     analyzeDuplicatesToBegin: "Scan CCs in Manager to populate this list automatically, or analyze duplicates here.",
     selectDuplicateFinding: "Select a finding to see why it was detected.",
+    sortName: "Name",
+    sortFiles: "Files",
+    sortSize: "Size",
+    sortPriority: "Priority",
+    expandDetails: "Expand details",
+    collapseDetails: "Collapse details",
+    duplicateSelectedCount: "{selected} selected of {total} results",
     duplicateDetailsTitle: "Duplicate Details",
     duplicateDetailsIntro: "Compare the detected files, previews and evidence before taking any action.",
     duplicateDetailsSafety: "No file is changed while reviewing duplicate details.",
@@ -1165,6 +1172,13 @@ const I18N = {
     relatedVariants: "Variantes Relacionadas",
     analyzeDuplicatesToBegin: "Use Analisar CCs no Manager para preencher esta lista automaticamente ou analise duplicados aqui.",
     selectDuplicateFinding: "Selecione um resultado para ver por que ele foi detectado.",
+    sortName: "Nome",
+    sortFiles: "Arquivos",
+    sortSize: "Tamanho",
+    sortPriority: "Prioridade",
+    expandDetails: "Expandir detalhes",
+    collapseDetails: "Recolher detalhes",
+    duplicateSelectedCount: "{selected} selecionados de {total} resultados",
     duplicateDetailsTitle: "Detalhes dos Duplicados",
     duplicateDetailsIntro: "Compare os arquivos detectados, previews e evidências antes de realizar qualquer ação.",
     duplicateDetailsSafety: "Nenhum arquivo é alterado durante a revisão dos duplicados.",
@@ -1812,6 +1826,13 @@ const I18N = {
     relatedVariants: "Variantes Relacionadas",
     analyzeDuplicatesToBegin: "Usa Analizar CC en Manager para llenar esta lista automáticamente o analiza duplicados aquí.",
     selectDuplicateFinding: "Selecciona un resultado para ver por qué fue detectado.",
+    sortName: "Nombre",
+    sortFiles: "Archivos",
+    sortSize: "Tamaño",
+    sortPriority: "Prioridad",
+    expandDetails: "Expandir detalles",
+    collapseDetails: "Contraer detalles",
+    duplicateSelectedCount: "{selected} seleccionados de {total} resultados",
     duplicateDetailsTitle: "Detalles de Duplicados",
     duplicateDetailsIntro: "Compara los archivos detectados, vistas previas y evidencias antes de realizar cualquier acción.",
     duplicateDetailsSafety: "Ningún archivo se modifica durante la revisión de duplicados.",
@@ -2009,6 +2030,9 @@ const state = {
   duplicatesSearch: typeof preferences.duplicatesSearch === "string" ? preferences.duplicatesSearch : "",
   duplicatesFilter: typeof preferences.duplicatesFilter === "string" ? preferences.duplicatesFilter : "all",
   duplicateSelectedId: "",
+  duplicateReviewSelected: new Set(),
+  duplicateExpanded: new Set(),
+  duplicatesSort: "name",
   duplicateViewMode: "finding",
   existingQuarantine: [],
   existingQuarantineLoading: false,
@@ -2031,6 +2055,8 @@ const state = {
       ? preferences.conflictsFilter
       : "attention",
   conflictSelectedId: "",
+  conflictExpanded: new Set(),
+  conflictsSort: "priority",
   operations: { scan: null, duplicates: null, conflicts: null, unified_analysis: null },
   technicalDetails: {},
   technicalDetailsLoading: "",
@@ -2118,8 +2144,8 @@ const SEARCH_DEBOUNCE_MS = 100;
 
 const managerSearchIndex = new WeakMap();
 const managerVisibleMemo = { items: null, status: "", search: "", result: [] };
-const duplicateVisibleMemo = { analysis: null, filter: "", search: "", result: [] };
-const conflictVisibleMemo = { analysis: null, filter: "", search: "", marksVersion: 0, result: [] };
+const duplicateVisibleMemo = { analysis: null, filter: "", search: "", sort: "", result: [] };
+const conflictVisibleMemo = { analysis: null, filter: "", search: "", sort: "", marksVersion: 0, result: [] };
 const virtualViews = {
   manager: { items: null, start: -1, end: -1, raf: 0 },
   duplicates: { items: null, start: -1, end: -1, raf: 0 },
@@ -2338,6 +2364,7 @@ const el = {
   duplicatesState: document.querySelector("#duplicates-state"),
   duplicatesSearch: document.querySelector("#duplicates-search"),
   duplicatesFilter: document.querySelector("#duplicates-filter"),
+  duplicatesSort: document.querySelector("#duplicates-sort"),
   duplicatesEmpty: document.querySelector("#duplicates-empty"),
   duplicatesResults: document.querySelector("#duplicates-results"),
   duplicatesList: document.querySelector("#duplicates-list"),
@@ -2354,6 +2381,7 @@ const el = {
   conflictsState: document.querySelector("#conflicts-state"),
   conflictsSearch: document.querySelector("#conflicts-search"),
   conflictsFilter: document.querySelector("#conflicts-filter"),
+  conflictsSort: document.querySelector("#conflicts-sort"),
   conflictsEmpty: document.querySelector("#conflicts-empty"),
   conflictsResults: document.querySelector("#conflicts-results"),
   conflictsList: document.querySelector("#conflicts-list"),
@@ -3666,7 +3694,7 @@ async function selectExactCopiesForQuarantine() {
   await buildQuarantinePreview();
 }
 
-function reviewSelectedDuplicates() {
+function legacyReviewSelectedDuplicates() {
   if (!state.duplicatesAnalysis || state.quarantineBusy || state.analysisPipelineBusy) return;
   const selectedPaths = state.quarantineSelected;
   const selectedGroups = exactDuplicateGroups().filter(group =>
@@ -3696,6 +3724,14 @@ function navigateDuplicateReview(direction) {
   state.duplicateViewMode = "finding";
   renderDuplicatesPreview();
   renderDuplicateReviewNavigation();
+}
+
+function reviewSelectedDuplicates() {
+  if (!state.duplicatesAnalysis || !state.duplicateReviewSelected.size || state.duplicatesBusy) return;
+  for (const id of state.duplicateReviewSelected) state.duplicateExpanded.add(id);
+  const first = visibleDuplicateFindings().find((finding) => state.duplicateReviewSelected.has(finding.id));
+  if (first) state.duplicateSelectedId = first.id;
+  renderDuplicates();
 }
 
 function renderDuplicateReviewNavigation() {
@@ -3851,7 +3887,8 @@ function visibleDuplicateFindings() {
   if (
     duplicateVisibleMemo.analysis === analysis &&
     duplicateVisibleMemo.filter === state.duplicatesFilter &&
-    duplicateVisibleMemo.search === search
+    duplicateVisibleMemo.search === search &&
+    duplicateVisibleMemo.sort === state.duplicatesSort
   ) {
     return duplicateVisibleMemo.result;
   }
@@ -3881,9 +3918,25 @@ function visibleDuplicateFindings() {
     );
   });
 
+  const findingName = (item) => item.findingType === "group"
+    ? (item.members || []).map((member) => member.name || member.relativePath || "").sort().join(" · ")
+    : `${item.left?.name || ""} ${item.right?.name || ""}`;
+  const findingCount = (item) => item.findingType === "group"
+    ? (item.members || []).length
+    : 2;
+  const findingSize = (item) => item.findingType === "group"
+    ? (item.members || []).reduce((total, member) => total + Number(member.size || 0), 0)
+    : Number(item.left?.size || 0) + Number(item.right?.size || 0);
+  result.sort((left, right) => {
+    if (state.duplicatesSort === "count") return findingCount(right) - findingCount(left) || findingName(left).localeCompare(findingName(right));
+    if (state.duplicatesSort === "size") return findingSize(right) - findingSize(left) || findingName(left).localeCompare(findingName(right));
+    return findingName(left).localeCompare(findingName(right));
+  });
+
   duplicateVisibleMemo.analysis = analysis;
   duplicateVisibleMemo.filter = state.duplicatesFilter;
   duplicateVisibleMemo.search = search;
+  duplicateVisibleMemo.sort = state.duplicatesSort;
   duplicateVisibleMemo.result = result;
   return result;
 }
@@ -4401,7 +4454,7 @@ function renderDuplicatesPreview() {
   renderDuplicateReviewNavigation();
 }
 
-function createDuplicateFindingRow(finding) {
+function legacyCreateDuplicateFindingRow(finding) {
   const button = document.createElement("button");
   button.type = "button";
   button.dataset.duplicateId = finding.id;
@@ -4460,7 +4513,194 @@ function createDuplicateFindingRow(finding) {
   return wrapper;
 }
 
-function renderDuplicateVirtualRows(findings, force = false) {
+function duplicateFindingLabel(finding) {
+  return finding.findingType === "group"
+    ? (finding.members || []).map((member) => member.name || member.relativePath || "—").join(" · ")
+    : `${finding.left?.name || "—"} ↔ ${finding.right?.name || "—"}`;
+}
+
+function appendInlineTechnicalDetails(container, members = [], evidence = []) {
+  const technical = document.createElement("details");
+  technical.className = "analysis-technical-details";
+  const summary = document.createElement("summary");
+  summary.textContent = t("technicalDetails");
+  const body = document.createElement("div");
+  body.className = "analysis-technical-body";
+  for (const member of members) {
+    const line = document.createElement("code");
+    const instances = (member.instances || []).join(", ") || "—";
+    line.textContent = `${member.name || "—"} · ${t("fileHash")}: ${member.fileSha256 || "—"} · TGI: ${instances}`;
+    body.appendChild(line);
+  }
+  for (const item of evidence) {
+    const line = document.createElement("code");
+    line.textContent = `${item.resourceLabel || item.resourceTypeHex || "resource"} · ${item.instanceHex || "—"} · ${item.leftPayloadSha256 || "—"} ↔ ${item.rightPayloadSha256 || "—"}`;
+    body.appendChild(line);
+  }
+  technical.append(summary, body);
+  container.appendChild(technical);
+}
+
+function toggleDuplicateReviewFromRow(finding, event) {
+  const visible = visibleDuplicateFindings();
+  if (event.shiftKey && state.lastDuplicateReviewAnchor) {
+    const from = visible.findIndex((item) => item.id === state.lastDuplicateReviewAnchor);
+    const to = visible.findIndex((item) => item.id === finding.id);
+    if (from >= 0 && to >= 0) {
+      for (const item of visible.slice(Math.min(from, to), Math.max(from, to) + 1)) {
+        state.duplicateReviewSelected.add(item.id);
+      }
+      state.lastDuplicateReviewAnchor = finding.id;
+      renderDuplicates();
+      return;
+    }
+  }
+  if (!(event.ctrlKey || event.metaKey)) state.duplicateReviewSelected.clear();
+  if (state.duplicateReviewSelected.has(finding.id) && (event.ctrlKey || event.metaKey)) {
+    state.duplicateReviewSelected.delete(finding.id);
+  } else {
+    state.duplicateReviewSelected.add(finding.id);
+  }
+  state.lastDuplicateReviewAnchor = finding.id;
+  state.duplicateSelectedId = finding.id;
+  renderDuplicates();
+}
+
+function selectAllVisibleDuplicates() {
+  if (!state.duplicatesAnalysis || state.duplicatesBusy) return;
+  for (const finding of visibleDuplicateFindings()) state.duplicateReviewSelected.add(finding.id);
+  renderDuplicates();
+}
+
+function appendDuplicateExpandableDetails(container, finding) {
+  const reason = document.createElement("p");
+  reason.className = "analysis-expandable-reason";
+  reason.textContent = duplicateExplanation(finding.kind);
+  container.appendChild(reason);
+  const members = finding.findingType === "group"
+    ? finding.members || [] : [finding.left, finding.right].filter(Boolean);
+  const memberList = document.createElement("div");
+  memberList.className = "analysis-comparison-grid";
+  const quarantineEligible = finding.findingType === "group" &&
+    (finding.kind === "exact_duplicate" || finding.kind === "content_duplicate");
+  for (const member of members) {
+    const card = document.createElement("article");
+    card.className = "analysis-comparison-card";
+    if (quarantineEligible) {
+      const chooser = document.createElement("label");
+      chooser.className = "quarantine-member-select";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = state.quarantineSelected.has(member.path);
+      checkbox.disabled = state.quarantineBusy || workspaceReadOnly();
+      checkbox.title = t("selectForQuarantine");
+      checkbox.addEventListener("click", (event) => event.stopPropagation());
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) state.quarantineSelected.add(member.path);
+        else state.quarantineSelected.delete(member.path);
+        state.quarantinePlan = null;
+        renderDuplicates();
+      });
+      chooser.append(checkbox, document.createTextNode(t("selectForQuarantine")));
+      card.appendChild(chooser);
+    }
+    appendDuplicateMemberDetails(card, member);
+    memberList.appendChild(card);
+  }
+  container.appendChild(memberList);
+  if (finding.findingType !== "group") {
+    const metrics = document.createElement("p");
+    metrics.className = "analysis-expandable-metrics";
+    metrics.textContent = `${t("sharedResources")}: ${finding.sharedResourceCount || 0} · ${t("changedSameTgi")}: ${finding.changedSameTgiCount || 0} · ${t("changedTextures")}: ${finding.changedTextureCount || 0}`;
+    container.appendChild(metrics);
+  }
+  if (quarantineEligible) {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "secondary-btn";
+    action.textContent = t("previewSelectedQuarantine");
+    action.disabled = !state.quarantineSelected.size || state.quarantineBusy;
+    action.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void buildQuarantinePreview();
+    });
+    container.appendChild(action);
+  }
+  appendInlineTechnicalDetails(container, members, finding.evidence || []);
+}
+
+function createDuplicateFindingRow(finding) {
+  const article = document.createElement("article");
+  article.className = "analysis-expandable-item duplicate-expandable-item";
+  article.dataset.duplicateId = finding.id;
+  article.classList.toggle("selected", state.duplicateReviewSelected.has(finding.id));
+  article.classList.toggle("expanded", state.duplicateExpanded.has(finding.id));
+
+  const header = document.createElement("div");
+  header.className = "analysis-expandable-summary";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = state.duplicateReviewSelected.has(finding.id);
+  checkbox.setAttribute("aria-label", `${t("reviewSelection")}: ${duplicateFindingLabel(finding)}`);
+  checkbox.addEventListener("click", (event) => event.stopPropagation());
+  checkbox.addEventListener("change", (event) => {
+    const checked = event.currentTarget.checked;
+    if (event.shiftKey && state.lastDuplicateReviewAnchor) {
+      const visible = visibleDuplicateFindings();
+      const from = visible.findIndex((item) => item.id === state.lastDuplicateReviewAnchor);
+      const to = visible.findIndex((item) => item.id === finding.id);
+      if (from >= 0 && to >= 0) {
+        for (const item of visible.slice(Math.min(from, to), Math.max(from, to) + 1)) {
+          if (checked) state.duplicateReviewSelected.add(item.id);
+          else state.duplicateReviewSelected.delete(item.id);
+        }
+      }
+    } else if (checked) state.duplicateReviewSelected.add(finding.id);
+    else state.duplicateReviewSelected.delete(finding.id);
+    state.lastDuplicateReviewAnchor = finding.id;
+    state.duplicateSelectedId = finding.id;
+    renderDuplicates();
+  });
+  const select = document.createElement("button");
+  select.type = "button";
+  select.className = "analysis-expandable-select";
+  select.textContent = duplicateFindingLabel(finding);
+  select.title = duplicateExplanation(finding.kind);
+  select.addEventListener("click", (event) => toggleDuplicateReviewFromRow(finding, event));
+  const description = document.createElement("span");
+  description.className = "analysis-expandable-description";
+  description.textContent = duplicateExplanation(finding.kind);
+  const badge = document.createElement("span");
+  badge.className = `duplicate-kind duplicate-kind-${finding.kind}`;
+  badge.textContent = finding.findingType === "group"
+    ? `${finding.members?.length || 0} ${t("packages")}` : duplicateKindLabel(finding.kind);
+  const arrow = document.createElement("button");
+  arrow.type = "button";
+  arrow.className = "analysis-expandable-toggle";
+  arrow.setAttribute("aria-expanded", String(state.duplicateExpanded.has(finding.id)));
+  arrow.setAttribute("aria-label", t(state.duplicateExpanded.has(finding.id) ? "collapseDetails" : "expandDetails"));
+  arrow.textContent = state.duplicateExpanded.has(finding.id) ? "⌃" : "⌄";
+  arrow.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.duplicateExpanded.has(finding.id)) state.duplicateExpanded.delete(finding.id);
+    else state.duplicateExpanded.add(finding.id);
+    renderDuplicates();
+  });
+  const text = document.createElement("div");
+  text.className = "analysis-expandable-text";
+  text.append(select, description);
+  header.append(checkbox, text, badge, arrow);
+  article.appendChild(header);
+  if (state.duplicateExpanded.has(finding.id)) {
+    const details = document.createElement("div");
+    details.className = "analysis-expandable-details";
+    appendDuplicateExpandableDetails(details, finding);
+    article.appendChild(details);
+  }
+  return article;
+}
+
+function legacyRenderDuplicateVirtualRows(findings, force = false) {
   el.duplicatesList.dataset.fluentCount = String(findings.length);
   const view = virtualViews.duplicates;
   const changed = view.items !== findings;
@@ -4497,6 +4737,50 @@ function renderDuplicateVirtualRows(findings, force = false) {
   el.duplicatesList.replaceChildren(fragment);
 }
 
+function renderDuplicateVirtualRows(findings, force = false) {
+  el.duplicatesList.dataset.fluentCount = String(findings.length);
+  if (!findings.length) {
+    const empty = document.createElement("div");
+    empty.className = "list-empty";
+    empty.textContent = t("noDuplicateFindings");
+    el.duplicatesList.replaceChildren(empty);
+    return;
+  }
+  // Expanded rows use normal flow so several open comparisons never overlap.
+  // Collapsed rows retain the existing virtualized list for large analyses.
+  if (state.duplicateExpanded.size) {
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < findings.length; index += 1) {
+      const row = createDuplicateFindingRow(findings[index]);
+      row.dataset.fluentIndex = String(index);
+      fragment.appendChild(row);
+    }
+    el.duplicatesList.replaceChildren(fragment);
+    return;
+  }
+  const view = virtualViews.duplicates;
+  const changed = view.items !== findings;
+  if (changed) {
+    view.items = findings;
+    view.start = -1;
+    view.end = -1;
+    el.duplicatesList.scrollTop = 0;
+  }
+  const { start, end } = virtualRange(el.duplicatesList, findings.length, ANALYSIS_ROW_STRIDE);
+  if (!force && !changed && start === view.start && end === view.end) return;
+  view.start = start;
+  view.end = end;
+  const fragment = document.createDocumentFragment();
+  if (start > 0) fragment.appendChild(virtualSpacer(start * ANALYSIS_ROW_STRIDE));
+  for (let index = start; index < end; index += 1) {
+    const row = createDuplicateFindingRow(findings[index]);
+    row.dataset.fluentIndex = String(index);
+    fragment.appendChild(row);
+  }
+  if (end < findings.length) fragment.appendChild(virtualSpacer((findings.length - end) * ANALYSIS_ROW_STRIDE));
+  el.duplicatesList.replaceChildren(fragment);
+}
+
 function scheduleDuplicateVirtualRows() {
   const view = virtualViews.duplicates;
   if (view.raf) return;
@@ -4515,8 +4799,9 @@ function renderDuplicateBatchControls() {
     state.scanning || state.duplicatesBusy || state.conflictsBusy ||
     state.auditBusy || state.executing;
   const count = state.quarantineSelected.size;
+  const reviewCount = state.duplicateReviewSelected.size;
   if (el.duplicatesReviewSelectionBtn) {
-    el.duplicatesReviewSelectionBtn.disabled = !hasAnalysis || !count || busy;
+    el.duplicatesReviewSelectionBtn.disabled = !hasAnalysis || !reviewCount || busy;
   }
   el.duplicatesSelectExactBtn.disabled = !hasAnalysis ||
     !exactDuplicateGroups().length || busy || workspaceReadOnly();
@@ -4529,7 +4814,8 @@ function renderDuplicateBatchControls() {
   el.duplicatesPreviewAllBtn.disabled = !state.folder || busy;
   el.duplicatesClearSelectionBtn.disabled = !count || busy;
   el.duplicatesBatchSummary.textContent = hasAnalysis
-    ? `${t("quarantineSelectionCount")}: ${count}. ${t("quarantineBatchHint")}`
+    ? t("duplicateSelectedCount").replace("{selected}", String(reviewCount)).replace("{total}", String(visibleDuplicateFindings().length))
+      + (count ? ` · ${t("quarantineSelectionCount")}: ${count}` : "")
     : "";
   el.duplicatesBatchPreview.replaceChildren();
   el.duplicatesBatchPreview.classList.toggle("hidden", !state.quarantinePlan || !count);
@@ -4565,6 +4851,12 @@ function renderDuplicateBatchControls() {
 
 function renderDuplicates() {
   if (!el.analyzeDuplicatesBtn) return;
+  if (el.duplicatesSort) {
+    el.duplicatesSort.setAttribute("aria-label", `${t("sortName")} / ${t("sortFiles")} / ${t("sortSize")}`);
+    const labels = { name: t("sortName"), count: t("sortFiles"), size: t("sortSize") };
+    for (const option of el.duplicatesSort.options) option.textContent = labels[option.value] || option.value;
+    el.duplicatesSort.value = state.duplicatesSort;
+  }
   renderDuplicateBatchControls();
   el.analyzeDuplicatesBtn.querySelector("[data-i18n]")?.replaceChildren(
     document.createTextNode(t(state.duplicatesAnalysis ? "reanalyzeDuplicates" : "analyzeDuplicates"))
@@ -4824,7 +5116,7 @@ async function openConflictResourceCfg() {
   if (!state.healthReport && !state.toolsBusy) await analyzeHealth();
 }
 
-function reviewSelectedConflicts() {
+function legacyReviewSelectedConflicts() {
   if (!state.conflictsAnalysis || !state.conflictReviewSelected.size ||
       state.reviewBusy || state.conflictsBusy) return;
   prioritizeSelectedConflicts();
@@ -5051,6 +5343,7 @@ function visibleConflictFindings(includeSelectedOnly = true) {
     conflictVisibleMemo.analysis === analysis &&
     conflictVisibleMemo.filter === state.conflictsFilter &&
     conflictVisibleMemo.search === search &&
+    conflictVisibleMemo.sort === state.conflictsSort &&
     conflictVisibleMemo.marksVersion === conflictMarksVersion
   ) {
     return conflictVisibleMemo.result;
@@ -5105,7 +5398,12 @@ function visibleConflictFindings(includeSelectedOnly = true) {
       if (!state.conflictReviewSelected.has(result[i].id)) result.splice(i, 1);
     }
   }
-  if (!["ignored_session", "intentional_override"].includes(state.conflictsFilter)) {
+  const conflictName = (item) => `${item.left?.name || ""} ${item.right?.name || ""}`;
+  if (state.conflictsSort === "name") {
+    result.sort((a, b) => conflictName(a).localeCompare(conflictName(b)));
+  } else if (state.conflictsSort === "count") {
+    result.sort((a, b) => (b.differentPayloadCount || 0) - (a.differentPayloadCount || 0) || conflictName(a).localeCompare(conflictName(b)));
+  } else if (!["ignored_session", "intentional_override"].includes(state.conflictsFilter)) {
     result.sort((a, b) => conflictRiskScore(b) - conflictRiskScore(a) ||
       (b.differentPayloadCount || 0) - (a.differentPayloadCount || 0) ||
       String(a.id).localeCompare(String(b.id))
@@ -5115,6 +5413,7 @@ function visibleConflictFindings(includeSelectedOnly = true) {
     conflictVisibleMemo.analysis = analysis;
     conflictVisibleMemo.filter = state.conflictsFilter;
     conflictVisibleMemo.search = search;
+    conflictVisibleMemo.sort = state.conflictsSort;
     conflictVisibleMemo.marksVersion = conflictMarksVersion;
     conflictVisibleMemo.result = result;
   }
@@ -5443,7 +5742,7 @@ function renderConflictsPreview() {
   }
 }
 
-function createConflictFindingRow(finding) {
+function legacyCreateConflictFindingRow(finding) {
   const button = document.createElement("button");
   button.type = "button";
   button.title = `${conflictPriorityLabel(finding)} · ${t("conflictPriorityReason")}`;
@@ -5513,7 +5812,108 @@ function createConflictFindingRow(finding) {
   return wrapper;
 }
 
-function renderConflictVirtualRows(findings, force = false) {
+function appendConflictExpandableDetails(container, finding) {
+  const reason = document.createElement("p");
+  reason.className = "analysis-expandable-reason";
+  reason.textContent = isInactiveConflictFinding(finding)
+    ? t("conflictInactiveExplanation") : conflictExplanation(finding.kind);
+  container.appendChild(reason);
+  const comparison = document.createElement("div");
+  comparison.className = "analysis-comparison-grid";
+  for (const member of [finding.left, finding.right].filter(Boolean)) {
+    const card = document.createElement("article");
+    card.className = "analysis-comparison-card conflict-comparison-card";
+    const name = document.createElement("strong");
+    name.textContent = member.name || "—";
+    const path = document.createElement("code");
+    path.textContent = member.relativePath || member.path || "—";
+    const meta = document.createElement("p");
+    meta.textContent = `${t("fileSize")}: ${bytesLabel(member.size || 0)} · ${t("fileHash")}: ${member.fileSha256 || "—"}`;
+    card.append(name, path, meta);
+    comparison.appendChild(card);
+  }
+  container.appendChild(comparison);
+  const loadOrder = document.createElement("p");
+  loadOrder.className = "analysis-expandable-metrics";
+  loadOrder.textContent = `${conflictPriorityLabel(finding)} · ${loadOrderExplanation(finding)} · ${t("differentPayloadCount")}: ${finding.differentPayloadCount || 0}`;
+  container.appendChild(loadOrder);
+  const actions = document.createElement("div");
+  actions.className = "analysis-inline-actions";
+  for (const [label, mark] of [[t("markIntentional"), "intentional"], [t("ignoreSession"), "ignored"], [t("clearMark"), null]]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-btn";
+    button.textContent = label;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void setConflictMark(finding, mark);
+    });
+    actions.appendChild(button);
+  }
+  container.appendChild(actions);
+  appendInlineTechnicalDetails(container, [finding.left, finding.right].filter(Boolean), finding.evidence || []);
+}
+
+function createConflictFindingRow(finding) {
+  const article = document.createElement("article");
+  const sessionMark = effectiveConflictMark(finding);
+  article.className = "analysis-expandable-item conflict-expandable-item";
+  article.dataset.conflictId = finding.id;
+  article.classList.toggle("selected", state.conflictReviewSelected.has(finding.id));
+  article.classList.toggle("expanded", state.conflictExpanded.has(finding.id));
+  if (sessionMark) article.dataset.sessionMark = sessionMark;
+
+  const header = document.createElement("div");
+  header.className = "analysis-expandable-summary";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = state.conflictReviewSelected.has(finding.id);
+  checkbox.setAttribute("aria-label", `${t("selectConflictFinding")}: ${finding.left?.name || "A"} / ${finding.right?.name || "B"}`);
+  checkbox.addEventListener("click", (event) => event.stopPropagation());
+  checkbox.addEventListener("change", (event) => {
+    toggleConflictReviewSelection(finding.id, event.currentTarget.checked, article);
+    state.conflictExpanded.add(finding.id);
+    renderConflicts();
+  });
+  const select = document.createElement("button");
+  select.type = "button";
+  select.className = "analysis-expandable-select";
+  select.textContent = `${finding.left?.name || "—"} ↔ ${finding.right?.name || "—"}`;
+  select.addEventListener("click", (event) => toggleConflictReviewFromRow(finding, event));
+  const description = document.createElement("span");
+  description.className = "analysis-expandable-description";
+  description.textContent = isInactiveConflictFinding(finding)
+    ? t("conflictInactiveExplanation") : conflictExplanation(finding.kind);
+  const badge = document.createElement("span");
+  badge.className = `conflict-kind conflict-kind-${finding.severity || "info"}`;
+  badge.textContent = sessionMark === "intentional" ? t("intentionalOverride") : conflictKindLabel(finding.kind);
+  const arrow = document.createElement("button");
+  arrow.type = "button";
+  arrow.className = "analysis-expandable-toggle";
+  arrow.setAttribute("aria-expanded", String(state.conflictExpanded.has(finding.id)));
+  arrow.setAttribute("aria-label", t(state.conflictExpanded.has(finding.id) ? "collapseDetails" : "expandDetails"));
+  arrow.textContent = state.conflictExpanded.has(finding.id) ? "⌃" : "⌄";
+  arrow.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.conflictExpanded.has(finding.id)) state.conflictExpanded.delete(finding.id);
+    else state.conflictExpanded.add(finding.id);
+    renderConflicts();
+  });
+  const text = document.createElement("div");
+  text.className = "analysis-expandable-text";
+  text.append(select, description);
+  header.append(checkbox, text, badge, arrow);
+  article.appendChild(header);
+  if (state.conflictExpanded.has(finding.id)) {
+    const details = document.createElement("div");
+    details.className = "analysis-expandable-details";
+    appendConflictExpandableDetails(details, finding);
+    article.appendChild(details);
+  }
+  return article;
+}
+
+function legacyRenderConflictVirtualRows(findings, force = false) {
   el.conflictsList.dataset.fluentCount = String(findings.length);
   const view = virtualViews.conflicts;
   const changed = view.items !== findings;
@@ -5552,6 +5952,56 @@ function renderConflictVirtualRows(findings, force = false) {
     fragment.appendChild(virtualSpacer((findings.length - end) * ANALYSIS_ROW_STRIDE));
   }
   el.conflictsList.replaceChildren(fragment);
+}
+
+function renderConflictVirtualRows(findings, force = false) {
+  el.conflictsList.dataset.fluentCount = String(findings.length);
+  if (!findings.length) {
+    const empty = document.createElement("div");
+    empty.className = "list-empty";
+    empty.textContent = t("noConflictFindings");
+    el.conflictsList.replaceChildren(empty);
+    return;
+  }
+  if (state.conflictExpanded.size) {
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < findings.length; index += 1) {
+      const row = createConflictFindingRow(findings[index]);
+      row.dataset.fluentIndex = String(index);
+      fragment.appendChild(row);
+    }
+    el.conflictsList.replaceChildren(fragment);
+    return;
+  }
+  const view = virtualViews.conflicts;
+  const changed = view.items !== findings;
+  if (changed) {
+    view.items = findings;
+    view.start = -1;
+    view.end = -1;
+    el.conflictsList.scrollTop = 0;
+  }
+  const { start, end } = virtualRange(el.conflictsList, findings.length, ANALYSIS_ROW_STRIDE);
+  if (!force && !changed && start === view.start && end === view.end) return;
+  view.start = start;
+  view.end = end;
+  const fragment = document.createDocumentFragment();
+  if (start > 0) fragment.appendChild(virtualSpacer(start * ANALYSIS_ROW_STRIDE));
+  for (let index = start; index < end; index += 1) {
+    const row = createConflictFindingRow(findings[index]);
+    row.dataset.fluentIndex = String(index);
+    fragment.appendChild(row);
+  }
+  if (end < findings.length) fragment.appendChild(virtualSpacer((findings.length - end) * ANALYSIS_ROW_STRIDE));
+  el.conflictsList.replaceChildren(fragment);
+}
+
+function reviewSelectedConflicts() {
+  if (!state.conflictsAnalysis || !state.conflictReviewSelected.size || state.reviewBusy) return;
+  for (const id of state.conflictReviewSelected) state.conflictExpanded.add(id);
+  const first = visibleConflictFindings().find((finding) => state.conflictReviewSelected.has(finding.id));
+  if (first) state.conflictSelectedId = first.id;
+  renderConflicts();
 }
 
 function scheduleConflictVirtualRows() {
@@ -5609,6 +6059,12 @@ function renderConflictBatchControls() {
 
 function renderConflicts() {
   if (!el.analyzeConflictsBtn) return;
+  if (el.conflictsSort) {
+    el.conflictsSort.setAttribute("aria-label", `${t("sortPriority")} / ${t("sortName")} / ${t("sortFiles")}`);
+    const labels = { priority: t("sortPriority"), name: t("sortName"), count: t("sortFiles") };
+    for (const option of el.conflictsSort.options) option.textContent = labels[option.value] || option.value;
+    el.conflictsSort.value = state.conflictsSort;
+  }
   renderConflictBatchControls();
   el.analyzeConflictsBtn.querySelector("[data-i18n]")?.replaceChildren(
     document.createTextNode(t(state.conflictsAnalysis ? "reanalyzeConflicts" : "analyzeConflicts"))
@@ -6504,10 +6960,13 @@ function invalidateAnalysesAfterStructureChange() {
   state.duplicatesError = "";
   state.duplicatesNotice = "";
   state.duplicateSelectedId = "";
+  state.duplicateReviewSelected.clear();
+  state.duplicateExpanded.clear();
   state.conflictsAnalysis = null;
   state.conflictsError = "";
   state.conflictsNotice = "";
   state.conflictSelectedId = "";
+  state.conflictExpanded.clear();
   state.conflictMarks = {};
   state.technicalDetails = {};
   state.technicalDetailsErrors = {};
@@ -8983,6 +9442,8 @@ function clearDuplicateList() {
   state.duplicatesSearch = "";
   state.duplicatesFilter = "all";
   state.duplicateSelectedId = "";
+  state.duplicateReviewSelected.clear();
+  state.duplicateExpanded.clear();
   state.quarantineSelected.clear();
   state.quarantinePlan = null;
   state.quarantineExactBatch = false;
@@ -9003,6 +9464,7 @@ function clearConflictList() {
   state.conflictQuarantineSelected.clear();
   state.conflictQuarantinePlan = null;
   state.conflictReviewSelected.clear();
+  state.conflictExpanded.clear();
   state.conflictsSelectedOnly = false;
   conflictVisibleMemo.analysis = null;
   closeConflictDetails();
@@ -9050,6 +9512,8 @@ function clearLoadedLibrary() {
   state.duplicatesSearch = "";
   state.duplicatesFilter = "all";
   state.duplicateSelectedId = "";
+  state.duplicateReviewSelected.clear();
+  state.duplicateExpanded.clear();
 
   state.conflictsAnalysis = null;
   state.conflictsError = "";
@@ -9057,6 +9521,7 @@ function clearLoadedLibrary() {
   state.conflictsSearch = "";
   state.conflictsFilter = "attention";
   state.conflictSelectedId = "";
+  state.conflictExpanded.clear();
   state.conflictMarks = {};
 
   state.quarantineSelected.clear();
@@ -9239,7 +9704,10 @@ async function legacyUnifiedAnalysis(preserveSelection = false, preserveNotice =
     state.duplicatesNotice = "";
     state.conflictsNotice = "";
     state.duplicateSelectedId = "";
+    state.duplicateReviewSelected.clear();
+    state.duplicateExpanded.clear();
     state.conflictSelectedId = "";
+    state.conflictExpanded.clear();
     state.quarantineSelected.clear();
     state.quarantinePlan = null;
     closeDuplicateDetails();
@@ -9583,7 +10051,10 @@ function reconcileSuccessfulOrganization(result) {
   state.duplicatesNotice = sharedAnalysisReconciled ? "" : t("analysisNeedsRefresh");
   state.conflictsNotice = sharedAnalysisReconciled ? "" : t("analysisNeedsRefresh");
   state.duplicateSelectedId = "";
+  state.duplicateReviewSelected.clear();
+  state.duplicateExpanded.clear();
   state.conflictSelectedId = "";
+  state.conflictExpanded.clear();
   state.quarantineSelected.clear();
   state.quarantinePlan = null;
   state.conflictQuarantineSelected.clear();
@@ -10112,14 +10583,20 @@ el.duplicatesSelectVisibleBtn.addEventListener("click", selectFilteredExactDupli
 el.duplicatesList.addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
     event.preventDefault();
-    selectFilteredExactDuplicateGroups();
+    selectAllVisibleDuplicates();
   }
+});
+el.duplicatesSort?.addEventListener("change", () => {
+  state.duplicatesSort = el.duplicatesSort.value || "name";
+  duplicateVisibleMemo.analysis = null;
+  renderDuplicates();
 });
 el.duplicatesPreviewAllBtn.addEventListener("click", openExistingQuarantine);
 el.duplicatesRestoreFilesBtn.addEventListener("click", openDuplicateRestore);
 el.duplicatesHistoryBtn.addEventListener("click", openDuplicateHistory);
 el.duplicatesOpenFolderBtn.addEventListener("click", openDuplicatesFolder);
 el.duplicatesClearSelectionBtn.addEventListener("click", () => {
+  state.duplicateReviewSelected.clear();
   state.quarantineSelected.clear();
   state.quarantinePlan = null;
   state.quarantineExactBatch = false;
@@ -10141,6 +10618,11 @@ el.conflictsList.addEventListener("keydown", event => {
     event.preventDefault();
     selectAllVisibleConflicts();
   }
+});
+el.conflictsSort?.addEventListener("change", () => {
+  state.conflictsSort = el.conflictsSort.value || "priority";
+  conflictVisibleMemo.analysis = null;
+  renderConflicts();
 });
 el.conflictsShowPendingBtn.addEventListener("click", () => setConflictView("attention"));
 el.conflictsShowIntentionalBtn.addEventListener("click", () => setConflictView("intentional_override"));

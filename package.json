@@ -20,6 +20,7 @@
     "test:language-theme-ui": "node scripts/test-language-theme-ui.mjs",
     "test:planning-duplicate-loading": "node scripts/test-planning-duplicate-loading.mjs",
     "test:loading-overlay-state": "node scripts/test-loading-overlay-state.mjs",
+    "test:expandable-analysis-ui": "node scripts/test-expandable-analysis-ui.mjs",
     "test:unified-analysis": "node scripts/test-unified-analysis.mjs"
   },
   "devDependencies": {

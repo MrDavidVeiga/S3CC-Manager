@@ -5005,6 +5005,100 @@ body.release-v1 .conflicts-results {
 }
 .conflict-row.reviewed { border-inline-start: 2px solid var(--winui-accent, var(--green)); }
 
+/* Shared expandable result rows for Duplicates and Conflicts.  The collapsed
+   state keeps the same compact geometry as the old virtualized rows; once a
+   row is opened it uses normal flow so several comparisons can remain open
+   without clipping or changing selection. */
+.analysis-expandable-item {
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: rgba(255,255,255,.04);
+  color: var(--text);
+  overflow: hidden;
+}
+.analysis-expandable-item.selected {
+  border-color: var(--winui-accent, var(--green));
+  background: rgba(var(--accent-rgb),.12);
+}
+.analysis-expandable-item:hover { border-color: rgba(var(--accent-rgb),.34); }
+.analysis-expandable-summary {
+  min-height: 53px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+}
+.analysis-expandable-summary > input { margin: 0 2px; }
+.analysis-expandable-text { min-width: 0; display: grid; gap: 3px; }
+.analysis-expandable-select {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.analysis-expandable-select:hover { color: var(--winui-accent, var(--green)); }
+.analysis-expandable-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: .73rem;
+}
+.analysis-expandable-toggle {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--winui-control-stroke, var(--border));
+  border-radius: 8px;
+  background: var(--winui-control-fill, transparent);
+  color: var(--text);
+  cursor: pointer;
+}
+.analysis-expandable-details {
+  display: grid;
+  gap: 10px;
+  padding: 0 12px 13px 48px;
+  border-top: 1px solid var(--winui-control-stroke, var(--border));
+  background: color-mix(in srgb, var(--surface) 88%, var(--winui-accent, #4da3ff) 12%);
+}
+.analysis-expandable-reason,
+.analysis-expandable-metrics { margin: 10px 0 0; color: var(--muted); font-size: .78rem; }
+.analysis-comparison-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 9px; }
+.analysis-comparison-card {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 9px;
+  border: 1px solid var(--winui-control-stroke, var(--border));
+  border-radius: 9px;
+  background: var(--winui-card-fill-alt, rgba(0,0,0,.12));
+}
+.analysis-comparison-card code { overflow-wrap: anywhere; color: var(--muted); font-size: .7rem; }
+.analysis-comparison-card p { margin: 0; color: var(--muted); font-size: .72rem; overflow-wrap: anywhere; }
+.analysis-inline-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.analysis-technical-details { border-top: 1px solid var(--winui-control-stroke, var(--border)); padding-top: 7px; }
+.analysis-technical-details summary { cursor: pointer; color: var(--muted); font-size: .76rem; }
+.analysis-technical-body { display: grid; gap: 4px; padding-top: 7px; max-height: 180px; overflow: auto; }
+.analysis-technical-body code { overflow-wrap: anywhere; color: var(--muted); font-size: .68rem; }
+
+@media (max-width: 720px) {
+  .analysis-expandable-summary { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .analysis-expandable-summary .duplicate-kind,
+  .analysis-expandable-summary .conflict-kind { display: none; }
+  .analysis-expandable-details { padding-left: 12px; }
+}
+
 
 /* Conflict actions: critical selection and preview controls remain visible,
    infrequent review/audit operations are grouped in a native keyboard-
