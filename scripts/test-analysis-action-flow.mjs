@@ -75,7 +75,12 @@ assert.match(html, /id="conflict-next-btn"[^>]*data-i18n="nextConflict"/);
 assert.match(css, /\.analysis-more-actions-menu\s*\{[\s\S]*position:\s*absolute[\s\S]*max-height/);
 assert.match(css, /\.analysis-more-actions-menu button\s*\{[\s\S]*width:\s*100%/,
   "nested More Actions buttons must share the menu width");
-assert.match(css, /\.analysis-action-bar\s*>\s*\.primary-btn,[\s\S]*flex:\s*1 1 190px/);
+assert.match(css, /\.analysis-action-bar\s*\{[\s\S]*?display:\s*grid/,
+  "analysis actions use a stable grid layout");
+assert.match(css, /\.duplicates-action-bar\s*\{[\s\S]*?grid-template-columns:/,
+  "duplicate actions use a proportional grid");
+assert.match(css, /\.conflicts-action-primary\s*\{[\s\S]*?grid-template-columns:/,
+  "conflict actions use a proportional grid");
 assert.match(css, /@media\s*\(max-width:\s*480px\)[\s\S]*\.analysis-more-actions/);
 assert.doesNotMatch(app, /function reviewSelectedConflicts\(/);
 assert.doesNotMatch(app, /function reviewSelectedDuplicates\(/);

@@ -47,5 +47,16 @@ expect(app.includes('body.classList.toggle("utility-page"'), "Tools and Restore 
 expect(theme.includes('surfaceFor'), "Theme swatches pair the accent with the actual surface");
 expect(fluent.includes("#duplicates-batch-preview.quarantine-preview"), "Quarantine preflight is compact and revealed on demand");
 expect(fluent.includes(".winui-social-footer .social-icons-list a:focus-visible"), "Social keyboard focus remains visible");
+const css = fs.readFileSync(path.join(root, "src", "style.css"), "utf8");
+expect(/\.operation-result-counts\s*\{\s*display:\s*flex;/.test(css), "Result counters center the cards themselves");
+expect(/\.duplicates-action-bar\s*\{[\s\S]*?grid-template-columns:/.test(css), "Duplicate actions remain in one coherent action band");
+expect(/\.conflicts-action-primary\s*\{[\s\S]*?grid-template-columns:/.test(css), "Conflict actions use the same proportional grid");
+expect(/\.analysis-query-controls\s*\{[\s\S]*?display:\s*grid;/.test(css), "Analysis search controls prioritize the search field");
+expect(/body\.utility-page\.right-panel\s*\{|body\.utility-page\s+\.right-panel\s*\{/.test(css) &&
+  /body\.release-v1\.utility-page\s+\.right-panel\s*\{[\s\S]*?border-radius:\s*0/.test(fs.readFileSync(path.join(root, "src", "ui", "fluent", "theme-audit.css"), "utf8")),
+  "Utility pages use a rectangular full-width surface");
+expect(app.includes("planningStatus"), "Plan preparation exposes the real operation status");
+expect(app.includes('kind === "planning"'), "Plan preparation supports cooperative cancellation");
+expect(app.includes('planning: ""'), "Plan preparation does not duplicate its phase below the counter");
 
 console.log("Beta 2 final interface regressions: PASS");

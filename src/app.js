@@ -2026,6 +2026,7 @@ const state = {
   isStatusFilterOpen: false,
   scanning: false,
   planning: false,
+  planningStatus: null,
   executing: false,
   organizeProgress: null,
   error: "",
@@ -2185,6 +2186,7 @@ let operationMonitorSequence = 0;
 const operationMonitorTokens = new Map();
 let toolsOperationSequence = 0;
 let restoreOperationSequence = 0;
+let planningOperationSequence = 0;
 const completedExternalOperationIds = new Set();
 
 function debounce(callback, delay = SEARCH_DEBOUNCE_MS) {
@@ -6470,8 +6472,11 @@ function loadingOverlayState() {
       blocking: true, cancelable: false };
   }
   if (state.planning) {
-    return { key: "planning", operationKey: "planning", kind: "planning", status: {},
-      phase: "loadingPhasePlan", blocking: false, cancelable: false };
+    const status = state.planningStatus || {};
+    const operationKey = `planning:${status.startedUnixMs || "active"}`;
+    return { key: `${operationKey}:${status.phase || "building"}`, operationKey,
+      kind: "planning", status, phase: "loadingPhasePlan", blocking: false,
+      cancelable: status.running === true };
   }
   if (state.toolsBusy && state.toolsOperation) {
     const kind = state.toolsOperation;
@@ -6558,7 +6563,7 @@ function renderLoadingOverlay() {
   const detailKey = analysisKinds.has(current.kind)
     ? "loadingModeUnknown"
     : ({
-      planning: "loadingPhasePlan",
+      planning: "",
       moving: "loadingPhaseOrganization",
       integrity_check: "loadingPhaseIntegrity",
       cleaning: "loadingPhaseCleanup",
@@ -6567,7 +6572,7 @@ function renderLoadingOverlay() {
   // The line below the count is intentionally one short operation description;
   // cache mode remains a non-visual data attribute and is never inferred from
   // the mere presence of cache files.
-  el.loadingOverlayPhrase.textContent = t(detailKey);
+  el.loadingOverlayPhrase.textContent = detailKey ? t(detailKey) : "";
 
   const canCancel = current.cancelable && !status.cancelRequested;
   el.loadingOverlayCancel.classList.toggle("hidden", !current.cancelable);
@@ -6688,6 +6693,14 @@ async function cancelLoadingOperation(kind) {
   if (kind === state.toolsOperation) {
     return cancelToolsOperation();
   }
+  if (kind === "planning") {
+    try {
+      await invoke("cancel_operation", { kind });
+      state.planningStatus = await invoke("get_operation_status", { kind });
+      renderLoadingOverlay();
+    } catch (_) {}
+    return;
+  }
   try {
     await invoke("cancel_operation", { kind });
     if (state.externalOperation?.kind === kind) {
@@ -6695,6 +6708,18 @@ async function cancelLoadingOperation(kind) {
     }
     renderLoadingOverlay();
   } catch (_) {}
+}
+
+async function monitorPlanningOperation(token) {
+  while (token === planningOperationSequence && state.planning) {
+    try {
+      const status = await invoke("get_operation_status", { kind: "planning" });
+      if (token !== planningOperationSequence || !state.planning) return;
+      state.planningStatus = status;
+      renderLoadingOverlay();
+    } catch (_) {}
+    if (token === planningOperationSequence) await sleep(180);
+  }
 }
 
 async function monitorRestoreProgress(token) {
@@ -9406,9 +9431,14 @@ function renderRestore() {
 }
 
 function openPlanModal() {
+  const started = performance.now();
   renderPlan();
   el.planModal.classList.remove("hidden");
   el.planModal.setAttribute("aria-hidden", "false");
+  console.info("[S3CC timings] plan-preview-open", {
+    renderMs: performance.now() - started,
+    reused: !!state.plan && state.planKey === planPreviewKey(),
+  });
 }
 
 function closePlanModal() {
@@ -10084,14 +10114,22 @@ async function buildPlan() {
   ) return;
 
   const requestedKey = planPreviewKey();
+  const previewStarted = performance.now();
 
   // If nothing changed since the last preview, reopening is instantaneous.
   if (state.plan && !state.planError && state.planKey === requestedKey) {
     openPlanModal();
+    console.info("[S3CC timings] plan-preview", {
+      mode: "memory-reuse",
+      totalMs: performance.now() - previewStarted,
+    });
     return;
   }
 
   state.planning = true;
+  state.planningStatus = null;
+  const planningToken = ++planningOperationSequence;
+  void monitorPlanningOperation(planningToken);
   state.planError = "";
   state.notice = "";
   if (!supportsResourceCfgUpdate(state.folder)) state.updateResourceCfg = false;
@@ -10104,13 +10142,27 @@ async function buildPlan() {
       state.planKey = requestedKey;
     }
   } catch (error) {
+    const message = String(error);
     state.plan = null;
     state.planKey = "";
-    state.planError = String(error);
+    if (message.includes("__S3CC_OPERATION_CANCELLED__")) {
+      state.planError = "";
+      state.notice = t("cancelled");
+    } else {
+      state.planError = message;
+    }
   } finally {
     state.planning = false;
+    state.planningStatus = null;
+    planningOperationSequence += 1;
     render();
-    if (state.plan) openPlanModal();
+    if (state.plan) {
+      openPlanModal();
+      console.info("[S3CC timings] plan-preview", {
+        mode: "backend",
+        totalMs: performance.now() - previewStarted,
+      });
+    }
   }
 }
 

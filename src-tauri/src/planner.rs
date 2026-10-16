@@ -3377,6 +3377,9 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     selected_paths: Vec<String>,
     update_resource_cfg: bool,
 ) -> Result<OrganizationPlan, String> {
+    if crate::operation::is_cancelled("planning") {
+        return Err(crate::operation::CANCELLED_ERROR.to_string());
+    }
     let planning_started = Instant::now();
     let root_input = PathBuf::from(folder.trim());
     let root = root_input
@@ -3475,9 +3478,15 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             None => scan_selected_roots(&root, language, &selected)?,
         }
     };
+    if crate::operation::is_cancelled("planning") {
+        return Err(crate::operation::CANCELLED_ERROR.to_string());
+    }
 
     let mut scan_by_canonical = HashMap::<PathBuf, &ScanPackageItem>::new();
-    for item in &scan.items {
+    for (item_index, item) in scan.items.iter().enumerate() {
+        if item_index % 64 == 0 && crate::operation::is_cancelled("planning") {
+            return Err(crate::operation::CANCELLED_ERROR.to_string());
+        }
         if let Ok(path) = PathBuf::from(&item.path).canonicalize() {
             scan_by_canonical.insert(path, item);
         }

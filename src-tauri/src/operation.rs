@@ -315,7 +315,7 @@ pub fn is_cancelled(kind: &str) -> bool {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     map.get(kind)
-        .map(|status| status.cancel_requested)
+        .map(|status| status.running && status.cancel_requested)
         .unwrap_or(false)
 }
 
@@ -457,6 +457,20 @@ mod tests {
         assert!(!is_cancelled("duplicates-test"));
         finish(&duplicates, "complete", None);
         finish(&scan, "complete", None);
+    }
+
+    #[test]
+    fn completed_cancellation_does_not_leak_into_a_future_run() {
+        let kind = "planning-cancellation-leak";
+        let first = begin(kind, "building").unwrap();
+        assert!(cancel_operation(kind.to_string()));
+        assert!(is_cancelled(kind));
+        mark_cancelled(&first);
+        assert!(!is_cancelled(kind));
+
+        let second = begin(kind, "building").unwrap();
+        assert!(!is_cancelled(kind));
+        finish(&second, "complete", None);
     }
 
     #[test]

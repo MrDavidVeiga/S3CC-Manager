@@ -293,12 +293,74 @@ body.release-v1 #search-input.results-search-input {
 body.release-v1 .analysis-search-input {
   flex: 2 1 clamp(280px, 34vw, 560px);
 }
+
+/* The utility pages intentionally have no sidebar and therefore use a
+ * rectangular content surface. Main analysis pages meet the sidebar with a
+ * square upper-left corner. */
+body.release-v1.utility-page .right-panel {
+  border-radius: 0;
+}
+body.release-v1:not(.utility-page) .right-panel {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+body.release-v1 .analysis-query-controls {
+  grid-template-columns: auto minmax(280px, 1fr) minmax(130px, 160px) minmax(130px, 160px);
+}
+
+body.release-v1 .duplicates-action-bar {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(145px, 180px);
+}
+
+body.release-v1 .conflicts-action-primary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+body.release-v1 .maintenance-card .sidebar-utility-actions {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+body.release-v1 .maintenance-card .sidebar-utility-actions > .compact-btn {
+  width: auto;
+  min-width: 0;
+}
+
+body.release-v1 .planner-side {
+  overflow: hidden;
+}
+
+body.release-v1 .planner-side > .planner-section:nth-child(2) {
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.release-v1 .planner-side > .planner-section:nth-child(2) .planner-scroll-list {
+  max-height: none;
+  min-height: 110px;
+  overflow-y: auto;
+}
 @media (max-width: 840px) {
   body.release-v1 #search-input.results-search-input {
     flex-basis: 220px;
   }
   body.release-v1 .analysis-search-input {
     flex-basis: 240px;
+  }
+}
+@media (max-width: 760px) {
+  body.release-v1 .analysis-query-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  body.release-v1 .duplicates-action-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  body.release-v1 .duplicates-action-bar > .analysis-more-actions {
+    grid-column: 1 / -1;
+  }
+  body.release-v1 .conflicts-action-primary {
+    grid-template-columns: 1fr;
   }
 }
 

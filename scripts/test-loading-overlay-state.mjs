@@ -72,6 +72,6 @@ assert.match(app, /Processando seus conteúdos/);
 assert.match(app, /Procesando tus contenidos/);
 assert.match(app, /loadingPhaseIdentification/);
 assert.match(app, /loadingPhaseFinishing/);
-assert.match(app, /el\.loadingOverlayPhrase\.textContent = t\(detailKey\)/);
+assert.match(app, /el\.loadingOverlayPhrase\.textContent = detailKey \? t\(detailKey\) : ""/);
 
 console.log("loading overlay lifecycle and localized copy checks passed");

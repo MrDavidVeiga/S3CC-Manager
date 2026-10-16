@@ -882,6 +882,24 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: hidden;
+}
+
+.planner-side > .planner-section {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.planner-side > .planner-section:nth-child(2) {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.planner-side > .planner-section:nth-child(2) .planner-scroll-list {
+  flex: 1 1 0;
+  min-height: 110px;
+  max-height: none;
 }
 
 .planner-section,
@@ -1154,8 +1172,10 @@ button:disabled {
 .operation-result-modal .confirm-icon { margin: 0 auto 12px; }
 
 .operation-result-counts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: stretch;
   gap: 8px;
   margin-top: 16px;
 }
@@ -1166,6 +1186,9 @@ button:disabled {
 }
 
 .operation-result-counts > div {
+  flex: 1 1 180px;
+  width: min(220px, 100%);
+  max-width: 220px;
   min-width: 0;
   padding: 8px 10px;
   border: 1px solid var(--panel-border, rgba(186,196,206,.28));
@@ -2737,6 +2760,19 @@ button:disabled {
 .tool-actions .secondary-btn,
 .tool-inline .primary-btn,
 .tool-inline .secondary-btn { width: auto; }
+
+.maintenance-card .sidebar-utility-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.maintenance-card .sidebar-utility-actions > .compact-btn {
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+}
 .tools-rule-form {
   display: grid;
   grid-template-columns: repeat(2,minmax(0,1fr));
@@ -2919,6 +2955,11 @@ button:disabled {
   min-width: 0;
 }
 
+.analysis-query-controls {
+  display: grid;
+  grid-template-columns: auto minmax(280px, 1fr) minmax(130px, 160px) minmax(130px, 160px);
+}
+
 .results-selection-controls {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2934,10 +2975,14 @@ button:disabled {
 
 .results-search-input,
 .analysis-search-input {
-  flex: 1 1 clamp(260px, 32vw, 520px);
+  flex: 1 1 clamp(360px, 44vw, 680px);
   width: 100%;
-  min-width: min(260px, 100%);
+  min-width: min(320px, 100%);
   max-width: none;
+}
+
+.analysis-query-controls > .analysis-search-input {
+  min-width: 0;
 }
 
 .analysis-query-controls > .primary-btn {
@@ -5103,19 +5148,29 @@ body.utility-page .left-panel {
 
 body.utility-page .right-panel {
   width: 100%;
-  border-radius: 24px;
+  border-radius: 0;
+}
+
+/* The sidebar already supplies the visual lower-left boundary. Keep the
+   adjacent main panel square at the shared upper/lower-left edge. */
+body:not(.utility-page) .right-panel {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }
 
 @media (max-width: 760px) {
   .analysis-query-controls {
-    flex-wrap: wrap;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .analysis-search-input {
-    flex-basis: 100%;
+    grid-column: 1;
+    grid-row: 1;
     min-width: 0;
-    order: -1;
   }
+
+  .analysis-query-controls > .primary-btn { grid-row: 2; }
+  .analysis-query-controls > .analysis-filter-input { grid-row: auto; }
 }
 .analysis-expandable-details {
   min-width: 0;
@@ -5226,21 +5281,32 @@ body.utility-page .right-panel {
 .analysis-action-bar {
   position: relative;
   z-index: 2;
-  display: flex;
-  flex: 1 1 auto;
-  flex-wrap: wrap;
+  display: grid;
   align-items: center;
   gap: 8px;
   min-width: 0;
   overflow: visible;
 }
 
+.duplicates-action-bar {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(145px, 180px);
+}
+
+.conflicts-action-primary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .analysis-action-bar > .primary-btn,
 .analysis-action-bar > .secondary-btn {
-  flex: 1 1 190px;
   width: auto;
   min-width: 0;
+  min-height: 38px;
   white-space: normal;
+}
+
+.analysis-action-bar > :is(.primary-btn, .secondary-btn),
+.analysis-action-bar > .analysis-more-actions {
+  width: 100%;
 }
 
 .analysis-more-actions {
@@ -5381,10 +5447,22 @@ body.utility-page .right-panel {
 }
 
 @media (max-width: 760px) {
+  .duplicates-action-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .duplicates-action-bar > .analysis-more-actions {
+    grid-column: 1 / -1;
+  }
+
+  .conflicts-action-primary {
+    grid-template-columns: 1fr;
+  }
+
   .analysis-action-bar > .primary-btn,
   .analysis-action-bar > .secondary-btn,
   .analysis-more-actions {
-    flex: 1 1 145px;
+    min-width: 0;
   }
 
   .analysis-more-actions-menu {
