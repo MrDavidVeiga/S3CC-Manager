@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Instant, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
 
@@ -88,6 +88,9 @@ pub struct ConflictPackage {
     pub file_sha256: String,
     pub load_priority: Option<i32>,
     pub load_rule: Option<String>,
+    /// Presentation-only timestamp. Conflict decisions still use payload and
+    /// Resource.cfg evidence, never modification time alone.
+    pub modified_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -465,6 +468,11 @@ fn explanation_key(kind: &str) -> &'static str {
 }
 
 fn package_ref(package: &PackageInfo) -> ConflictPackage {
+    let modified_at = std::fs::metadata(&package.path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
     ConflictPackage {
         name: package.name.clone(),
         path: package.path.to_string_lossy().to_string(),
@@ -472,6 +480,7 @@ fn package_ref(package: &PackageInfo) -> ConflictPackage {
         file_sha256: package.file_sha256.clone(),
         load_priority: package.load_priority,
         load_rule: package.load_rule.clone(),
+        modified_at,
     }
 }
 

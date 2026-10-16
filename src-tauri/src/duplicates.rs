@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Instant, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
 
@@ -78,6 +78,8 @@ pub struct DuplicateMember {
     pub resource_count: usize,
     pub instances: Vec<String>,
     pub parse_error: Option<String>,
+    /// Presentation-only timestamp. It is never used as duplicate evidence.
+    pub modified_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +236,11 @@ fn semantic_resource_key(resource: &ResourceFingerprint) -> String {
 }
 
 fn package_member(package: &PackageFingerprint) -> DuplicateMember {
+    let modified_at = std::fs::metadata(&package.path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
     DuplicateMember {
         name: package.name.clone(),
         path: package.path.to_string_lossy().to_string(),
@@ -248,6 +255,7 @@ fn package_member(package: &PackageFingerprint) -> DuplicateMember {
             .into_iter()
             .collect(),
         parse_error: package.parse_error.clone(),
+        modified_at,
     }
 }
 

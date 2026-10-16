@@ -14,7 +14,7 @@ const conflictsEnd = html.indexOf("</section>", conflictsStart);
 const conflicts = html.slice(conflictsStart, conflictsEnd);
 
 assert.match(duplicates, /id="duplicates-review-selection-btn"[^>]*data-i18n="reviewSelection"/);
-assert.match(duplicates, /<details class="analysis-more-actions">[\s\S]*data-i18n="moreActions"/);
+assert.match(duplicates, /<details class="analysis-more-actions">[\s\S]*data-i18n="actions"/);
 for (const id of [
   "duplicates-select-exact-btn",
   "duplicates-select-current-btn",
@@ -34,7 +34,7 @@ assert.equal((duplicates.match(/class="analysis-action-bar/g) || []).length, 1,
 
 assert.match(conflicts, /id="conflicts-select-detected-btn"[^>]*data-i18n="selectForReview"/);
 assert.match(conflicts, /id="conflicts-review-selected-btn"[^>]*data-i18n="reviewSelected"/);
-assert.match(conflicts, /<details class="analysis-more-actions">[\s\S]*data-i18n="moreActions"/);
+assert.match(conflicts, /<details class="analysis-more-actions">[\s\S]*data-i18n="actions"/);
 for (const id of [
   "conflicts-select-all-btn",
   "conflicts-clear-review-btn",
@@ -52,7 +52,7 @@ assert.equal((conflicts.match(/id="conflicts-(?:select-detected|review-selected)
   "conflicts must expose exactly two primary action buttons");
 
 for (const key of [
-  "moreActions",
+  "actions",
   "reviewSelection",
   "selectSafeExcessCopies",
   "showPendingConflicts",

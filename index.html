@@ -282,12 +282,12 @@
               <div class="analysis-preview-spacer" aria-hidden="true"></div>
             </div>
 
-            <div class="duplicates-summary">
+            <div class="analysis-result-summary duplicates-summary">
               <article><b id="dup-stat-packages">0</b><span data-i18n="packages">Packages</span></article>
               <article><b id="dup-stat-exact">0</b><span data-i18n="exactGroups">Exact Groups</span></article>
-              <article><b id="dup-stat-content">0</b><span data-i18n="contentGroups">Content Groups</span></article>
-              <article><b id="dup-stat-retexture">0</b><span data-i18n="retextures">Retextures</span></article>
-              <article><b id="dup-stat-related">0</b><span data-i18n="relatedVariants">Related Variants</span></article>
+              <article class="analysis-summary-secondary"><b id="dup-stat-content">0</b><span data-i18n="contentGroups">Content Groups</span></article>
+              <article class="analysis-summary-secondary"><b id="dup-stat-retexture">0</b><span data-i18n="retextures">Retextures</span></article>
+              <article class="analysis-summary-secondary"><b id="dup-stat-related">0</b><span data-i18n="relatedVariants">Related Variants</span></article>
             </div>
 
             <div id="duplicates-empty" class="empty">
@@ -304,7 +304,7 @@
                 <button id="duplicates-clear-review-visible-btn" class="secondary-btn" type="button" data-i18n="clearSelection">Clear Selection</button>
                 <button id="duplicates-review-selection-btn" class="primary-btn" type="button" data-i18n="reviewSelection">Review Selection</button>
                 <details class="analysis-more-actions">
-                  <summary data-i18n="moreActions">More Actions</summary>
+                  <summary data-i18n="actions">Actions</summary>
                   <div class="analysis-more-actions-menu" role="menu">
                     <div class="analysis-menu-section">
                       <span class="analysis-menu-heading" data-i18n="selectionSection">Selection</span>
@@ -361,6 +361,7 @@
                 <input id="conflicts-search" class="text-input analysis-search-input" type="search" autocomplete="off" spellcheck="false" />
                 <select id="conflicts-filter" class="text-input analysis-filter-input"></select>
                 <select id="conflicts-sort" class="text-input analysis-filter-input" aria-label="Sort conflicts">
+                  <option value="modified">Newest</option>
                   <option value="priority">Priority</option>
                   <option value="name">Name</option>
                   <option value="count">Files</option>
@@ -369,12 +370,12 @@
               <div class="analysis-preview-spacer" aria-hidden="true"></div>
             </div>
 
-            <div class="conflicts-summary">
+            <div class="analysis-result-summary conflicts-summary">
               <article><b id="conf-stat-pairs">0</b><span data-i18n="packagePairs">Package Pairs</span></article>
               <article><b id="conf-stat-real">0</b><span data-i18n="realOverrides">Overrides</span></article>
-              <article><b id="conf-stat-script">0</b><span data-i18n="scriptConflicts">Script</span></article>
-              <article><b id="conf-stat-potential">0</b><span data-i18n="potentialConflicts">Potential</span></article>
-              <article><b id="conf-stat-shared">0</b><span data-i18n="sharedIdentical">Shared</span></article>
+              <article class="analysis-summary-secondary"><b id="conf-stat-script">0</b><span data-i18n="scriptConflicts">Script</span></article>
+              <article class="analysis-summary-secondary"><b id="conf-stat-potential">0</b><span data-i18n="potentialConflicts">Potential</span></article>
+              <article class="analysis-summary-secondary"><b id="conf-stat-shared">0</b><span data-i18n="sharedIdentical">Shared</span></article>
             </div>
 
             <div id="conflicts-empty" class="empty">
@@ -395,7 +396,7 @@
                 <button id="conflicts-select-detected-btn" class="primary-btn" type="button" data-i18n="selectForReview">Select for Review</button>
                 <button id="conflicts-review-selected-btn" class="secondary-btn" type="button" data-i18n="reviewSelected">Review Selected</button>
                 <details class="analysis-more-actions">
-                  <summary data-i18n="moreActions">More Actions</summary>
+                  <summary data-i18n="actions">Actions</summary>
                   <div class="analysis-more-actions-menu" role="menu">
                     <div class="analysis-menu-section">
                       <span class="analysis-menu-heading" data-i18n="selectionSection">Selection</span>

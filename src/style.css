@@ -1270,18 +1270,21 @@ button:disabled {
 }
 
 .duplicates-summary {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 9px;
-  margin-bottom: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  margin-bottom: 10px;
   flex: 0 0 auto;
 }
 
 .duplicates-summary article {
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 14px;
-  padding: 12px 13px;
-  background: rgba(0,0,0,.15);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 
 .duplicates-summary b {
@@ -1294,6 +1297,7 @@ button:disabled {
   color: var(--muted);
   font-size: .75rem;
 }
+.analysis-summary-secondary { display: none !important; }
 
 .duplicates-results {
   display: block;
@@ -1621,18 +1625,21 @@ button:disabled {
 }
 
 .conflicts-summary {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 9px;
-  margin-bottom: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  margin-bottom: 10px;
   flex: 0 0 auto;
 }
 
 .conflicts-summary article {
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 14px;
-  padding: 12px 13px;
-  background: rgba(0,0,0,.15);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 
 .conflicts-summary b {
@@ -5026,7 +5033,7 @@ body.release-v1 .conflicts-results {
   min-width: 0;
   min-height: 53px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 9px;
   padding: 8px 10px;
@@ -5054,6 +5061,12 @@ body.release-v1 .conflicts-results {
   white-space: nowrap;
   color: var(--muted);
   font-size: .73rem;
+}
+.analysis-expandable-date {
+  color: var(--muted);
+  font-size: .7rem;
+  white-space: nowrap;
+  text-align: end;
 }
 .analysis-expandable-toggle {
   width: 30px;
@@ -5096,9 +5109,10 @@ body.release-v1 .conflicts-results {
 .analysis-technical-body code { overflow-wrap: anywhere; color: var(--muted); font-size: .68rem; }
 
 @media (max-width: 720px) {
-  .analysis-expandable-summary { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .analysis-expandable-summary { grid-template-columns: auto minmax(0, 1fr) auto auto; }
   .analysis-expandable-summary .duplicate-kind,
   .analysis-expandable-summary .conflict-kind { display: none; }
+  .analysis-expandable-date { display: none; }
   .analysis-expandable-details { padding-left: 12px; }
 }
 

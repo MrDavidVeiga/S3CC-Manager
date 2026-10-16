@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 const I18N = {
   en: {
+    actions: "Actions",
     moreActions: "More Actions",
     reviewSelection: "Review Selection",
     selectionSection: "Selection",
@@ -25,6 +26,10 @@ const I18N = {
     quarantineEmpty: "No files are currently in #Duplicados.",
     quarantineLoading: "Reading existing quarantine…",
     quarantineState: "State",
+    alreadyQuarantined: "Already in quarantine",
+    modifiedAt: "Modified",
+    sortModified: "Newest",
+    conflictNewestHint: "Newest file first; date is only a review aid.",
     quarantineRestore: "Restore available",
     quarantineNoRestore: "No restore record found",
     legacyNestedQuarantine: "Legacy nested path",
@@ -664,6 +669,7 @@ const I18N = {
     conflictsNext: "Resource-level conflict analysis is implemented in read-only mode.",
   },
   pt: {
+    actions: "Ações",
     moreActions: "Mais Ações",
     reviewSelection: "Revisar Seleção",
     selectionSection: "Seleção",
@@ -685,6 +691,10 @@ const I18N = {
     quarantineEmpty: "Nenhum arquivo está atualmente em #Duplicados.",
     quarantineLoading: "Lendo a quarentena existente…",
     quarantineState: "Estado",
+    alreadyQuarantined: "Já está na quarentena",
+    modifiedAt: "Modificado",
+    sortModified: "Mais recentes",
+    conflictNewestHint: "Arquivo mais recente primeiro; a data apenas auxilia a revisão.",
     quarantineRestore: "Restauração disponível",
     quarantineNoRestore: "Nenhum registro de restauração encontrado",
     legacyNestedQuarantine: "Caminho legado aninhado",
@@ -1323,6 +1333,7 @@ const I18N = {
     conflictsNext: "A análise de conflitos por resource está implementada em modo somente leitura.",
   },
   es: {
+    actions: "Acciones",
     moreActions: "Más acciones",
     reviewSelection: "Revisar selección",
     selectionSection: "Selección",
@@ -1344,6 +1355,10 @@ const I18N = {
     quarantineEmpty: "No hay archivos actualmente en #Duplicados.",
     quarantineLoading: "Leyendo la cuarentena existente…",
     quarantineState: "Estado",
+    alreadyQuarantined: "Ya está en cuarentena",
+    modifiedAt: "Modificado",
+    sortModified: "Más recientes",
+    conflictNewestHint: "Archivo más reciente primero; la fecha solo orienta la revisión.",
     quarantineRestore: "Restauración disponible",
     quarantineNoRestore: "No se encontró registro de restauración",
     legacyNestedQuarantine: "Ruta heredada anidada",
@@ -2075,7 +2090,7 @@ const state = {
       : "attention",
   conflictSelectedId: "",
   conflictExpandedId: "",
-  conflictsSort: "priority",
+  conflictsSort: "modified",
   operations: { scan: null, duplicates: null, conflicts: null, unified_analysis: null },
   technicalDetails: {},
   technicalDetailsLoading: "",
@@ -3659,6 +3674,33 @@ function exactDuplicateGroups() {
   );
 }
 
+function isAlreadyQuarantinedMember(member) {
+  return /\.package\.duplicated$/i.test(String(member?.name || member?.path || ""));
+}
+
+function activeExactMembers(group) {
+  return (group?.members || []).filter((member) => !isAlreadyQuarantinedMember(member));
+}
+
+function formatModifiedAt(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  try {
+    const locale = state.language === "pt-BR" ? "pt-BR" : state.language === "es" ? "es-ES" : "en-US";
+    return new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" })
+      .format(new Date(seconds * 1000));
+  } catch {
+    return "";
+  }
+}
+
+function findingModifiedAt(finding) {
+  const members = finding?.findingType === "group"
+    ? (finding.members || [])
+    : [finding?.left, finding?.right].filter(Boolean);
+  return members.reduce((latest, member) => Math.max(latest, Number(member?.modifiedAt || 0)), 0);
+}
+
 function exactKeeperOrder(member) {
   const path = String(member.relativePath || member.path || "").replace(/\\/g, "/");
   const branch = /(^|\/)Overrides\//i.test(path) ? 0
@@ -3674,15 +3716,17 @@ function compareExactKeepers(left, right) {
 
 function exactSurvivorIsSafe(selection = state.quarantineSelected) {
   return exactDuplicateGroups().every((group) =>
-    (group.members || []).some((member) => !selection.has(member.path))
+    activeExactMembers(group).length < 2 ||
+    activeExactMembers(group).some((member) => !selection.has(member.path))
   );
 }
 
 function retainedExactDuplicatePaths(selection = state.quarantineSelected) {
   const retained = new Set();
   for (const group of exactDuplicateGroups()) {
-    if (!(group.members || []).some((member) => selection.has(member.path))) continue;
-    for (const member of group.members || []) {
+    const activeMembers = activeExactMembers(group);
+    if (!activeMembers.some((member) => selection.has(member.path))) continue;
+    for (const member of activeMembers) {
       if (!selection.has(member.path)) retained.add(member.path);
     }
   }
@@ -3696,7 +3740,8 @@ async function selectExactCopiesForQuarantine() {
   const groups = exactDuplicateGroups();
   const selected = new Set();
   for (const group of groups) {
-    const ordered = [...group.members].sort(compareExactKeepers);
+    const ordered = activeExactMembers(group).sort(compareExactKeepers);
+    if (ordered.length < 2) continue;
     for (const member of ordered.slice(1)) selected.add(member.path);
   }
   if (!groups.length || !selected.size) {
@@ -3822,7 +3867,7 @@ function openDuplicatesFolder() {
 function selectFilteredExactDuplicateGroups() {
   if (!state.duplicatesAnalysis || state.quarantineBusy || workspaceReadOnly()) return;
   const groups = exactDuplicateGroups();
-  const exactPaths = new Set(groups.flatMap(group => (group.members || []).map(member => member.path)));
+  const exactPaths = new Set(groups.flatMap(group => activeExactMembers(group).map(member => member.path)));
   if ([...state.quarantineSelected].some(path => !exactPaths.has(path))) {
     state.duplicatesError = t("exactOnlySelectionHint");
     renderDuplicates();
@@ -3834,7 +3879,8 @@ function selectFilteredExactDuplicateGroups() {
   const selected = new Set(state.quarantineSelected);
   for (const group of groups) {
     if (!visibleIds.has(group.id)) continue;
-    const ordered = [...group.members].sort(compareExactKeepers);
+    const ordered = activeExactMembers(group).sort(compareExactKeepers);
+    if (ordered.length < 2) continue;
     const keeper = ordered.find(member => !selected.has(member.path));
     if (!keeper) continue;
     for (const member of ordered) if (member.path !== keeper.path) selected.add(member.path);
@@ -3850,7 +3896,7 @@ function selectFilteredExactDuplicateGroups() {
 
 function selectExactGroupRows(ids, select = true) {
   const groups = exactDuplicateGroups().filter(group => ids.has(group.id));
-  const exactPaths = new Set(exactDuplicateGroups().flatMap(group => group.members.map(m => m.path)));
+  const exactPaths = new Set(exactDuplicateGroups().flatMap(group => activeExactMembers(group).map(m => m.path)));
   if ([...state.quarantineSelected].some(path => !exactPaths.has(path))) {
     state.duplicatesError = t("exactOnlySelectionHint");
     renderDuplicates();
@@ -3859,9 +3905,10 @@ function selectExactGroupRows(ids, select = true) {
   const selected = new Set(state.quarantineSelected);
   for (const group of groups) {
     if (!select) {
-      for (const member of group.members) selected.delete(member.path);
+      for (const member of activeExactMembers(group)) selected.delete(member.path);
     } else {
-      const ordered = [...group.members].sort(compareExactKeepers);
+      const ordered = activeExactMembers(group).sort(compareExactKeepers);
+      if (ordered.length < 2) continue;
       const keeper = ordered.find(m => !selected.has(m.path));
       if (!keeper) continue;
       for (const member of ordered) if (member.path !== keeper.path) selected.add(member.path);
@@ -3895,7 +3942,8 @@ function selectOnlyCurrentExactDuplicateGroup() {
   if (!state.duplicatesAnalysis || state.quarantineBusy || workspaceReadOnly()) return;
   const group = exactDuplicateGroups().find(item => item.id === state.duplicateSelectedId);
   if (!group) return;
-  const sorted = [...group.members].sort(compareExactKeepers);
+  const sorted = activeExactMembers(group).sort(compareExactKeepers);
+  if (sorted.length < 2) return;
   const selected = new Set(sorted.slice(1).map(member => member.path));
   if (!selected.size) return;
   state.quarantineSelected = selected;
@@ -4191,6 +4239,15 @@ function appendDuplicateMemberDetails(card, member, label = "") {
     value.textContent = valueText;
     row.append(key, value);
     details.appendChild(row);
+  }
+  if (isAlreadyQuarantinedMember(member)) {
+    const stateRow = document.createElement("div");
+    const stateLabel = document.createElement("span");
+    stateLabel.textContent = t("quarantineState");
+    const stateValue = document.createElement("strong");
+    stateValue.textContent = t("alreadyQuarantined");
+    stateRow.append(stateLabel, stateValue);
+    details.appendChild(stateRow);
   }
 
   const actions = document.createElement("div");
@@ -4637,8 +4694,9 @@ function appendDuplicateExpandableDetails(container, finding) {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = state.quarantineSelected.has(member.path);
-      checkbox.disabled = state.quarantineBusy || workspaceReadOnly();
-      checkbox.title = t("selectForQuarantine");
+      const alreadyQuarantined = isAlreadyQuarantinedMember(member);
+      checkbox.disabled = alreadyQuarantined || state.quarantineBusy || workspaceReadOnly();
+      checkbox.title = alreadyQuarantined ? t("alreadyQuarantined") : t("selectForQuarantine");
       checkbox.addEventListener("click", (event) => event.stopPropagation());
       checkbox.addEventListener("change", () => {
         if (checkbox.checked) state.quarantineSelected.add(member.path);
@@ -4646,7 +4704,9 @@ function appendDuplicateExpandableDetails(container, finding) {
         state.quarantinePlan = null;
         renderDuplicates();
       });
-      chooser.append(checkbox, document.createTextNode(t("selectForQuarantine")));
+      chooser.append(checkbox, document.createTextNode(
+        alreadyQuarantined ? t("alreadyQuarantined") : t("selectForQuarantine")
+      ));
       card.appendChild(chooser);
     }
     appendDuplicateMemberDetails(card, member);
@@ -4719,6 +4779,11 @@ function createDuplicateFindingRow(finding) {
   badge.className = `duplicate-kind duplicate-kind-${finding.kind}`;
   badge.textContent = finding.findingType === "group"
     ? `${finding.members?.length || 0} ${t("packages")}` : duplicateKindLabel(finding.kind);
+  const date = document.createElement("time");
+  date.className = "analysis-expandable-date";
+  const modified = formatModifiedAt(findingModifiedAt(finding));
+  date.textContent = modified;
+  date.title = modified ? t("modifiedAt") : "";
   const arrow = document.createElement("button");
   arrow.type = "button";
   arrow.className = "analysis-expandable-toggle";
@@ -4733,7 +4798,7 @@ function createDuplicateFindingRow(finding) {
   const text = document.createElement("div");
   text.className = "analysis-expandable-text";
   text.append(select, description);
-  header.append(checkbox, text, badge, arrow);
+  header.append(checkbox, text, badge, date, arrow);
   article.appendChild(header);
   if (state.duplicateExpandedId === finding.id) {
     const details = document.createElement("div");
@@ -4854,12 +4919,13 @@ function renderDuplicateBatchControls() {
   }
   if (el.duplicatesSelectVisibleReviewBtn) el.duplicatesSelectVisibleReviewBtn.disabled = !hasAnalysis || busy || !visibleDuplicateFindings().length;
   if (el.duplicatesClearReviewVisibleBtn) el.duplicatesClearReviewVisibleBtn.disabled = busy || !reviewCount;
+  const hasQuarantineEligibleGroup = exactDuplicateGroups().some(group => activeExactMembers(group).length >= 2);
   el.duplicatesSelectExactBtn.disabled = !hasAnalysis ||
-    !exactDuplicateGroups().length || busy || workspaceReadOnly();
+    !hasQuarantineEligibleGroup || busy || workspaceReadOnly();
   el.duplicatesSelectCurrentBtn.disabled = !hasAnalysis || busy || workspaceReadOnly() ||
-    !exactDuplicateGroups().some(item => item.id === state.duplicateSelectedId);
+    !exactDuplicateGroups().some(item => item.id === state.duplicateSelectedId && activeExactMembers(item).length >= 2);
   el.duplicatesSelectVisibleBtn.disabled = !hasAnalysis || busy || workspaceReadOnly() ||
-    !visibleDuplicateFindings().some(item => item.findingType === "group" && item.kind === "exact_duplicate");
+    !visibleDuplicateFindings().some(item => item.findingType === "group" && item.kind === "exact_duplicate" && activeExactMembers(item).length >= 2);
   // This button lists files already in #Duplicados; it is not the preview for
   // a new quarantine selection.
   el.duplicatesPreviewAllBtn.disabled = !state.folder || busy;
@@ -5450,7 +5516,10 @@ function visibleConflictFindings(includeSelectedOnly = true) {
     }
   }
   const conflictName = (item) => `${item.left?.name || ""} ${item.right?.name || ""}`;
-  if (state.conflictsSort === "name") {
+  if (state.conflictsSort === "modified") {
+    result.sort((a, b) => findingModifiedAt(b) - findingModifiedAt(a) ||
+      conflictRiskScore(b) - conflictRiskScore(a) || conflictName(a).localeCompare(conflictName(b)));
+  } else if (state.conflictsSort === "name") {
     result.sort((a, b) => conflictName(a).localeCompare(conflictName(b)));
   } else if (state.conflictsSort === "count") {
     result.sort((a, b) => (b.differentPayloadCount || 0) - (a.differentPayloadCount || 0) || conflictName(a).localeCompare(conflictName(b)));
@@ -5897,14 +5966,15 @@ function appendConflictExpandableDetails(container, finding) {
     const path = document.createElement("code");
     path.textContent = member.relativePath || member.path || "—";
     const meta = document.createElement("p");
-    meta.textContent = `${t("fileSize")}: ${bytesLabel(member.size || 0)} · ${t("fileHash")}: ${member.fileSha256 || "—"}`;
+    const modified = formatModifiedAt(member.modifiedAt);
+    meta.textContent = `${t("fileSize")}: ${bytesLabel(member.size || 0)} · ${t("fileHash")}: ${member.fileSha256 || "—"}${modified ? ` · ${t("modifiedAt")}: ${modified}` : ""}`;
     card.append(visual, name, path, meta);
     comparison.appendChild(card);
   }
   container.appendChild(comparison);
   const loadOrder = document.createElement("p");
   loadOrder.className = "analysis-expandable-metrics";
-  loadOrder.textContent = `${conflictPriorityLabel(finding)} · ${loadOrderExplanation(finding)} · ${t("differentPayloadCount")}: ${finding.differentPayloadCount || 0}`;
+  loadOrder.textContent = `${conflictPriorityLabel(finding)} · ${loadOrderExplanation(finding)} · ${t("differentPayloadCount")}: ${finding.differentPayloadCount || 0} · ${t("conflictNewestHint")}`;
   container.appendChild(loadOrder);
   const actions = document.createElement("div");
   actions.className = "analysis-inline-actions";
@@ -5955,6 +6025,11 @@ function createConflictFindingRow(finding) {
   const badge = document.createElement("span");
   badge.className = `conflict-kind conflict-kind-${finding.severity || "info"}`;
   badge.textContent = sessionMark === "intentional" ? t("intentionalOverride") : conflictKindLabel(finding.kind);
+  const date = document.createElement("time");
+  date.className = "analysis-expandable-date";
+  const modified = formatModifiedAt(findingModifiedAt(finding));
+  date.textContent = modified;
+  date.title = modified ? t("modifiedAt") : "";
   const arrow = document.createElement("button");
   arrow.type = "button";
   arrow.className = "analysis-expandable-toggle";
@@ -5969,7 +6044,7 @@ function createConflictFindingRow(finding) {
   const text = document.createElement("div");
   text.className = "analysis-expandable-text";
   text.append(select, description);
-  header.append(checkbox, text, badge, arrow);
+  header.append(checkbox, text, badge, date, arrow);
   article.appendChild(header);
   if (state.conflictExpandedId === finding.id) {
     const details = document.createElement("div");
@@ -6135,8 +6210,8 @@ function renderConflictBatchControls() {
 function renderConflicts() {
   if (!el.analyzeConflictsBtn) return;
   if (el.conflictsSort) {
-    el.conflictsSort.setAttribute("aria-label", `${t("sortPriority")} / ${t("sortName")} / ${t("sortFiles")}`);
-    const labels = { priority: t("sortPriority"), name: t("sortName"), count: t("sortFiles") };
+    el.conflictsSort.setAttribute("aria-label", `${t("sortModified")} / ${t("sortPriority")} / ${t("sortName")} / ${t("sortFiles")}`);
+    const labels = { modified: t("sortModified"), priority: t("sortPriority"), name: t("sortName"), count: t("sortFiles") };
     for (const option of el.conflictsSort.options) option.textContent = labels[option.value] || option.value;
     el.conflictsSort.value = state.conflictsSort;
   }
