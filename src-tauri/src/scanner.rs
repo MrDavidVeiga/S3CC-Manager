@@ -178,10 +178,18 @@ struct PersistentScan {
     classification_context: String,
 }
 
-static LATEST_SCAN: OnceLock<Mutex<Option<LatestScan>>> = OnceLock::new();
+// Keep presentation snapshots isolated by selected root and language.  A
+// single global slot lets an unrelated scan replace the incremental context
+// while another scan is still preparing its next pass, forcing unnecessary
+// DBPF reads and making cache tests/operations race with one another.
+static LATEST_SCAN: OnceLock<Mutex<HashMap<String, LatestScan>>> = OnceLock::new();
 
-fn latest_scan_slot() -> &'static Mutex<Option<LatestScan>> {
-    LATEST_SCAN.get_or_init(|| Mutex::new(None))
+fn latest_scan_slot() -> &'static Mutex<HashMap<String, LatestScan>> {
+    LATEST_SCAN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn latest_scan_key(root: &Path, language: AppLanguage) -> String {
+    format!("{}|{language:?}", stable_path(root).to_string_lossy())
 }
 
 fn persistent_scan_path(root: &Path) -> PathBuf {
@@ -286,26 +294,26 @@ fn move_path_key(path: &Path) -> String {
 
 fn remember_latest_scan(result: &ScanResult, language: AppLanguage) {
     let root = stable_path(Path::new(&result.root));
+    let file_signatures = result
+        .items
+        .iter()
+        .filter_map(|item| {
+            let path = PathBuf::from(&item.path);
+            let canonical = stable_path(&path);
+            let signature = cache::analysis_file_fingerprint(&canonical).ok()?;
+            Some((canonical.to_string_lossy().to_string(), signature))
+        })
+        .collect::<HashMap<_, _>>();
+    let latest = LatestScan {
+        root: root.clone(),
+        language,
+        result: result.clone(),
+        file_signatures,
+        classification_context: classification_context_fingerprint(&root, language),
+    };
+    save_persistent_scan(&latest);
     if let Ok(mut slot) = latest_scan_slot().lock() {
-        let file_signatures = result
-            .items
-            .iter()
-            .filter_map(|item| {
-                let path = PathBuf::from(&item.path);
-                let canonical = stable_path(&path);
-                let signature = cache::analysis_file_fingerprint(&canonical).ok()?;
-                Some((canonical.to_string_lossy().to_string(), signature))
-            })
-            .collect::<HashMap<_, _>>();
-        let latest = LatestScan {
-            root: root.clone(),
-            language,
-            result: result.clone(),
-            file_signatures,
-            classification_context: classification_context_fingerprint(&root, language),
-        };
-        save_persistent_scan(&latest);
-        *slot = Some(latest);
+        slot.insert(latest_scan_key(&root, language), latest);
     }
 }
 
@@ -343,42 +351,37 @@ fn latest_scan_is_current(cached: &LatestScan) -> bool {
 
 pub fn cached_scan_for(root: &Path, language: AppLanguage) -> Option<ScanResult> {
     let canonical = stable_path(root);
-    let in_memory = latest_scan_slot().lock().ok().and_then(|slot| slot.clone());
-    if let Some(cached) = in_memory {
-        if cached.language == language
-            && cached.root == canonical
-            && latest_scan_is_current(&cached)
-        {
-            return Some(cached.result);
-        }
+    let key = latest_scan_key(&canonical, language);
+    let in_memory = latest_scan_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.get(&key).cloned());
+    if let Some(cached) = in_memory.filter(|cached| latest_scan_is_current(cached)) {
+        return Some(cached.result);
     }
     let persisted = load_persistent_scan(&canonical, language)?;
     let result = persisted.result.clone();
     if let Ok(mut slot) = latest_scan_slot().lock() {
-        *slot = Some(persisted);
+        slot.insert(key, persisted);
     }
     Some(result)
 }
 
 fn previous_scan_for(root: &Path, language: AppLanguage) -> Option<LatestScan> {
-    let stable_root = stable_path(root);
-    let cached = latest_scan_slot().lock().ok()?.clone()?;
-    if cached.language != language
-        || cached.root != stable_root
-        || cached.classification_context
-            != classification_context_fingerprint(&cached.root, cached.language)
-    {
-        return None;
-    }
-    Some(cached)
+    let key = latest_scan_key(root, language);
+    let cached = latest_scan_slot().lock().ok()?.get(&key).cloned()?;
+    (cached.classification_context == classification_context_fingerprint(&cached.root, cached.language))
+        .then_some(cached)
 }
 
 pub fn cached_scan_paths(root: &Path) -> Option<Vec<PathBuf>> {
     let canonical = stable_path(root);
-    let cached = latest_scan_slot().lock().ok()?.clone()?;
-    if cached.root != canonical || !latest_scan_is_current(&cached) {
-        return None;
-    }
+    let cached = latest_scan_slot()
+        .lock()
+        .ok()?
+        .values()
+        .find(|cached| cached.root == canonical && latest_scan_is_current(cached))
+        .cloned()?;
 
     Some(
         cached
@@ -396,12 +399,7 @@ pub fn cached_scan_paths(root: &Path) -> Option<Vec<PathBuf>> {
 pub fn invalidate_latest_scan_for(root: &Path) {
     let canonical = stable_path(root);
     if let Ok(mut slot) = latest_scan_slot().lock() {
-        if slot
-            .as_ref()
-            .is_some_and(|current| current.root == canonical)
-        {
-            *slot = None;
-        }
+        slot.retain(|_, current| current.root != canonical);
     }
 }
 
@@ -422,12 +420,10 @@ pub(crate) fn reconcile_latest_scan_moves(
         Ok(slot) => slot,
         Err(_) => return false,
     };
-    let Some(latest) = slot.as_mut() else {
+    let key = latest_scan_key(&canonical_root, language);
+    let Some(latest) = slot.get_mut(&key) else {
         return false;
     };
-    if latest.root != canonical_root || latest.language != language {
-        return false;
-    }
 
     for (source, destination) in moves {
         let source_key = move_path_key(source);
