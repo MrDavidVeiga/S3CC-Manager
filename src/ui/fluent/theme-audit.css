@@ -233,6 +233,101 @@ body.release-v1 :is(.package-row,.duplicate-row,.conflict-row,.restore-history-i
     color: CanvasText;
   }
 }
+
+/* Beta 2 final interaction polish: keep action controls in one predictable
+ * toolbar and only reveal quarantine preflight after an explicit request. */
+body.release-v1 .duplicates-action-bar,
+body.release-v1 .conflicts-action-primary {
+  align-items: center;
+}
+body.release-v1 #duplicates-batch-preview.quarantine-preview {
+  display: grid;
+  gap: 7px;
+  max-height: min(34vh, 300px);
+  overflow: auto;
+  margin-top: 8px;
+  padding: 9px 10px;
+}
+body.release-v1 #duplicates-batch-preview.quarantine-preview h4,
+body.release-v1 #duplicates-batch-preview.quarantine-preview p {
+  margin: 0;
+}
+body.release-v1 .quarantine-destination-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+body.release-v1 .quarantine-destination-row code {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+body.release-v1 .quarantine-copy-path {
+  flex: 0 0 auto;
+  width: auto;
+  white-space: nowrap;
+}
+
+/* The theme control is an icon + localized label, not an icon-only hit target. */
+body.release-v1 .theme-button {
+  width: auto;
+  min-width: 74px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+body.release-v1 .theme-button-label {
+  white-space: nowrap;
+  font-size: 12px;
+}
+body.release-v1 .theme-swatch {
+  background: linear-gradient(135deg, var(--swatch-light, var(--accent)) 0 50%, var(--swatch-dark, var(--accent-dark-2)) 50% 100%);
+}
+
+/* Search gets room for names and 64-bit Instance IDs while yielding on narrow windows. */
+body.release-v1 #search-input.results-search-input {
+  flex: 2 1 clamp(300px, 36vw, 620px);
+}
+@media (max-width: 840px) {
+  body.release-v1 #search-input.results-search-input {
+    flex-basis: 220px;
+  }
+}
+
+/* Social links are quiet in the resting state and distribute evenly in the sidebar. */
+body.release-v1 .winui-social-footer .social-icons-list li {
+  flex: 1 1 0;
+  min-width: 0;
+}
+body.release-v1 .winui-social-footer .social-icons-list a {
+  width: 100%;
+  max-width: 34px;
+  margin-inline: auto;
+  border: 1px solid transparent;
+  background: transparent;
+  transition: color .18s ease, background .18s ease, border-color .18s ease, transform .18s ease;
+}
+body.release-v1 .winui-social-footer .social-icons-list a:hover {
+  border-color: var(--accent-outline);
+  background: var(--accent-low);
+  color: var(--accent);
+  transform: translateY(-2px);
+}
+body.release-v1 .winui-social-footer .social-icons-list a:focus-visible {
+  border-color: var(--accent-outline);
+  outline: 2px solid var(--accent-outline);
+  outline-offset: 2px;
+  background: var(--accent-low);
+}
+
+/* History removal is a compact status message, never a persistent content card. */
+body.release-v1 .restore-page > .hero .scan-state,
+body.release-v1 #tools-state {
+  min-height: 0;
+  padding-block: 2px;
+}
 @media (prefers-reduced-motion: reduce) {
   body.release-v1 :is(.package-row,.duplicate-row,.conflict-row,.restore-history-item,.structure-row,.catalog-row) {
     transition: none;

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { closeTooltip } from "./ui/fluent/tooltips.js";
 
 const THEME_KEY = "s3cc-manager-theme";
 const VALID_THEMES = new Set(["system","veiga-light","veiga-dark","mean-girls","ea-app","winui-light","winui-dark"]);
@@ -88,6 +89,26 @@ function applyAccent(ramp) {
   root.style.setProperty("--accent-low",alpha(ramp.base,ramp.mode==="dark"?.12:.09));
   root.style.setProperty("--accent-outline",alpha(ramp.base,ramp.mode==="dark"?.44:.34));
 }
+function applyThemeSwatches() {
+  const palettes = {
+    system: resolvedTheme("system"),
+    veiga: resolvedTheme("veiga-light"),
+    meanGirls: resolvedTheme("mean-girls"),
+    eaApp: resolvedTheme("ea-app"),
+  };
+  const setSwatch = (selector, palette) => {
+    const background = `linear-gradient(135deg, ${palette.base} 0 50%, ${palette.dark2} 50% 100%)`;
+    document.querySelectorAll(selector).forEach((swatch) => {
+      swatch.style.background = background;
+      swatch.style.setProperty("--swatch-light", palette.base);
+      swatch.style.setProperty("--swatch-dark", palette.dark2);
+    });
+  };
+  setSwatch(".system-swatch", palettes.system);
+  setSwatch(".veiga-swatch", palettes.veiga);
+  setSwatch(".mean-girls-swatch", palettes.meanGirls);
+  setSwatch(".ea-app-swatch", palettes.eaApp);
+}
 function applyTheme(choice,{persist=true}={}) {
   if (!VALID_THEMES.has(choice)) choice="system";
   const resolved=resolvedTheme(choice);
@@ -95,8 +116,8 @@ function applyTheme(choice,{persist=true}={}) {
   root.dataset.themeChoice=choice;
   root.dataset.resolvedMode=resolved.mode;
   applyAccent(resolved);
+  applyThemeSwatches();
   document.querySelectorAll(".theme-option").forEach(option=>option.setAttribute("aria-checked",String(option.dataset.theme===choice)));
-  document.querySelectorAll(".system-swatch").forEach(swatch=>{ swatch.style.background=systemAccent(); });
   if (persist) try { localStorage.setItem(THEME_KEY,choice); } catch {}
 }
 function currentChoice() {
@@ -118,6 +139,7 @@ async function refreshNativeAppearance() {
 const themeButton=document.getElementById("theme-button");
 const themeFlyout=document.getElementById("theme-flyout");
 function closeThemeFlyout() {
+  closeTooltip();
   themeFlyout?.classList.add("hidden");
   themeButton?.setAttribute("aria-expanded","false");
 }
@@ -130,6 +152,7 @@ themeButton?.addEventListener("click",event=>{
 });
 themeFlyout?.addEventListener("click",event=>event.stopPropagation());
 document.querySelectorAll(".theme-option").forEach(option=>option.addEventListener("click",()=>{
+  closeTooltip();
   applyTheme(option.dataset.theme || "system");
   closeThemeFlyout();
 }));

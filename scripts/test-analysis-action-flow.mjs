@@ -33,13 +33,15 @@ for (const key of ["selectionSection", "managementSection", "toolsSection"]) {
 }
 assert.equal((duplicates.match(/class="analysis-action-bar/g) || []).length, 1,
   "duplicates must expose one review action bar below the result list");
+assert.match(duplicates, /id="duplicates-quarantine-preflight-btn"[^>]*data-i18n="verifyQuarantine"/);
 
-assert.match(conflicts, /id="conflicts-select-detected-btn"[^>]*data-i18n="selectForReview"/);
+assert.match(conflicts, /id="conflicts-select-visible-main-btn"[^>]*data-i18n="selectAllVisible"/);
 assert.match(conflicts, /id="conflicts-review-selected-btn"[^>]*data-i18n="reviewSelected"/);
+assert.doesNotMatch(conflicts, /id="conflicts-select-detected-btn"/);
+assert.doesNotMatch(conflicts, /id="conflicts-select-all-btn"/);
+assert.doesNotMatch(conflicts, /id="conflicts-clear-review-btn"/);
 assert.match(conflicts, /<details class="analysis-more-actions">[\s\S]*data-i18n="actions"/);
 for (const id of [
-  "conflicts-select-all-btn",
-  "conflicts-clear-review-btn",
   "conflicts-mark-intentional-btn",
   "conflicts-clear-marks-btn",
   "conflicts-show-pending-btn",
@@ -50,8 +52,8 @@ for (const id of [
 ]) assert.match(conflicts, new RegExp(`id="${id}"`));
 assert.doesNotMatch(conflicts, /id="conflicts-clear-list-btn"/);
 assert.doesNotMatch(conflicts, /id="conflicts-preview-quarantine-btn"/);
-assert.equal((conflicts.match(/id="conflicts-(?:select-detected|review-selected)-btn"/g) || []).length, 2,
-  "conflicts must expose exactly two primary action buttons");
+assert.equal((conflicts.match(/id="conflicts-(?:select-visible-main|review-selected)-btn"/g) || []).length, 2,
+  "conflicts must expose Select All and Review Selected as its primary actions");
 
 for (const key of [
   "actions",
@@ -84,7 +86,7 @@ assert.match(app, /function reviewSelectedDuplicates\(\)[\s\S]*duplicateExpanded
 assert.match(app, /function openExistingQuarantine\(\)[\s\S]*invoke\("list_existing_quarantine"/,
   "View Quarantine must read existing files instead of preparing a new transaction");
 assert.match(app, /el\.duplicatesPreviewAllBtn\.addEventListener\("click", openExistingQuarantine\)/);
-assert.match(app, /el\.conflictsSelectDetectedBtn\.addEventListener\("click", selectAllVisibleConflicts\)/,
+assert.match(app, /el\.conflictsSelectVisibleMainBtn\?\.addEventListener\("click", selectAllVisibleConflicts\)/,
   "primary conflict selection must respect the active filter");
 assert.match(app, /function navigateDuplicateReview\(direction\)/);
 assert.match(app, /function visibleConflictFindings\(includeSelectedOnly = true\)/);

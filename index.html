@@ -65,6 +65,7 @@
           <div class="theme-control">
             <button id="theme-button" class="theme-button" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n-aria-label="theme" data-i18n-title="theme">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.25a6.75 6.75 0 1 0 0 13.5V1.25Zm0 1.1v11.3a5.65 5.65 0 0 1 0-11.3Z"/></svg>
+              <span class="theme-button-label" data-i18n="theme">Theme</span>
             </button>
             <div id="theme-flyout" class="theme-flyout hidden" role="menu" data-i18n-aria-label="theme">
               <div class="theme-flyout-title" data-i18n="theme">Theme</div>
@@ -303,6 +304,7 @@
                 <button id="duplicates-select-visible-review-btn" class="secondary-btn" type="button" data-i18n="selectAllVisible">Select All</button>
                 <button id="duplicates-clear-review-visible-btn" class="secondary-btn" type="button" data-i18n="clearSelection">Clear Selection</button>
                 <button id="duplicates-review-selection-btn" class="primary-btn" type="button" data-i18n="reviewSelection">Review Selection</button>
+                <button id="duplicates-quarantine-preflight-btn" class="secondary-btn" type="button" data-i18n="verifyQuarantine">Verify Quarantine</button>
                 <details class="analysis-more-actions">
                   <summary data-i18n="actions">Actions</summary>
                   <div class="analysis-more-actions-menu" role="menu">
@@ -389,16 +391,10 @@
               <div class="analysis-action-bar conflicts-action-primary" role="toolbar" aria-label="Conflict actions">
                 <button id="conflicts-select-visible-main-btn" class="secondary-btn" type="button" data-i18n="selectAllVisible">Select All</button>
                 <button id="conflicts-clear-review-main-btn" class="secondary-btn" type="button" data-i18n="clearSelection">Clear Selection</button>
-                <button id="conflicts-select-detected-btn" class="primary-btn" type="button" data-i18n="selectForReview">Select for Review</button>
                 <button id="conflicts-review-selected-btn" class="secondary-btn" type="button" data-i18n="reviewSelected">Review Selected</button>
                 <details class="analysis-more-actions">
                   <summary data-i18n="actions">Actions</summary>
                   <div class="analysis-more-actions-menu" role="menu">
-                    <div class="analysis-menu-section">
-                      <span class="analysis-menu-heading" data-i18n="selectionSection">Selection</span>
-                      <button id="conflicts-select-all-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="selectAllVisibleConflicts">Select Visible Conflicts</button>
-                      <button id="conflicts-clear-review-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="clearReviewSelection">Clear Review Selection</button>
-                    </div>
                     <div class="analysis-menu-section">
                       <span class="analysis-menu-heading" data-i18n="visualizationSection">Visualization</span>
                       <button id="conflicts-show-pending-btn" class="secondary-btn" type="button" role="menuitem" data-i18n="showPendingConflicts">Show Pending Conflicts</button>
@@ -490,11 +486,11 @@
 
             <div class="tools-subtabs" role="tablist">
               <button class="secondary-btn tools-subtab hidden" data-tools-tab="profiles" data-i18n="profilesRules" type="button">Profiles</button>
+              <button class="secondary-btn tools-subtab active" data-tools-tab="technical" data-i18n="converter" type="button">Converter</button>
               <button class="secondary-btn tools-subtab" data-tools-tab="health" data-i18n="healthResourceCfg" type="button">Health</button>
               <button class="secondary-btn tools-subtab hidden" data-tools-tab="snapshots" data-i18n="snapshotsCompare" type="button">Snapshots</button>
               <button class="secondary-btn tools-subtab hidden" data-tools-tab="inbox" data-i18n="inboxNewCc" type="button">Inbox</button>
               <button class="secondary-btn tools-subtab hidden" data-tools-tab="metadata" data-i18n="metadataGroups" type="button">Metadata</button>
-              <button class="secondary-btn tools-subtab active" data-tools-tab="technical" data-i18n="converter" type="button">Converter</button>
               <button class="secondary-btn tools-subtab" data-tools-tab="maintenance" data-i18n="maintenance" type="button">Maintenance</button>
               <button class="secondary-btn tools-subtab" data-tools-tab="history" data-i18n="operationHistory" type="button">History</button>
             </div>

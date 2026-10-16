@@ -12,6 +12,10 @@ const I18N = {
     toolsSection: "Tools",
     visualizationSection: "Visualization",
     quarantineEligibleCopies: "Quarantine Eligible Copies",
+    verifyQuarantine: "Verify Quarantine",
+    copyPath: "Copy path",
+    pathCopied: "Path copied",
+    copyPathUnavailable: "Copy unavailable",
     selectSafeExcessCopies: "Select Safe Excess Copies",
     restoreFiles: "Restore Files",
     consultHistory: "Consult History",
@@ -678,6 +682,10 @@ const I18N = {
     toolsSection: "Ferramentas",
     visualizationSection: "Visualização",
     quarantineEligibleCopies: "Enviar duplicatas elegíveis à quarentena",
+    verifyQuarantine: "Verificar Quarentena",
+    copyPath: "Copiar caminho",
+    pathCopied: "Caminho copiado",
+    copyPathUnavailable: "Não foi possível copiar",
     selectSafeExcessCopies: "Selecionar cópias excedentes seguras",
     restoreFiles: "Restaurar arquivos",
     consultHistory: "Consultar histórico",
@@ -1343,6 +1351,10 @@ const I18N = {
     toolsSection: "Herramientas",
     visualizationSection: "Visualización",
     quarantineEligibleCopies: "Enviar duplicados elegibles a cuarentena",
+    verifyQuarantine: "Verificar cuarentena",
+    copyPath: "Copiar ruta",
+    pathCopied: "Ruta copiada",
+    copyPathUnavailable: "No se pudo copiar",
     selectSafeExcessCopies: "Seleccionar copias excedentes seguras",
     restoreFiles: "Restaurar archivos",
     consultHistory: "Consultar historial",
@@ -2114,6 +2126,7 @@ const state = {
   reviewBusy: false,
   quarantineSelected: new Set(),
   quarantinePlan: null,
+  quarantinePreflightOpen: false,
   quarantineExactBatch: false,
   lastExactGroupAnchor: null,
   postQuarantineNotice: null,
@@ -2483,6 +2496,7 @@ const el = {
   duplicatesHistoryBtn: document.querySelector("#duplicates-history-btn"),
   duplicatesBatchSummary: document.querySelector("#duplicates-batch-summary"),
   duplicatesBatchPreview: document.querySelector("#duplicates-batch-preview"),
+  duplicatesQuarantinePreflightBtn: document.querySelector("#duplicates-quarantine-preflight-btn"),
   conflictsClearListBtn: document.querySelector("#conflicts-clear-list-btn"),
   conflictsSelectVisibleMainBtn: document.querySelector("#conflicts-select-visible-main-btn"),
   conflictsClearReviewMainBtn: document.querySelector("#conflicts-clear-review-main-btn"),
@@ -3751,6 +3765,7 @@ async function selectExactCopiesForQuarantine() {
   state.quarantineSelected = selected;
   state.quarantineExactBatch = true;
   state.quarantinePlan = null;
+  state.quarantinePreflightOpen = true;
   state.duplicatesError = "";
   state.duplicatesFilter = "exact_duplicate";
   el.duplicatesFilter.value = "exact_duplicate";
@@ -3759,6 +3774,18 @@ async function selectExactCopiesForQuarantine() {
   persistPreferences();
   state.duplicatesNotice = `${t("bulkExactSummary")} (${groups.length} / ${selected.size})`;
   renderDuplicates();
+  await buildQuarantinePreview();
+}
+
+async function verifyQuarantinePreflight() {
+  if (!state.folder || !state.duplicatesAnalysis || state.quarantineBusy ||
+      state.scanning || state.analysisPipelineBusy || state.auditBusy ||
+      workspaceReadOnly()) return;
+  state.quarantinePreflightOpen = true;
+  if (!state.quarantineSelected.size) {
+    await selectExactCopiesForQuarantine();
+    return;
+  }
   await buildQuarantinePreview();
 }
 
@@ -4024,6 +4051,7 @@ async function buildQuarantinePreview() {
     return;
   }
   state.quarantineBusy = true;
+  state.quarantinePreflightOpen = true;
   state.quarantinePlan = null;
   renderDuplicatesPreview();
   renderDuplicateBatchControls();
@@ -4808,6 +4836,18 @@ function createDuplicateFindingRow(finding) {
   return article;
 }
 
+function replaceAnalysisListKeepingScroll(container, content) {
+  if (!container) return;
+  const scrollTop = container.scrollTop;
+  container.replaceChildren(content);
+  container.scrollTop = scrollTop;
+  if (scrollTop > 0) {
+    window.requestAnimationFrame(() => {
+      if (container.isConnected) container.scrollTop = scrollTop;
+    });
+  }
+}
+
 function legacyRenderDuplicateVirtualRows(findings, force = false) {
   el.duplicatesList.dataset.fluentCount = String(findings.length);
   const view = virtualViews.duplicates;
@@ -4816,14 +4856,13 @@ function legacyRenderDuplicateVirtualRows(findings, force = false) {
     view.items = findings;
     view.start = -1;
     view.end = -1;
-    el.duplicatesList.scrollTop = 0;
   }
 
   if (!findings.length) {
     const empty = document.createElement("div");
     empty.className = "list-empty";
     empty.textContent = t("noDuplicateFindings");
-    el.duplicatesList.replaceChildren(empty);
+    replaceAnalysisListKeepingScroll(el.duplicatesList, empty);
     return;
   }
 
@@ -4842,7 +4881,7 @@ function legacyRenderDuplicateVirtualRows(findings, force = false) {
   if (end < findings.length) {
     fragment.appendChild(virtualSpacer((findings.length - end) * ANALYSIS_ROW_STRIDE));
   }
-  el.duplicatesList.replaceChildren(fragment);
+  replaceAnalysisListKeepingScroll(el.duplicatesList, fragment);
 }
 
 function renderDuplicateVirtualRows(findings, force = false) {
@@ -4851,7 +4890,7 @@ function renderDuplicateVirtualRows(findings, force = false) {
     const empty = document.createElement("div");
     empty.className = "list-empty";
     empty.textContent = t("noDuplicateFindings");
-    el.duplicatesList.replaceChildren(empty);
+    replaceAnalysisListKeepingScroll(el.duplicatesList, empty);
     return;
   }
   // One expanded row uses normal flow so its details can determine its own
@@ -4868,7 +4907,7 @@ function renderDuplicateVirtualRows(findings, force = false) {
       row.dataset.fluentIndex = String(index);
       fragment.appendChild(row);
     }
-    el.duplicatesList.replaceChildren(fragment);
+    replaceAnalysisListKeepingScroll(el.duplicatesList, fragment);
     return;
   }
   const view = virtualViews.duplicates;
@@ -4877,7 +4916,6 @@ function renderDuplicateVirtualRows(findings, force = false) {
     view.items = findings;
     view.start = -1;
     view.end = -1;
-    el.duplicatesList.scrollTop = 0;
   }
   const { start, end } = virtualRange(el.duplicatesList, findings.length, ANALYSIS_ROW_STRIDE);
   if (!force && !changed && start === view.start && end === view.end) return;
@@ -4891,7 +4929,7 @@ function renderDuplicateVirtualRows(findings, force = false) {
     fragment.appendChild(row);
   }
   if (end < findings.length) fragment.appendChild(virtualSpacer((findings.length - end) * ANALYSIS_ROW_STRIDE));
-  el.duplicatesList.replaceChildren(fragment);
+  replaceAnalysisListKeepingScroll(el.duplicatesList, fragment);
 }
 
 function scheduleDuplicateVirtualRows() {
@@ -4921,6 +4959,10 @@ function renderDuplicateBatchControls() {
   const hasQuarantineEligibleGroup = exactDuplicateGroups().some(group => activeExactMembers(group).length >= 2);
   el.duplicatesSelectExactBtn.disabled = !hasAnalysis ||
     !hasQuarantineEligibleGroup || busy || workspaceReadOnly();
+  if (el.duplicatesQuarantinePreflightBtn) {
+    el.duplicatesQuarantinePreflightBtn.disabled = !hasAnalysis || busy ||
+      (!state.quarantineSelected.size && !hasQuarantineEligibleGroup) || workspaceReadOnly();
+  }
   // This button lists files already in #Duplicados; it is not the preview for
   // a new quarantine selection.
   el.duplicatesPreviewAllBtn.disabled = !state.folder || busy;
@@ -4929,14 +4971,31 @@ function renderDuplicateBatchControls() {
       + (count ? ` · ${t("quarantineSelectionCount")}: ${count}` : "")
     : "";
   el.duplicatesBatchPreview.replaceChildren();
-  el.duplicatesBatchPreview.classList.toggle("hidden", !state.quarantinePlan || !count);
-  if (!state.quarantinePlan || !count) return;
+  el.duplicatesBatchPreview.classList.toggle("hidden", !state.quarantinePlan || !count || !state.quarantinePreflightOpen);
+  if (!state.quarantinePlan || !count || !state.quarantinePreflightOpen) return;
 
   const title = document.createElement("h4");
   title.textContent = t("quarantinePreviewOnly");
   const destination = document.createElement("code");
   destination.textContent =
     `${t("quarantineRoot")}: ${state.quarantinePlan.quarantineRoot}`;
+  destination.title = state.quarantinePlan.quarantineRoot || "";
+  const copyPath = document.createElement("button");
+  copyPath.type = "button";
+  copyPath.className = "secondary-btn compact-btn quarantine-copy-path";
+  copyPath.textContent = t("copyPath");
+  copyPath.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(String(state.quarantinePlan?.quarantineRoot || ""));
+      copyPath.textContent = t("pathCopied");
+      window.setTimeout(() => { copyPath.textContent = t("copyPath"); }, 1400);
+    } catch (_) {
+      copyPath.textContent = t("copyPathUnavailable");
+    }
+  });
+  const destinationRow = document.createElement("div");
+  destinationRow.className = "quarantine-destination-row";
+  destinationRow.append(destination, copyPath);
   const summary = document.createElement("p");
   summary.textContent =
     `${t("quarantineReady")}: ${state.quarantinePlan.stats?.ready || 0} · ${t("blocked")}: ${state.quarantinePlan.stats?.blocked || 0}`;
@@ -4946,7 +5005,7 @@ function renderDuplicateBatchControls() {
   const text = document.createElement("pre");
   text.textContent = state.quarantinePlan.manifestPreview || "";
   manifest.append(heading, text);
-  el.duplicatesBatchPreview.append(title, destination, summary, manifest);
+  el.duplicatesBatchPreview.append(title, destinationRow, summary, manifest);
 
   if (state.quarantinePlan.canExecute) {
     const execute = document.createElement("button");
@@ -10776,6 +10835,17 @@ el.openManifestFolderBtn.addEventListener("click", () => openDirectorySafe(state
 el.openCacheBtn.addEventListener("click", () => openDirectorySafe(state.cacheInfo?.path));
 el.clearCacheBtn.addEventListener("click", () => openConfirm("clear_cache"));
 el.rebuildFixIndexBtn.addEventListener("click", rebuildFixIndex);
+for (const link of document.querySelectorAll(".social-icons-list a[href]")) {
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    const url = link.getAttribute("href");
+    if (!url) return;
+    void invoke("open_external_url", { url }).catch((error) => {
+      state.notice = `${t("navigationFailed")}: ${String(error)}`;
+      render();
+    });
+  });
+}
 el.packageList.addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a" &&
       !event.target.matches("input,textarea,select,[contenteditable=\"true\"]")) {
@@ -10794,6 +10864,7 @@ for (const button of el.openReportFolderButtons) {
 if (el.duplicatesClearListBtn) el.duplicatesClearListBtn.addEventListener("click", clearDuplicateList);
 el.duplicatesReviewSelectionBtn.addEventListener("click", reviewSelectedDuplicates);
 el.duplicatesSelectVisibleReviewBtn?.addEventListener("click", selectAllVisibleDuplicates);
+el.duplicatesQuarantinePreflightBtn?.addEventListener("click", () => void verifyQuarantinePreflight());
 el.duplicatesSelectExactBtn.addEventListener("click", selectExactCopiesForQuarantine);
 el.duplicatesList.addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
@@ -10817,12 +10888,10 @@ el.duplicatesClearReviewVisibleBtn?.addEventListener("click", () => {
 if (el.conflictsClearListBtn) el.conflictsClearListBtn.addEventListener("click", clearConflictList);
 el.conflictsSelectVisibleMainBtn?.addEventListener("click", selectAllVisibleConflicts);
 el.conflictsClearReviewMainBtn?.addEventListener("click", clearConflictReviewSelection);
-el.conflictsSelectAllBtn.addEventListener("click", selectAllVisibleConflicts);
-// The primary action is filter-scoped. Selecting the complete scan remains a
-// separate backend/API concern and is never implicit from the visible button.
-el.conflictsSelectDetectedBtn.addEventListener("click", selectAllVisibleConflicts);
+el.conflictsSelectAllBtn?.addEventListener("click", selectAllVisibleConflicts);
+el.conflictsSelectDetectedBtn?.addEventListener("click", selectAllVisibleConflicts);
 el.conflictsReviewSelectedBtn.addEventListener("click", reviewSelectedConflicts);
-el.conflictsClearReviewBtn.addEventListener("click", clearConflictReviewSelection);
+el.conflictsClearReviewBtn?.addEventListener("click", clearConflictReviewSelection);
 if (el.conflictsPrioritizeSelectedBtn) el.conflictsPrioritizeSelectedBtn.addEventListener("click", prioritizeSelectedConflicts);
 el.conflictsMarkIntentionalBtn.addEventListener("click", () => applySelectedConflictReviewMark("intentional"));
 el.conflictsClearMarksBtn.addEventListener("click", () => applySelectedConflictReviewMark("clear"));

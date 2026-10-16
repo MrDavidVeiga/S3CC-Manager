@@ -7,7 +7,7 @@ const TEXT = {
   en: {
     title:"Sims3Pack → Package",
     intro:"Extract embedded packages and give them readable names from the Sims3Pack manifest or CASP.",
-    chooseFiles:"Choose Sims3Pack(s)", chooseDestination:"Choose Destination", convert:"Convert to .package",
+    chooseFiles:"Select Sims3Pack files", chooseDestination:"Select Destination", convert:"Convert to .package",
     files:"Files", destination:"Destination", empty:"Choose one or more .Sims3Pack files to preview the conversion.",
     inspecting:"Reading Sims3Pack…", converting:"Converting…", ready:"Ready to convert",
     set:n=>`Set · ${n} packages`, single:"Single package", nonPackage:"Not a package",
@@ -24,7 +24,7 @@ const TEXT = {
   pt: {
     title:"Sims3Pack → Package",
     intro:"Extraia os packages internos usando nomes legíveis do manifest do Sims3Pack ou do CASP.",
-    chooseFiles:"Escolher Sims3Pack(s)", chooseDestination:"Escolher Destino", convert:"Converter para .package",
+    chooseFiles:"Selecionar arquivos Sims3Pack", chooseDestination:"Selecionar destino", convert:"Converter para .package",
     files:"Arquivos", destination:"Destino", empty:"Escolha um ou mais arquivos .Sims3Pack para visualizar a conversão.",
     inspecting:"Lendo Sims3Pack…", converting:"Convertendo…", ready:"Pronto para converter",
     set:n=>`Set · ${n} packages`, single:"Package único", nonPackage:"Não é package",
@@ -41,7 +41,7 @@ const TEXT = {
   es: {
     title:"Sims3Pack → Package",
     intro:"Extrae los packages internos usando nombres legibles del manifest del Sims3Pack o del CASP.",
-    chooseFiles:"Elegir Sims3Pack(s)", chooseDestination:"Elegir Destino", convert:"Convertir a .package",
+    chooseFiles:"Seleccionar archivos Sims3Pack", chooseDestination:"Seleccionar destino", convert:"Convertir a .package",
     files:"Archivos", destination:"Destino", empty:"Elige uno o más archivos .Sims3Pack para previsualizar la conversión.",
     inspecting:"Leyendo Sims3Pack…", converting:"Convirtiendo…", ready:"Listo para convertir",
     set:n=>`Set · ${n} packages`, single:"Package único", nonPackage:"No es package",
