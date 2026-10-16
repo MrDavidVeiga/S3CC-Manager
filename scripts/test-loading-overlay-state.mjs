@@ -13,15 +13,26 @@ const converter = read("src/sims3pack-converter.js");
 // Every polling loop is owned by a unique token.  A completion, cancellation,
 // or failure from an older run therefore cannot write into a newer run.
 assert.match(app, /const operationMonitorTokens = new Map\(\)/);
-assert.match(app, /beginOperationMonitor\("unified_analysis"\)/);
-assert.match(app, /invoke\("analyze_unified"/);
-assert.match(app, /async function analyzeDuplicates\(\)[\s\S]*runUnifiedAnalysis/);
-assert.match(app, /async function analyzeConflicts\(\)[\s\S]*runUnifiedAnalysis/);
+assert.match(app, /beginOperationMonitor\("scan"/);
+assert.match(app, /beginOperationMonitor\("duplicates"/);
+assert.match(app, /beginOperationMonitor\("conflicts"/);
+assert.match(app, /invoke\("scan_packages"/);
+assert.match(app, /invoke\("analyze_duplicates"/);
+assert.match(app, /invoke\("analyze_conflicts"/);
+assert.doesNotMatch(app, /invoke\("analyze_unified"/);
+assert.doesNotMatch(app, /async function analyzeDuplicates\(\)[\s\S]*runUnifiedAnalysis/);
+assert.doesNotMatch(app, /async function analyzeConflicts\(\)[\s\S]*runUnifiedAnalysis/);
 assert.doesNotMatch(app, /runAutomaticAnalyses/);
 assert.match(app, /while \(operationMonitorIsCurrent\(kind, token\) && operationBusy\(kind\)\)/);
-assert.match(app, /await settleOperationStatus\("unified_analysis", operationToken\)/);
-assert.match(app, /endOperationMonitor\("unified_analysis", operationToken\)/);
-assert.match(app, /\["unified_analysis", "scan", "duplicates", "conflicts"\]/);
+assert.match(app, /await settleOperationStatus\("scan", operationToken\)/);
+assert.match(app, /await settleOperationStatus\("duplicates", operationToken\)/);
+assert.match(app, /await settleOperationStatus\("conflicts", operationToken\)/);
+assert.match(app, /endOperationMonitor\("scan", operationToken\)/);
+assert.match(app, /endOperationMonitor\("duplicates", operationToken\)/);
+assert.match(app, /endOperationMonitor\("conflicts", operationToken\)/);
+assert.match(app, /renderOperationProgress\("scan"\)/);
+assert.match(app, /renderOperationProgress\("duplicates"\)/);
+assert.match(app, /renderOperationProgress\("conflicts"\)/);
 
 // The local lifecycle, rather than a stale backend snapshot, controls
 // visibility.  This is what closes the overlay for complete, cancelled and
