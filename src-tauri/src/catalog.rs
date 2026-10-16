@@ -621,18 +621,27 @@ fn casp_gender_label(value: u32, language: AppLanguage) -> String {
     }
 }
 
-fn casp_species_label(value: u32, language: AppLanguage) -> String {
-    let key = match (value >> 8) & 0xF {
-        0x1 => "Human",
-        0x2 => "Horse",
-        0x3 => "Cat",
-        0x4 => "Dog",
-        0x5 => "Little Dog",
-        0x6 => "Deer",
-        0x7 => "Raccoon",
-        _ => "Unknown",
+fn casp_species_label(value: u32, clothing_type: u32, language: AppLanguage) -> Option<String> {
+    let species = (value >> 8) & 0xF;
+    let key = match species {
+        0x1 => Some("Human"),
+        0x2 => Some("Horse"),
+        0x3 => Some("Cat"),
+        0x4 => Some("Dog"),
+        0x5 => Some("Little Dog"),
+        0x6 => Some("Deer"),
+        0x7 => Some("Raccoon"),
+        // Some human CASP versions leave the species nibble at zero.  Treat
+        // that value as human only when the same field also contains a valid
+        // human age/gender combination and the clothing type is not a pet
+        // type.  Other zero/unknown combinations remain undisclosed instead
+        // of being presented as an invented species.
+        0x0 if (value & 0x7F) != 0
+            && ((value >> 12) & 0x3) != 0
+            && !(0x2F..=0x3B).contains(&clothing_type) => Some("Human"),
+        _ => None,
     };
-    tr(language, key).to_string()
+    key.map(|value| tr(language, value).to_string())
 }
 
 fn casp_usage_categories(flags: u32, language: AppLanguage) -> Vec<String> {
@@ -761,7 +770,7 @@ pub fn classify_casp(data: &[u8], language: AppLanguage) -> Option<CatalogClassi
     let sub_category = sub_key.map(|key| tr(language, key).to_string());
     let age = casp_age_label(core.age_species_gender, language);
     let gender = casp_gender_label(core.age_species_gender, language);
-    let species = casp_species_label(core.age_species_gender, language);
+    let species = casp_species_label(core.age_species_gender, core.clothing_type, language);
 
     let mut folder_parts = if main_key == "Body Hair" {
         vec![
@@ -802,7 +811,7 @@ pub fn classify_casp(data: &[u8], language: AppLanguage) -> Option<CatalogClassi
         sub_category,
         gender: Some(gender),
         age: Some(age),
-        species: Some(species),
+        species,
         usage_categories: casp_usage_categories(core.clothing_category, language),
         candidate_folder_parts: vec![folder_parts.clone()],
         folder_parts,
@@ -1601,6 +1610,19 @@ mod tests {
             classification.usage_categories,
             vec!["Everyday", "Formalwear"]
         );
+    }
+
+    #[test]
+    fn casp_zero_species_is_human_only_with_valid_human_flags() {
+        let human = classify_casp(&minimal_casp(0x05, 0, 0x0000_2030, 0), AppLanguage::En)
+            .unwrap();
+        assert_eq!(human.species.as_deref(), Some("Human"));
+
+        let undisclosed = classify_casp(&minimal_casp(0x05, 0, 0, 0), AppLanguage::Pt).unwrap();
+        assert_eq!(undisclosed.species, None);
+
+        let pet = classify_casp(&minimal_casp(0x2F, 0, 0x0000_2000, 0), AppLanguage::En).unwrap();
+        assert_eq!(pet.species, None);
     }
 
     #[test]

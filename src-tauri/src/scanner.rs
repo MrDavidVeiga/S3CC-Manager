@@ -3807,6 +3807,58 @@ fn localized_unknown(language: AppLanguage) -> &'static str {
     }
 }
 
+fn localized_reference_message(language: AppLanguage, message: &str) -> String {
+    match (language, message) {
+        (AppLanguage::Pt, "Store overlap is partial; a shared TGI alone is not a package identity.") => {
+            "A sobreposição com a Store é parcial. Um TGI compartilhado, isoladamente, não comprova que os packages sejam idênticos.".to_string()
+        }
+        (AppLanguage::Es, "Store overlap is partial; a shared TGI alone is not a package identity.") => {
+            "La superposición con la Store es parcial. Un TGI compartido, por sí solo, no demuestra que los packages sean idénticos.".to_string()
+        }
+        (AppLanguage::Pt, "Store package/resource-set identity matches a single category.") => {
+            "A identidade do package/conjunto de resources da Store corresponde a uma única categoria.".to_string()
+        }
+        (AppLanguage::Es, "Store package/resource-set identity matches a single category.") => {
+            "La identidad del package/conjunto de recursos de la Store corresponde a una sola categoría.".to_string()
+        }
+        (AppLanguage::Pt, "Store identity matches multiple categories; no category was selected automatically.") => {
+            "A identidade da Store corresponde a várias categorias; nenhuma categoria foi selecionada automaticamente.".to_string()
+        }
+        (AppLanguage::Es, "Store identity matches multiple categories; no category was selected automatically.") => {
+            "La identidad de la Store corresponde a varias categorías; no se seleccionó ninguna automáticamente.".to_string()
+        }
+        (AppLanguage::Pt, value) if value.starts_with("Official resources: ") => {
+            localize_official_resources(language, value)
+        }
+        (AppLanguage::Es, value) if value.starts_with("Official resources: ") => {
+            localize_official_resources(language, value)
+        }
+        _ => message.to_string(),
+    }
+}
+
+fn localize_official_resources(language: AppLanguage, value: &str) -> String {
+    let numbers = value
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if numbers.len() != 4 {
+        return value.to_string();
+    }
+    let [shared, identical, changed, unmatched] =
+        [numbers[0], numbers[1], numbers[2], numbers[3]];
+    match language {
+        AppLanguage::Pt => format!(
+            "Recursos oficiais: {shared} TGI em comum, {identical} conteúdos idênticos, {changed} conteúdos modificados e {unmatched} recursos do package sem correspondência nos arquivos oficiais."
+        ),
+        AppLanguage::Es => format!(
+            "Recursos oficiales: {shared} TGI compartidos, {identical} contenidos idénticos, {changed} contenidos modificados y {unmatched} recursos del package sin correspondencia en los archivos oficiales."
+        ),
+        AppLanguage::En => value.to_string(),
+    }
+}
+
 fn localized_mixed(language: AppLanguage) -> &'static str {
     match language {
         AppLanguage::En => "Mixed",
@@ -4204,12 +4256,17 @@ fn scan_one_with_index(
     let project_evidence = extract_package_evidence(path, &package);
     timing.project_grouping_us += project_started.elapsed().as_micros();
     let reference_started = Instant::now();
-    let reference_evidence = match (shared_cached.as_ref(), reference_catalogs) {
+    let mut reference_evidence = match (shared_cached.as_ref(), reference_catalogs) {
         (Some(cached), Some(catalogs)) => {
             reference_catalog::compare_cached_package(cached, catalogs)
         }
         _ => reference_catalog::analyze_package(&package),
     };
+    if let Some(evidence) = reference_evidence.as_mut() {
+        for message in &mut evidence.evidence {
+            *message = localized_reference_message(language, message);
+        }
+    }
     timing.reference_catalog_us += reference_started.elapsed().as_micros();
 
     let mut type_set = BTreeSet::new();

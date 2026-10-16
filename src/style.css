@@ -1209,7 +1209,16 @@ button:disabled {
   border-color: color-mix(in srgb, var(--accent, #7da338) 48%, transparent);
 }
 
-.operation-result-actions { grid-template-columns: 1fr; }
+.operation-result-actions {
+  grid-template-columns: 1fr;
+  justify-items: center;
+}
+
+.operation-result-actions .primary-btn {
+  width: auto;
+  min-width: 86px;
+  padding-inline: 22px;
+}
 
 @media (max-width: 1180px) {
   .restore-toolbar {
@@ -2925,9 +2934,9 @@ button:disabled {
 
 .results-search-input,
 .analysis-search-input {
-  flex: 1 1 auto;
+  flex: 1 1 clamp(260px, 32vw, 520px);
   width: 100%;
-  min-width: 0;
+  min-width: min(260px, 100%);
   max-width: none;
 }
 
@@ -5070,12 +5079,43 @@ body.release-v1 .conflicts-results {
   width: 30px;
   min-width: 30px;
   height: 30px;
+  display: grid;
+  place-items: center;
   padding: 0;
   border: 1px solid var(--winui-control-stroke, var(--border));
   border-radius: 8px;
   background: var(--winui-control-fill, transparent);
   color: var(--text);
+  line-height: 1;
+  font-size: 1rem;
   cursor: pointer;
+}
+
+/* Tools and Restore intentionally use the full content width.  The shared
+   sidebar belongs only to Organizer, Duplicates and Conflicts. */
+body.utility-page .layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body.utility-page .left-panel {
+  display: none;
+}
+
+body.utility-page .right-panel {
+  width: 100%;
+  border-radius: 24px;
+}
+
+@media (max-width: 760px) {
+  .analysis-query-controls {
+    flex-wrap: wrap;
+  }
+
+  .analysis-search-input {
+    flex-basis: 100%;
+    min-width: 0;
+    order: -1;
+  }
 }
 .analysis-expandable-details {
   min-width: 0;

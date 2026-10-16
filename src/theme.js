@@ -90,24 +90,32 @@ function applyAccent(ramp) {
   root.style.setProperty("--accent-outline",alpha(ramp.base,ramp.mode==="dark"?.44:.34));
 }
 function applyThemeSwatches() {
-  const palettes = {
-    system: resolvedTheme("system"),
-    veiga: resolvedTheme("veiga-light"),
-    meanGirls: resolvedTheme("mean-girls"),
-    eaApp: resolvedTheme("ea-app"),
+  const surfaceFor = (choice, mode) => {
+    if (choice === "mean-girls") return "#FEF9FD";
+    if (choice === "ea-app") return "#1D2030";
+    // These are the actual WinUI mica surfaces used by the generic light and
+    // dark token sets.  The system sample therefore follows the OS mode.
+    return mode === "dark" ? "#202020" : "#F3F3F3";
   };
-  const setSwatch = (selector, palette) => {
-    const background = `linear-gradient(135deg, ${palette.base} 0 50%, ${palette.dark2} 50% 100%)`;
+  const palettes = [
+    [".system-swatch", "system"],
+    [".veiga-swatch", "veiga-light"],
+    [".mean-girls-swatch", "mean-girls"],
+    [".ea-app-swatch", "ea-app"],
+    [".winui-light-swatch", "winui-light"],
+    [".winui-dark-swatch", "winui-dark"],
+  ];
+  const setSwatch = (selector, choice) => {
+    const palette = resolvedTheme(choice);
+    const surface = surfaceFor(choice, palette.mode);
+    const background = `linear-gradient(135deg, ${palette.base} 0 50%, ${surface} 50% 100%)`;
     document.querySelectorAll(selector).forEach((swatch) => {
       swatch.style.background = background;
       swatch.style.setProperty("--swatch-light", palette.base);
-      swatch.style.setProperty("--swatch-dark", palette.dark2);
+      swatch.style.setProperty("--swatch-dark", surface);
     });
   };
-  setSwatch(".system-swatch", palettes.system);
-  setSwatch(".veiga-swatch", palettes.veiga);
-  setSwatch(".mean-girls-swatch", palettes.meanGirls);
-  setSwatch(".ea-app-swatch", palettes.eaApp);
+  palettes.forEach(([selector, choice]) => setSwatch(selector, choice));
 }
 function applyTheme(choice,{persist=true}={}) {
   if (!VALID_THEMES.has(choice)) choice="system";

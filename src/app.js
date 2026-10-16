@@ -111,7 +111,7 @@ const I18N = {
     invalid: "Invalid",
     unknown: "Unknown",
     chooseToBegin: "Choose a Mods folder to begin.",
-    search: "Search by name or Instance ID",
+    search: "Search by Name or Instance",
     filter: "Filter",
     allStatuses: "All statuses",
     selectPackage: "Select a package to see its classification.",
@@ -512,7 +512,7 @@ const I18N = {
     analyzingDuplicates: "Analyzing package fingerprints…",
     duplicatesReady: "Duplicate analysis complete",
     duplicatesFailed: "Duplicate analysis failed",
-    duplicateSearch: "Search by name or Instance ID",
+    duplicateSearch: "Search by Name or Instance",
     allDuplicateTypes: "All findings",
     exactDuplicate: "Exact Duplicate",
     contentDuplicate: "Content Duplicate",
@@ -774,7 +774,7 @@ const I18N = {
     invalid: "Inválidos",
     unknown: "Desconhecidos",
     chooseToBegin: "Escolha uma pasta de Mods para começar.",
-    search: "Buscar por nome ou Instance ID",
+    search: "Buscar por Nome ou Instance",
     filter: "Filtro",
     allStatuses: "Todos os estados",
     selectPackage: "Selecione um package para ver a classificação.",
@@ -1175,7 +1175,7 @@ const I18N = {
     analyzingDuplicates: "Analisando fingerprints dos packages…",
     duplicatesReady: "Análise de duplicados concluída",
     duplicatesFailed: "Falha na análise de duplicados",
-    duplicateSearch: "Pesquisar resultados de duplicados…",
+    duplicateSearch: "Buscar por Nome ou Instance",
     allDuplicateTypes: "Todos os resultados",
     exactDuplicate: "Duplicado Exato",
     contentDuplicate: "Duplicado por Conteúdo",
@@ -1436,7 +1436,7 @@ const I18N = {
     invalid: "Inválidos",
     unknown: "Desconocidos",
     chooseToBegin: "Elige una carpeta de Mods para comenzar.",
-    search: "Buscar por nombre o Instance ID",
+    search: "Buscar por Nombre o Instance",
     filter: "Filtro",
     allStatuses: "Todos los estados",
     selectPackage: "Selecciona un package para ver su clasificación.",
@@ -1837,7 +1837,7 @@ const I18N = {
     analyzingDuplicates: "Analizando fingerprints de los packages…",
     duplicatesReady: "Análisis de duplicados completado",
     duplicatesFailed: "Error en el análisis de duplicados",
-    duplicateSearch: "Buscar por nome ou Instance ID",
+    duplicateSearch: "Buscar por Nombre o Instance",
     allDuplicateTypes: "Todos los resultados",
     exactDuplicate: "Duplicado Exacto",
     contentDuplicate: "Duplicado por Contenido",
@@ -2341,7 +2341,7 @@ const el = {
   planStatFoldersRetained: document.querySelector("#plan-stat-folders-retained"),
   loadingOverlay: document.querySelector("#loading-overlay"),
   loadingOverlayPhase: document.querySelector("#loading-overlay-phase"),
-  loadingOverlayMode: document.querySelector("#loading-overlay-mode"),
+  loadingOverlayMode: null,
   loadingOverlayPercent: document.querySelector("#loading-overlay-percent"),
   loadingOverlayBar: document.querySelector("#loading-overlay-bar"),
   loadingOverlayCount: document.querySelector("#loading-overlay-count"),
@@ -6538,7 +6538,9 @@ function renderLoadingOverlay() {
   const percent = determinate ? Math.round(visibleProcessed * 100 / total) : 0;
   el.loadingOverlay.dataset.fluentProgress = determinate ? "determinate" : "indeterminate";
   el.loadingOverlayPhase.textContent = current.phase ? t(current.phase) : t("loadingTitle");
-  if (el.loadingOverlayMode) el.loadingOverlayMode.textContent = t(loadingCacheModeKey(status));
+  // Keep the real cache decision available to diagnostics without adding a
+  // second visual message to the compact processing dialog.
+  el.loadingOverlay.dataset.cacheMode = loadingCacheModeKey(status).replace("loadingMode", "").toLowerCase();
   el.loadingOverlayPercent.textContent = determinate ? `${percent}%` : "—";
   el.loadingOverlayBar.style.width = determinate ? `${percent}%` : "";
   el.loadingOverlayCount.textContent = determinate
@@ -6552,20 +6554,19 @@ function renderLoadingOverlay() {
     track.setAttribute("aria-valuetext", el.loadingOverlayPhase.textContent);
   }
 
-  const detailKey = {
-    planning: "loadingPhasePlan",
-    reading_packages: "loadingPhaseIdentification",
-    identifying_contents: "loadingPhaseAnalysis",
-    comparing_duplicates: "loadingPhaseDuplicates",
-    finalizing_results: "loadingPhaseFinishing",
-    cache_reused: "loadingModeReuse",
-    moving: "loadingPhaseOrganization",
-    integrity_check: "loadingPhaseIntegrity",
-    cleaning: "loadingPhaseCleanup",
-    restoring: "loadingPhaseRestore",
-  }[String(status.phase || "")] || current.phase || "loadingModeUnknown";
-  // Keep one short, phase-specific line below the count. Cache mode remains
-  // in its compact status line and is never inferred from file presence.
+  const analysisKinds = new Set(["unified_analysis", "scan", "duplicates", "conflicts"]);
+  const detailKey = analysisKinds.has(current.kind)
+    ? "loadingModeUnknown"
+    : ({
+      planning: "loadingPhasePlan",
+      moving: "loadingPhaseOrganization",
+      integrity_check: "loadingPhaseIntegrity",
+      cleaning: "loadingPhaseCleanup",
+      restoring: "loadingPhaseRestore",
+    }[String(status.phase || "")] || current.phase || "loadingModeUnknown");
+  // The line below the count is intentionally one short operation description;
+  // cache mode remains a non-visual data attribute and is never inferred from
+  // the mere presence of cache files.
   el.loadingOverlayPhrase.textContent = t(detailKey);
 
   const canCancel = current.cancelable && !status.cancelRequested;
@@ -8596,6 +8597,8 @@ function renderTools() {
 }
 
 function renderTabs() {
+  const utilityPage = state.tab === "tools" || state.tab === "restore";
+  document.body.classList.toggle("utility-page", utilityPage);
   for (const button of el.tabs) {
     const active = button.dataset.tab === state.tab;
     button.classList.toggle("active", active);

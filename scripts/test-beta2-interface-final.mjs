@@ -38,9 +38,13 @@ expect(theme.includes('suppressTooltipUntilPointerLeave'), "Theme selection supp
 expect(theme.includes("linear-gradient(135deg"), "Theme swatches use two real palette colors");
 expect(!theme.includes('swatch.style.background=systemAccent()'), "System theme swatches keep their bicolor treatment");
 
-expect(converter.includes('chooseFiles:"Selecionar arquivos Sims3Pack"'), "Portuguese converter label is explicit");
-expect(converter.includes('chooseFiles:"Select Sims3Pack files"'), "English converter label is explicit");
-expect(converter.includes('chooseFiles:"Seleccionar archivos Sims3Pack"'), "Spanish converter label is explicit");
+expect(converter.includes('chooseFiles:"Selecionar .sims3pack"'), "Portuguese converter label is compact");
+expect(converter.includes('chooseFiles:"Select .sims3pack"'), "English converter label is compact");
+expect(converter.includes('chooseFiles:"Seleccionar .sims3pack"'), "Spanish converter label is compact");
+expect(html.includes('class="theme-swatch winui-light-swatch"'), "WinUI Light has its own swatch");
+expect(html.includes('class="theme-swatch winui-dark-swatch"'), "WinUI Dark has its own swatch");
+expect(app.includes('body.classList.toggle("utility-page"'), "Tools and Restore use the full-width layout");
+expect(theme.includes('surfaceFor'), "Theme swatches pair the accent with the actual surface");
 expect(fluent.includes("#duplicates-batch-preview.quarantine-preview"), "Quarantine preflight is compact and revealed on demand");
 expect(fluent.includes(".winui-social-footer .social-icons-list a:focus-visible"), "Social keyboard focus remains visible");
 

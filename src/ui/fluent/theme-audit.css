@@ -290,9 +290,15 @@ body.release-v1 .theme-swatch {
 body.release-v1 #search-input.results-search-input {
   flex: 2 1 clamp(300px, 36vw, 620px);
 }
+body.release-v1 .analysis-search-input {
+  flex: 2 1 clamp(280px, 34vw, 560px);
+}
 @media (max-width: 840px) {
   body.release-v1 #search-input.results-search-input {
     flex-basis: 220px;
+  }
+  body.release-v1 .analysis-search-input {
+    flex-basis: 240px;
   }
 }
 
