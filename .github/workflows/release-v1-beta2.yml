@@ -5,14 +5,20 @@ on:
   push:
     branches:
       - main
+      - fix/full-reconciliation-manual-model-20261009
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the validated Beta 2 prerelease after all matrix builds pass"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
 jobs:
   build-release:
-    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Release v1.0.0 Beta 2'
     name: ${{ matrix.artifact_name }}
     strategy:
       fail-fast: false
@@ -197,9 +203,13 @@ jobs:
           retention-days: 30
 
   publish-prerelease:
-    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Release v1.0.0 Beta 2'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.publish == true) ||
+      (github.event_name == 'push' && github.event.head_commit.message == 'Release v1.0.0 Beta 2')
     needs: build-release
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -209,15 +219,106 @@ jobs:
         with:
           path: release-assets
 
-      - name: Create GitHub prerelease
-        uses: softprops/action-gh-release@v2
+      - name: Move existing tag only after all four builds pass
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_OLD_TAG: efabe232bdfcaabde19a045c8a429be0c9f2817c
         with:
-          tag_name: v1.0.0-beta.2
-          target_commitish: ${{ github.sha }}
-          name: "Veiga's S3CC Manager v1.0.0 Beta 2"
-          body_path: docs/RELEASE-NOTES-v1.0.0-BETA2.md
-          prerelease: true
-          draft: false
-          files: |
-            release-assets/**/*.zip
-            release-assets/**/*_SHA256.txt
+          script: |
+            const ref = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'tags/v1.0.0-beta.2'
+            });
+            const current = ref.data.object.sha;
+            if (current !== process.env.EXPECTED_OLD_TAG) {
+              core.setFailed(`Refusing publication: v1.0.0-beta.2 points to ${current}, expected ${process.env.EXPECTED_OLD_TAG}`);
+              return;
+            }
+            await github.rest.git.updateRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'tags/v1.0.0-beta.2',
+              sha: context.sha,
+              force: true
+            });
+
+      - name: Replace prerelease assets and notes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: 'v1.0.0-beta.2'
+            });
+            if (!release.data.prerelease || release.data.draft) {
+              core.setFailed('Refusing publication: existing Beta 2 release is not a published prerelease.');
+              return;
+            }
+            const files = [];
+            for (const entry of fs.readdirSync('release-assets', { withFileTypes: true })) {
+              const dir = path.join('release-assets', entry.name);
+              if (!entry.isDirectory()) continue;
+              for (const file of fs.readdirSync(dir)) {
+                if (file.endsWith('.zip') || file.endsWith('_SHA256.txt')) {
+                  files.push(path.join(dir, file));
+                }
+              }
+            }
+            files.sort();
+            if (files.length !== 8) {
+              core.setFailed(`Refusing publication: expected 8 assets, found ${files.length}.`);
+              return;
+            }
+            const names = new Set(files.map(file => path.basename(file)));
+            const expected = [
+              'VeigasS3CCManager_v1.0.0_Beta2_Windows_x64.zip',
+              'VeigasS3CCManager_v1.0.0_Beta2_Windows_x64_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta2_Linux_x64.zip',
+              'VeigasS3CCManager_v1.0.0_Beta2_Linux_x64_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta2_macOS_Intel.zip',
+              'VeigasS3CCManager_v1.0.0_Beta2_macOS_Intel_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta2_macOS_Apple_Silicon.zip',
+              'VeigasS3CCManager_v1.0.0_Beta2_macOS_Apple_Silicon_SHA256.txt'
+            ];
+            if (expected.some(name => !names.has(name))) {
+              core.setFailed(`Refusing publication: artifact names are incomplete: ${[...names].join(', ')}`);
+              return;
+            }
+            for (const asset of release.data.assets) {
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: asset.id
+              });
+            }
+            for (const file of files) {
+              const name = path.basename(file);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                name,
+                label: name,
+                data: fs.readFileSync(file),
+                headers: {
+                  'content-type': name.endsWith('.zip') ? 'application/zip' : 'text/plain',
+                  'content-length': fs.statSync(file).size
+                }
+              });
+            }
+            const body = fs.readFileSync('docs/RELEASE-NOTES-v1.0.0-BETA2.md', 'utf8');
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.data.id,
+              tag_name: 'v1.0.0-beta.2',
+              target_commitish: context.sha,
+              name: "Veiga's S3CC Manager v1.0.0 Beta 2",
+              body,
+              prerelease: true,
+              draft: false
+            });
