@@ -75,9 +75,9 @@ assert.match(css, /\.analysis-more-actions-menu button\s*\{[\s\S]*width:\s*100%/
   "nested More Actions buttons must share the menu width");
 assert.match(css, /\.analysis-action-bar\s*>\s*\.primary-btn,[\s\S]*flex:\s*1 1 190px/);
 assert.match(css, /@media\s*\(max-width:\s*480px\)[\s\S]*\.analysis-more-actions/);
-assert.match(app, /function reviewSelectedConflicts\(\)[\s\S]*conflictExpanded\.add/,
+assert.match(app, /function reviewSelectedConflicts\(\)[\s\S]*conflictExpandedId\s*=/,
   "conflict review must expand selected findings inline");
-assert.match(app, /function reviewSelectedDuplicates\(\)[\s\S]*duplicateExpanded\.add/,
+assert.match(app, /function reviewSelectedDuplicates\(\)[\s\S]*duplicateExpandedId\s*=/,
   "duplicate review must expand selected findings inline");
 assert.match(app, /function openExistingQuarantine\(\)[\s\S]*invoke\("list_existing_quarantine"/,
   "View Quarantine must read existing files instead of preparing a new transaction");

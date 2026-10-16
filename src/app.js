@@ -155,6 +155,10 @@ const I18N = {
     loadingPhaseRestore: "Restoring files",
     loadingPhaseTools: "Working in the background",
     loadingPhaseFinishing: "Finalizing results",
+    loadingModeCold: "First analysis",
+    loadingModeReuse: "Reusing validated cache",
+    loadingModeIncremental: "Updating changed files",
+    loadingModeUnknown: "Preparing analysis",
     continueInBackground: "Continue in Background",
     loadingPhrase1: "Reading the files selected in the Manager.",
     loadingPhrase2: "Comparing details before preparing the next step.",
@@ -467,6 +471,7 @@ const I18N = {
     proposed: "Proposed",
     noFoldersNeeded: "No new folders are needed.",
     selectedEligible: "eligible selected",
+    hiddenSelections: "{count} selected hidden by the current filter",
     notEligible: "Not eligible for automatic organization",
     executing: "Organizing selected packages…",
     executionComplete: "Organization completed",
@@ -810,6 +815,10 @@ const I18N = {
     loadingPhaseRestore: "Restaurando arquivos",
     loadingPhaseTools: "Trabalhando em segundo plano",
     loadingPhaseFinishing: "Finalizando resultados",
+    loadingModeCold: "Primeira análise",
+    loadingModeReuse: "Reutilizando cache validado",
+    loadingModeIncremental: "Atualizando arquivos alterados",
+    loadingModeUnknown: "Preparando análise",
     continueInBackground: "Continuar em Segundo Plano",
     loadingPhrase1: "Lendo os arquivos selecionados no Manager.",
     loadingPhrase2: "Comparando os detalhes antes de preparar a próxima etapa.",
@@ -1122,6 +1131,7 @@ const I18N = {
     proposed: "Proposto",
     noFoldersNeeded: "Nenhuma nova pasta precisa ser criada.",
     selectedEligible: "aptos selecionados",
+    hiddenSelections: "{count} selecionados ocultos pelo filtro atual",
     notEligible: "Não elegível para organização automática",
     executing: "Organizando packages selecionados…",
     executionComplete: "Organização concluída",
@@ -1464,6 +1474,10 @@ const I18N = {
     loadingPhaseRestore: "Restaurando archivos",
     loadingPhaseTools: "Trabajando en segundo plano",
     loadingPhaseFinishing: "Finalizando resultados",
+    loadingModeCold: "Primera análisis",
+    loadingModeReuse: "Reutilizando caché validada",
+    loadingModeIncremental: "Actualizando archivos modificados",
+    loadingModeUnknown: "Preparando análisis",
     continueInBackground: "Continuar en Segundo Plano",
     loadingPhrase1: "Leyendo los archivos seleccionados en el Manager.",
     loadingPhrase2: "Comparando los detalles antes de preparar el siguiente paso.",
@@ -1776,6 +1790,7 @@ const I18N = {
     proposed: "Propuesto",
     noFoldersNeeded: "No es necesario crear carpetas nuevas.",
     selectedEligible: "aptos seleccionados",
+    hiddenSelections: "{count} seleccionados ocultos por el filtro actual",
     notEligible: "No apto para organización automática",
     executing: "Organizando packages seleccionados…",
     executionComplete: "Organización completada",
@@ -1996,6 +2011,7 @@ const state = {
   stats: null,
   selectedId: "",
   selectedForPlan: new Set(),
+  lastManagerSelectionAnchor: "",
   search: typeof preferences.search === "string" ? preferences.search : "",
   status: typeof preferences.status === "string" ? preferences.status : "all",
   isStatusFilterOpen: false,
@@ -2031,7 +2047,10 @@ const state = {
   duplicatesFilter: typeof preferences.duplicatesFilter === "string" ? preferences.duplicatesFilter : "all",
   duplicateSelectedId: "",
   duplicateReviewSelected: new Set(),
-  duplicateExpanded: new Set(),
+  // The result lists keep a single expanded item per tab. This avoids
+  // invalid heights in the virtualized list while preserving independent
+  // review selection.
+  duplicateExpandedId: "",
   duplicatesSort: "name",
   duplicateViewMode: "finding",
   existingQuarantine: [],
@@ -2055,7 +2074,7 @@ const state = {
       ? preferences.conflictsFilter
       : "attention",
   conflictSelectedId: "",
-  conflictExpanded: new Set(),
+  conflictExpandedId: "",
   conflictsSort: "priority",
   operations: { scan: null, duplicates: null, conflicts: null, unified_analysis: null },
   technicalDetails: {},
@@ -2316,6 +2335,7 @@ const el = {
   planStatFoldersRetained: document.querySelector("#plan-stat-folders-retained"),
   loadingOverlay: document.querySelector("#loading-overlay"),
   loadingOverlayPhase: document.querySelector("#loading-overlay-phase"),
+  loadingOverlayMode: document.querySelector("#loading-overlay-mode"),
   loadingOverlayPercent: document.querySelector("#loading-overlay-percent"),
   loadingOverlayBar: document.querySelector("#loading-overlay-bar"),
   loadingOverlayCount: document.querySelector("#loading-overlay-count"),
@@ -2436,6 +2456,8 @@ const el = {
   exportAuditButtons: [...document.querySelectorAll("[data-export-audit]")],
   openReportFolderButtons: [...document.querySelectorAll("[data-open-report-folder]")],
   duplicatesClearListBtn: document.querySelector("#duplicates-clear-list-btn"),
+  duplicatesSelectVisibleReviewBtn: document.querySelector("#duplicates-select-visible-review-btn"),
+  duplicatesClearReviewVisibleBtn: document.querySelector("#duplicates-clear-review-visible-btn"),
   duplicatesReviewSelectionBtn: document.querySelector("#duplicates-review-selection-btn"),
   duplicatesSelectExactBtn: document.querySelector("#duplicates-select-exact-btn"),
   duplicatesSelectCurrentBtn: document.querySelector("#duplicates-select-current-btn"),
@@ -2448,6 +2470,8 @@ const el = {
   duplicatesBatchSummary: document.querySelector("#duplicates-batch-summary"),
   duplicatesBatchPreview: document.querySelector("#duplicates-batch-preview"),
   conflictsClearListBtn: document.querySelector("#conflicts-clear-list-btn"),
+  conflictsSelectVisibleMainBtn: document.querySelector("#conflicts-select-visible-main-btn"),
+  conflictsClearReviewMainBtn: document.querySelector("#conflicts-clear-review-main-btn"),
   conflictsSelectAllBtn: document.querySelector("#conflicts-select-all-btn"),
   conflictsSelectDetectedBtn: document.querySelector("#conflicts-select-detected-btn"),
   conflictsReviewSelectedBtn: document.querySelector("#conflicts-review-selected-btn"),
@@ -3728,9 +3752,11 @@ function navigateDuplicateReview(direction) {
 
 function reviewSelectedDuplicates() {
   if (!state.duplicatesAnalysis || !state.duplicateReviewSelected.size || state.duplicatesBusy) return;
-  for (const id of state.duplicateReviewSelected) state.duplicateExpanded.add(id);
   const first = visibleDuplicateFindings().find((finding) => state.duplicateReviewSelected.has(finding.id));
-  if (first) state.duplicateSelectedId = first.id;
+  if (first) {
+    state.duplicateSelectedId = first.id;
+    state.duplicateExpandedId = first.id;
+  }
   renderDuplicates();
 }
 
@@ -4057,6 +4083,22 @@ function readableContentSource(value) {
   return value || "—";
 }
 
+function cachedExactDuplicatePreview(member) {
+  const hash = String(member?.fileSha256 || "").toLowerCase();
+  if (!hash || !state.duplicatesAnalysis) return null;
+  for (const group of exactDuplicateGroups()) {
+    const members = group.members || [];
+    if (!members.some((candidate) => candidate.path === member.path)) continue;
+    const peer = members.find((candidate) =>
+      candidate.path !== member.path &&
+      String(candidate.fileSha256 || "").toLowerCase() === hash &&
+      state.packagePreviews[candidate.path]?.thumbnailBase64
+    );
+    if (peer) return state.packagePreviews[peer.path];
+  }
+  return null;
+}
+
 async function loadDuplicateMemberPreview(member) {
   const path = member?.path;
   if (!path || !state.folder || state.packagePreviewLoading[path] || path in state.packagePreviews) {
@@ -4065,7 +4107,8 @@ async function loadDuplicateMemberPreview(member) {
 
   state.packagePreviewLoading[path] = true;
   try {
-    state.packagePreviews[path] = await invoke("get_package_preview", {
+    const shared = cachedExactDuplicatePreview(member);
+    state.packagePreviews[path] = shared || await invoke("get_package_preview", {
       folder: state.folder,
       packagePath: path,
     });
@@ -4085,6 +4128,8 @@ async function loadDuplicateMemberPreview(member) {
       (finding) => finding.id === state.conflictSelectedId &&
         (finding.left?.path === path || finding.right?.path === path)
     )) renderConflictsPreview();
+    if (state.tab === "duplicates") renderDuplicates();
+    if (state.tab === "conflicts") renderConflicts();
   }
 }
 
@@ -4634,7 +4679,7 @@ function createDuplicateFindingRow(finding) {
   article.className = "analysis-expandable-item duplicate-expandable-item";
   article.dataset.duplicateId = finding.id;
   article.classList.toggle("selected", state.duplicateReviewSelected.has(finding.id));
-  article.classList.toggle("expanded", state.duplicateExpanded.has(finding.id));
+  article.classList.toggle("expanded", state.duplicateExpandedId === finding.id);
 
   const header = document.createElement("div");
   header.className = "analysis-expandable-summary";
@@ -4677,13 +4722,12 @@ function createDuplicateFindingRow(finding) {
   const arrow = document.createElement("button");
   arrow.type = "button";
   arrow.className = "analysis-expandable-toggle";
-  arrow.setAttribute("aria-expanded", String(state.duplicateExpanded.has(finding.id)));
-  arrow.setAttribute("aria-label", t(state.duplicateExpanded.has(finding.id) ? "collapseDetails" : "expandDetails"));
-  arrow.textContent = state.duplicateExpanded.has(finding.id) ? "⌃" : "⌄";
+  arrow.setAttribute("aria-expanded", String(state.duplicateExpandedId === finding.id));
+  arrow.setAttribute("aria-label", t(state.duplicateExpandedId === finding.id ? "collapseDetails" : "expandDetails"));
+  arrow.textContent = state.duplicateExpandedId === finding.id ? "⌃" : "⌄";
   arrow.addEventListener("click", (event) => {
     event.stopPropagation();
-    if (state.duplicateExpanded.has(finding.id)) state.duplicateExpanded.delete(finding.id);
-    else state.duplicateExpanded.add(finding.id);
+    state.duplicateExpandedId = state.duplicateExpandedId === finding.id ? "" : finding.id;
     renderDuplicates();
   });
   const text = document.createElement("div");
@@ -4691,7 +4735,7 @@ function createDuplicateFindingRow(finding) {
   text.append(select, description);
   header.append(checkbox, text, badge, arrow);
   article.appendChild(header);
-  if (state.duplicateExpanded.has(finding.id)) {
+  if (state.duplicateExpandedId === finding.id) {
     const details = document.createElement("div");
     details.className = "analysis-expandable-details";
     appendDuplicateExpandableDetails(details, finding);
@@ -4746,9 +4790,14 @@ function renderDuplicateVirtualRows(findings, force = false) {
     el.duplicatesList.replaceChildren(empty);
     return;
   }
-  // Expanded rows use normal flow so several open comparisons never overlap.
-  // Collapsed rows retain the existing virtualized list for large analyses.
-  if (state.duplicateExpanded.size) {
+  // One expanded row uses normal flow so its details can determine its own
+  // height. Collapsed rows retain virtualization for large analyses.
+  if (state.duplicateExpandedId) {
+    if (!findings.some((finding) => finding.id === state.duplicateExpandedId)) {
+      state.duplicateExpandedId = "";
+    }
+  }
+  if (state.duplicateExpandedId) {
     const fragment = document.createDocumentFragment();
     for (let index = 0; index < findings.length; index += 1) {
       const row = createDuplicateFindingRow(findings[index]);
@@ -4803,6 +4852,8 @@ function renderDuplicateBatchControls() {
   if (el.duplicatesReviewSelectionBtn) {
     el.duplicatesReviewSelectionBtn.disabled = !hasAnalysis || !reviewCount || busy;
   }
+  if (el.duplicatesSelectVisibleReviewBtn) el.duplicatesSelectVisibleReviewBtn.disabled = !hasAnalysis || busy || !visibleDuplicateFindings().length;
+  if (el.duplicatesClearReviewVisibleBtn) el.duplicatesClearReviewVisibleBtn.disabled = busy || !reviewCount;
   el.duplicatesSelectExactBtn.disabled = !hasAnalysis ||
     !exactDuplicateGroups().length || busy || workspaceReadOnly();
   el.duplicatesSelectCurrentBtn.disabled = !hasAnalysis || busy || workspaceReadOnly() ||
@@ -5823,13 +5874,31 @@ function appendConflictExpandableDetails(container, finding) {
   for (const member of [finding.left, finding.right].filter(Boolean)) {
     const card = document.createElement("article");
     card.className = "analysis-comparison-card conflict-comparison-card";
+    const preview = state.packagePreviews[member.path];
+    const visual = document.createElement("div");
+    visual.className = "duplicate-member-visual";
+    if (preview?.thumbnailBase64) {
+      const image = document.createElement("img");
+      image.className = "duplicate-member-thumb";
+      image.alt = member.name || "";
+      image.src = `data:${preview.mimeType || "image/png"};base64,${preview.thumbnailBase64}`;
+      visual.appendChild(image);
+    } else {
+      const fallback = document.createElement("div");
+      fallback.className = "duplicate-member-thumb duplicate-member-thumb-fallback";
+      fallback.innerHTML = '<i class="fa-regular fa-image" aria-hidden="true"></i>';
+      visual.appendChild(fallback);
+      if (member.path && !(member.path in state.packagePreviews) && !state.packagePreviewLoading[member.path]) {
+        queueMicrotask(() => loadDuplicateMemberPreview(member));
+      }
+    }
     const name = document.createElement("strong");
     name.textContent = member.name || "—";
     const path = document.createElement("code");
     path.textContent = member.relativePath || member.path || "—";
     const meta = document.createElement("p");
     meta.textContent = `${t("fileSize")}: ${bytesLabel(member.size || 0)} · ${t("fileHash")}: ${member.fileSha256 || "—"}`;
-    card.append(name, path, meta);
+    card.append(visual, name, path, meta);
     comparison.appendChild(card);
   }
   container.appendChild(comparison);
@@ -5860,7 +5929,7 @@ function createConflictFindingRow(finding) {
   article.className = "analysis-expandable-item conflict-expandable-item";
   article.dataset.conflictId = finding.id;
   article.classList.toggle("selected", state.conflictReviewSelected.has(finding.id));
-  article.classList.toggle("expanded", state.conflictExpanded.has(finding.id));
+  article.classList.toggle("expanded", state.conflictExpandedId === finding.id);
   if (sessionMark) article.dataset.sessionMark = sessionMark;
 
   const header = document.createElement("div");
@@ -5872,7 +5941,6 @@ function createConflictFindingRow(finding) {
   checkbox.addEventListener("click", (event) => event.stopPropagation());
   checkbox.addEventListener("change", (event) => {
     toggleConflictReviewSelection(finding.id, event.currentTarget.checked, article);
-    state.conflictExpanded.add(finding.id);
     renderConflicts();
   });
   const select = document.createElement("button");
@@ -5890,13 +5958,12 @@ function createConflictFindingRow(finding) {
   const arrow = document.createElement("button");
   arrow.type = "button";
   arrow.className = "analysis-expandable-toggle";
-  arrow.setAttribute("aria-expanded", String(state.conflictExpanded.has(finding.id)));
-  arrow.setAttribute("aria-label", t(state.conflictExpanded.has(finding.id) ? "collapseDetails" : "expandDetails"));
-  arrow.textContent = state.conflictExpanded.has(finding.id) ? "⌃" : "⌄";
+  arrow.setAttribute("aria-expanded", String(state.conflictExpandedId === finding.id));
+  arrow.setAttribute("aria-label", t(state.conflictExpandedId === finding.id ? "collapseDetails" : "expandDetails"));
+  arrow.textContent = state.conflictExpandedId === finding.id ? "⌃" : "⌄";
   arrow.addEventListener("click", (event) => {
     event.stopPropagation();
-    if (state.conflictExpanded.has(finding.id)) state.conflictExpanded.delete(finding.id);
-    else state.conflictExpanded.add(finding.id);
+    state.conflictExpandedId = state.conflictExpandedId === finding.id ? "" : finding.id;
     renderConflicts();
   });
   const text = document.createElement("div");
@@ -5904,7 +5971,7 @@ function createConflictFindingRow(finding) {
   text.append(select, description);
   header.append(checkbox, text, badge, arrow);
   article.appendChild(header);
-  if (state.conflictExpanded.has(finding.id)) {
+  if (state.conflictExpandedId === finding.id) {
     const details = document.createElement("div");
     details.className = "analysis-expandable-details";
     appendConflictExpandableDetails(details, finding);
@@ -5963,7 +6030,10 @@ function renderConflictVirtualRows(findings, force = false) {
     el.conflictsList.replaceChildren(empty);
     return;
   }
-  if (state.conflictExpanded.size) {
+  if (state.conflictExpandedId && !findings.some((finding) => finding.id === state.conflictExpandedId)) {
+    state.conflictExpandedId = "";
+  }
+  if (state.conflictExpandedId) {
     const fragment = document.createDocumentFragment();
     for (let index = 0; index < findings.length; index += 1) {
       const row = createConflictFindingRow(findings[index]);
@@ -5998,9 +6068,11 @@ function renderConflictVirtualRows(findings, force = false) {
 
 function reviewSelectedConflicts() {
   if (!state.conflictsAnalysis || !state.conflictReviewSelected.size || state.reviewBusy) return;
-  for (const id of state.conflictReviewSelected) state.conflictExpanded.add(id);
   const first = visibleConflictFindings().find((finding) => state.conflictReviewSelected.has(finding.id));
-  if (first) state.conflictSelectedId = first.id;
+  if (first) {
+    state.conflictSelectedId = first.id;
+    state.conflictExpandedId = first.id;
+  }
   renderConflicts();
 }
 
@@ -6023,11 +6095,14 @@ function renderConflictBatchControls() {
   if (el.conflictsPrioritizeBtn) el.conflictsPrioritizeBtn.disabled = !state.conflictsAnalysis || busy;
   if (el.conflictsSelectAllBtn) el.conflictsSelectAllBtn.disabled = !state.conflictsAnalysis || busy ||
     !visibleConflictFindings().length;
+  if (el.conflictsSelectVisibleMainBtn) el.conflictsSelectVisibleMainBtn.disabled = !state.conflictsAnalysis || busy ||
+    !visibleConflictFindings().length;
   if (el.conflictsSelectDetectedBtn) el.conflictsSelectDetectedBtn.disabled = !state.conflictsAnalysis || busy ||
     !(state.conflictsAnalysis.findings || []).some(finding =>
       finding.kind !== "shared_identical" && finding.differentPayloadCount > 0);
   if (el.conflictsReviewSelectedBtn) el.conflictsReviewSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
   if (el.conflictsClearReviewBtn) el.conflictsClearReviewBtn.disabled = busy || !state.conflictReviewSelected.size;
+  if (el.conflictsClearReviewMainBtn) el.conflictsClearReviewMainBtn.disabled = busy || !state.conflictReviewSelected.size;
   if (el.conflictsPrioritizeSelectedBtn) el.conflictsPrioritizeSelectedBtn.disabled = busy || !state.conflictReviewSelected.size;
   for (const button of [el.conflictsMarkIntentionalBtn, el.conflictsMarkReviewedBtn,
                         el.conflictsMarkIgnoredBtn, el.conflictsClearMarksBtn]) {
@@ -6199,6 +6274,25 @@ function operationPhaseLabel(phase) {
   }[phase] || t("progressStarting");
 }
 
+function loadingCacheModeKey(status = {}) {
+  // Only explicit operation metadata determines the message. In particular,
+  // a cache directory or cache entry count is not evidence that this run used
+  // the cache.
+  const mode = String(status.cacheMode || status.cache_mode || "").toLowerCase();
+  if (mode === "incremental" || mode === "mixed" || status.incremental === true ||
+      (Number(status.cacheHits || status.cache_hits || 0) > 0 &&
+       Number(status.cacheMisses || status.cache_misses || 0) > 0)) {
+    return "loadingModeIncremental";
+  }
+  if (mode === "reuse" || mode === "warm" || status.cacheHit === true || status.cache_hit === true) {
+    return "loadingModeReuse";
+  }
+  if (mode === "cold" || status.cacheHit === false || status.cache_hit === false) {
+    return "loadingModeCold";
+  }
+  return "loadingModeUnknown";
+}
+
 function renderOperationProgress(kind) {
   const ui = operationUi(kind);
   if (!ui) return;
@@ -6368,17 +6462,23 @@ function renderLoadingOverlay() {
   const total = Number(status.total || 0);
   const processed = Math.max(0, Math.min(Number(status.processed || 0), total || Number.MAX_SAFE_INTEGER));
   const determinate = total > 0;
-  const percent = determinate ? Math.round(processed * 100 / total) : 0;
+  const finalizing = ["finalizing_results", "cache_reused"].includes(status.phase);
+  // Keep the visible finalization phase distinct from the terminal state;
+  // only completion may display 100%.
+  const visibleProcessed = determinate && finalizing && processed >= total && total > 1
+    ? total - 1 : processed;
+  const percent = determinate ? Math.round(visibleProcessed * 100 / total) : 0;
   el.loadingOverlay.dataset.fluentProgress = determinate ? "determinate" : "indeterminate";
   el.loadingOverlayPhase.textContent = current.phase ? t(current.phase) : t("loadingTitle");
+  if (el.loadingOverlayMode) el.loadingOverlayMode.textContent = t(loadingCacheModeKey(status));
   el.loadingOverlayPercent.textContent = determinate ? `${percent}%` : "—";
   el.loadingOverlayBar.style.width = determinate ? `${percent}%` : "";
   el.loadingOverlayCount.textContent = determinate
-    ? `${integerLabel(processed)} / ${integerLabel(total)}` : "—";
+    ? `${integerLabel(visibleProcessed)} / ${integerLabel(total)}` : "—";
   const track = el.loadingOverlayBar.parentElement;
   if (determinate) {
     track.setAttribute("aria-valuenow", String(percent));
-    track.setAttribute("aria-valuetext", `${percent}% — ${integerLabel(processed)} / ${integerLabel(total)}`);
+    track.setAttribute("aria-valuetext", `${percent}% — ${integerLabel(visibleProcessed)} / ${integerLabel(total)}`);
   } else {
     track.removeAttribute("aria-valuenow");
     track.setAttribute("aria-valuetext", el.loadingOverlayPhase.textContent);
@@ -6961,12 +7061,12 @@ function invalidateAnalysesAfterStructureChange() {
   state.duplicatesNotice = "";
   state.duplicateSelectedId = "";
   state.duplicateReviewSelected.clear();
-  state.duplicateExpanded.clear();
+  state.duplicateExpandedId = "";
   state.conflictsAnalysis = null;
   state.conflictsError = "";
   state.conflictsNotice = "";
   state.conflictSelectedId = "";
-  state.conflictExpanded.clear();
+  state.conflictExpandedId = "";
   state.conflictMarks = {};
   state.technicalDetails = {};
   state.technicalDetailsErrors = {};
@@ -8494,13 +8594,57 @@ function visibleItems() {
 
 function renderSelectionSummary() {
   const count = state.selectedForPlan.size;
-  el.selectionSummary.textContent = `${count} ${t("selectedEligible")}`;
+  const visible = new Set(visibleItems().map((item) => item.id));
+  const hidden = [...state.selectedForPlan].filter((id) => !visible.has(id)).length;
+  el.selectionSummary.textContent = `${count} ${t("selectedEligible")}` +
+    (hidden ? ` · ${t("hiddenSelections").replace("{count}", String(hidden))}` : "");
   el.planBtn.disabled =
     count === 0 ||
     state.scanning ||
     state.planning ||
     state.executing ||
     state.structureBusy;
+}
+
+function applyManagerSelection(item, event, checked = null) {
+  if (!item || !eligibleForPlan(item)) return;
+  const visible = visibleItems();
+  const anchor = state.lastManagerSelectionAnchor;
+  if (event?.shiftKey && anchor) {
+    const from = visible.findIndex((candidate) => candidate.id === anchor);
+    const to = visible.findIndex((candidate) => candidate.id === item.id);
+    if (from >= 0 && to >= 0) {
+      const ids = visible.slice(Math.min(from, to), Math.max(from, to) + 1)
+        .filter(eligibleForPlan).map((candidate) => candidate.id);
+      const shouldSelect = checked == null ? true : checked;
+      for (const id of ids) {
+        if (shouldSelect) state.selectedForPlan.add(id);
+        else state.selectedForPlan.delete(id);
+      }
+      state.lastManagerSelectionAnchor = item.id;
+      state.plan = null;
+      state.planError = "";
+      renderResults(true);
+      return;
+    }
+  }
+  if (checked == null) {
+    if (event?.ctrlKey || event?.metaKey) {
+      if (state.selectedForPlan.has(item.id)) state.selectedForPlan.delete(item.id);
+      else state.selectedForPlan.add(item.id);
+    } else {
+      state.selectedForPlan.clear();
+      state.selectedForPlan.add(item.id);
+    }
+  } else if (checked) {
+    state.selectedForPlan.add(item.id);
+  } else {
+    state.selectedForPlan.delete(item.id);
+  }
+  state.lastManagerSelectionAnchor = item.id;
+  state.plan = null;
+  state.planError = "";
+  renderResults(true);
 }
 
 function appendMeta(container, label, value) {
@@ -8737,8 +8881,7 @@ function createPackageRow(item) {
   checkbox.addEventListener("click", (event) => event.stopPropagation());
   checkbox.addEventListener("change", (event) => {
     event.stopPropagation();
-    setPlanSelection(item.id, checkbox.checked);
-    row.classList.toggle("plan-selected", checkbox.checked);
+    applyManagerSelection(item, event, checkbox.checked);
   });
   selection.appendChild(checkbox);
 
@@ -8765,13 +8908,16 @@ function createPackageRow(item) {
 
   row.append(selection, main, side);
 
-  const choose = () => {
-    if (state.selectedId === item.id) return;
+  const choose = (event = {}) => {
+    applyManagerSelection(item, event);
     state.selectedId = item.id;
     updateActiveVirtualRow(el.packageList, "packageId", item.id, "active");
     renderPreview();
   };
-  row.addEventListener("click", choose);
+  row.addEventListener("click", (event) => {
+    if (event.target.closest("input, button, a, select, textarea")) return;
+    choose(event);
+  });
   row.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -9443,7 +9589,7 @@ function clearDuplicateList() {
   state.duplicatesFilter = "all";
   state.duplicateSelectedId = "";
   state.duplicateReviewSelected.clear();
-  state.duplicateExpanded.clear();
+  state.duplicateExpandedId = "";
   state.quarantineSelected.clear();
   state.quarantinePlan = null;
   state.quarantineExactBatch = false;
@@ -9464,7 +9610,7 @@ function clearConflictList() {
   state.conflictQuarantineSelected.clear();
   state.conflictQuarantinePlan = null;
   state.conflictReviewSelected.clear();
-  state.conflictExpanded.clear();
+  state.conflictExpandedId = "";
   state.conflictsSelectedOnly = false;
   conflictVisibleMemo.analysis = null;
   closeConflictDetails();
@@ -9513,7 +9659,7 @@ function clearLoadedLibrary() {
   state.duplicatesFilter = "all";
   state.duplicateSelectedId = "";
   state.duplicateReviewSelected.clear();
-  state.duplicateExpanded.clear();
+  state.duplicateExpandedId = "";
 
   state.conflictsAnalysis = null;
   state.conflictsError = "";
@@ -9521,7 +9667,7 @@ function clearLoadedLibrary() {
   state.conflictsSearch = "";
   state.conflictsFilter = "attention";
   state.conflictSelectedId = "";
-  state.conflictExpanded.clear();
+  state.conflictExpandedId = "";
   state.conflictMarks = {};
 
   state.quarantineSelected.clear();
@@ -9705,9 +9851,9 @@ async function legacyUnifiedAnalysis(preserveSelection = false, preserveNotice =
     state.conflictsNotice = "";
     state.duplicateSelectedId = "";
     state.duplicateReviewSelected.clear();
-    state.duplicateExpanded.clear();
+    state.duplicateExpandedId = "";
     state.conflictSelectedId = "";
-    state.conflictExpanded.clear();
+    state.conflictExpandedId = "";
     state.quarantineSelected.clear();
     state.quarantinePlan = null;
     closeDuplicateDetails();
@@ -10052,9 +10198,9 @@ function reconcileSuccessfulOrganization(result) {
   state.conflictsNotice = sharedAnalysisReconciled ? "" : t("analysisNeedsRefresh");
   state.duplicateSelectedId = "";
   state.duplicateReviewSelected.clear();
-  state.duplicateExpanded.clear();
+  state.duplicateExpandedId = "";
   state.conflictSelectedId = "";
-  state.conflictExpanded.clear();
+  state.conflictExpandedId = "";
   state.quarantineSelected.clear();
   state.quarantinePlan = null;
   state.conflictQuarantineSelected.clear();
@@ -10407,9 +10553,14 @@ async function analyzeConflicts() {
 }
 
 function selectAllVisible() {
-  for (const item of visibleItems()) {
-    if (eligibleForPlan(item)) state.selectedForPlan.add(item.id);
+  const visibleEligible = visibleItems().filter(eligibleForPlan);
+  const allSelected = visibleEligible.length > 0 &&
+    visibleEligible.every((item) => state.selectedForPlan.has(item.id));
+  for (const item of visibleEligible) {
+    if (allSelected) state.selectedForPlan.delete(item.id);
+    else state.selectedForPlan.add(item.id);
   }
+  state.lastManagerSelectionAnchor = visibleEligible.at(-1)?.id || state.lastManagerSelectionAnchor;
   state.plan = null;
   state.planError = "";
   renderResults(true);
@@ -10567,6 +10718,13 @@ el.openManifestFolderBtn.addEventListener("click", () => openDirectorySafe(state
 el.openCacheBtn.addEventListener("click", () => openDirectorySafe(state.cacheInfo?.path));
 el.clearCacheBtn.addEventListener("click", () => openConfirm("clear_cache"));
 el.rebuildFixIndexBtn.addEventListener("click", rebuildFixIndex);
+el.packageList.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a" &&
+      !event.target.matches("input,textarea,select,[contenteditable=\"true\"]")) {
+    event.preventDefault();
+    selectAllVisible();
+  }
+});
 for (const button of el.exportAuditButtons) {
   button.addEventListener("click", () => exportAuditReport(button.dataset.exportAudit));
 }
@@ -10577,6 +10735,7 @@ for (const button of el.openReportFolderButtons) {
 }
 if (el.duplicatesClearListBtn) el.duplicatesClearListBtn.addEventListener("click", clearDuplicateList);
 el.duplicatesReviewSelectionBtn.addEventListener("click", reviewSelectedDuplicates);
+el.duplicatesSelectVisibleReviewBtn?.addEventListener("click", selectAllVisibleDuplicates);
 el.duplicatesSelectExactBtn.addEventListener("click", selectExactCopiesForQuarantine);
 el.duplicatesSelectCurrentBtn.addEventListener("click", selectOnlyCurrentExactDuplicateGroup);
 el.duplicatesSelectVisibleBtn.addEventListener("click", selectFilteredExactDuplicateGroups);
@@ -10603,7 +10762,14 @@ el.duplicatesClearSelectionBtn.addEventListener("click", () => {
   renderDuplicates();
   renderDuplicatesPreview();
 });
+el.duplicatesClearReviewVisibleBtn?.addEventListener("click", () => {
+  state.duplicateReviewSelected.clear();
+  state.lastDuplicateReviewAnchor = null;
+  renderDuplicates();
+});
 if (el.conflictsClearListBtn) el.conflictsClearListBtn.addEventListener("click", clearConflictList);
+el.conflictsSelectVisibleMainBtn?.addEventListener("click", selectAllVisibleConflicts);
+el.conflictsClearReviewMainBtn?.addEventListener("click", clearConflictReviewSelection);
 el.conflictsSelectAllBtn.addEventListener("click", selectAllVisibleConflicts);
 // The primary action is filter-scoped. Selecting the complete scan remains a
 // separate backend/API concern and is never implicit from the visible button.

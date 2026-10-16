@@ -5007,8 +5007,8 @@ body.release-v1 .conflicts-results {
 
 /* Shared expandable result rows for Duplicates and Conflicts.  The collapsed
    state keeps the same compact geometry as the old virtualized rows; once a
-   row is opened it uses normal flow so several comparisons can remain open
-   without clipping or changing selection. */
+   row is opened it uses normal flow so its comparison can determine its own
+   height without clipping or changing selection. */
 .analysis-expandable-item {
   flex: 0 0 auto;
   border: 1px solid transparent;
@@ -5023,6 +5023,7 @@ body.release-v1 .conflicts-results {
 }
 .analysis-expandable-item:hover { border-color: rgba(var(--accent-rgb),.34); }
 .analysis-expandable-summary {
+  min-width: 0;
   min-height: 53px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -5066,6 +5067,8 @@ body.release-v1 .conflicts-results {
   cursor: pointer;
 }
 .analysis-expandable-details {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: grid;
   gap: 10px;
   padding: 0 12px 13px 48px;
@@ -5089,7 +5092,7 @@ body.release-v1 .conflicts-results {
 .analysis-inline-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .analysis-technical-details { border-top: 1px solid var(--winui-control-stroke, var(--border)); padding-top: 7px; }
 .analysis-technical-details summary { cursor: pointer; color: var(--muted); font-size: .76rem; }
-.analysis-technical-body { display: grid; gap: 4px; padding-top: 7px; max-height: 180px; overflow: auto; }
+.analysis-technical-body { display: grid; gap: 4px; padding-top: 7px; max-height: 180px; min-width: 0; overflow: auto; overflow-wrap: anywhere; }
 .analysis-technical-body code { overflow-wrap: anywhere; color: var(--muted); font-size: .68rem; }
 
 @media (max-width: 720px) {
@@ -5097,6 +5100,14 @@ body.release-v1 .conflicts-results {
   .analysis-expandable-summary .duplicate-kind,
   .analysis-expandable-summary .conflict-kind { display: none; }
   .analysis-expandable-details { padding-left: 12px; }
+}
+
+.loading-mode {
+  min-height: 1.1em;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: .74rem;
+  text-align: center;
 }
 
 
