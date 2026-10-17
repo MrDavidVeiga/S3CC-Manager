@@ -63,6 +63,16 @@ assert.match(
   /\.release-v1 \.lang-toggle-btn\s*\{[^}]*width:76px;[^}]*min-width:76px;/s,
   "Manager language selector must use the compact Splitter width",
 );
+assert.match(
+  winui,
+  /\.release-v1 \.language-switcher\s*\{[^}]*font-size:14px;/s,
+  "Language label must use the shared top-control text size",
+);
+assert.match(
+  winui,
+  /\.release-v1 \.lang-toggle-btn,\.theme-button\s*\{[^}]*font-size:14px;/s,
+  "Language codes and theme text must use the shared top-control text size",
+);
 
 assert.match(index, /id="language-code"/);
 assert.match(index, /data-i18n-aria-label="languageSelector"/);
