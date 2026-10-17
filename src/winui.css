@@ -143,7 +143,9 @@ body.release-v1 {
   background:var(--winui-control-fill); color:var(--winui-text-primary); font-weight:600;
 }
 .release-v1 .lang-toggle-btn:hover,.theme-button:hover { background:var(--winui-control-fill-hover); }
-.release-v1 .lang-toggle-btn { min-width:108px; white-space:nowrap; }
+.release-v1 .lang-toggle-btn {
+  width:76px; min-width:76px; white-space:nowrap; box-sizing:border-box;
+}
 .release-v1 #language-code { white-space:nowrap; }
 .release-v1 .lang-menu,.theme-flyout {
   border:1px solid var(--winui-control-stroke); border-radius:var(--winui-overlay-radius);

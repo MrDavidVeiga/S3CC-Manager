@@ -58,6 +58,12 @@ const themeIds = [
   "winui-dark",
 ];
 
+assert.match(
+  winui,
+  /\.release-v1 \.lang-toggle-btn\s*\{[^}]*width:76px;[^}]*min-width:76px;/s,
+  "Manager language selector must use the compact Splitter width",
+);
+
 assert.match(index, /id="language-code"/);
 assert.match(index, /data-i18n-aria-label="languageSelector"/);
 for (const [key, value] of Object.entries(languageLabels)) {
@@ -87,7 +93,6 @@ assert.match(app, /preferences\.language/);
 assert.match(theme, /const VALID_THEMES = new Set\(\["system","veiga-light","veiga-dark","mean-girls","ea-app","winui-light","winui-dark"\]\)/);
 assert.match(theme, /localStorage\.setItem\(THEME_KEY,choice\)/);
 assert.match(theme, /option\.dataset\.theme===choice/);
-assert.match(winui, /\.release-v1 \.lang-toggle-btn \{ min-width:108px; white-space:nowrap; \}/);
 assert.match(winui, /#language-code \{ white-space:nowrap; \}/);
 
 // The nine required language/theme combinations are data-driven: each language
