@@ -43,9 +43,9 @@ const themeTranslations = {
 };
 
 const languageLabels = {
-  languageEnglish: "English",
-  languagePortuguese: "Português",
-  languageSpanish: "Español",
+  languageEnglish: "EN",
+  languagePortuguese: "PT",
+  languageSpanish: "ES",
 };
 
 const themeIds = [

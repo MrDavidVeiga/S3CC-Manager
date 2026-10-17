@@ -6,7 +6,10 @@ use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, OnceLock,
+    },
     thread,
     time::{Instant, UNIX_EPOCH},
 };
@@ -543,38 +546,42 @@ fn decode_resource_fingerprints(
             .filter(|value| *value > 0);
         #[cfg(not(test))]
         let configured: Option<usize> = None;
-        configured.unwrap_or_else(|| {
-            thread::available_parallelism()
-                .map(|count| count.get())
-                .unwrap_or(2)
-                .div_ceil(2)
-                .clamp(1, 4)
-        })
-        .clamp(1, 4)
+        configured
+            .unwrap_or_else(|| {
+                thread::available_parallelism()
+                    .map(|count| count.get())
+                    .unwrap_or(2)
+                    .div_ceil(2)
+                    .clamp(1, 4)
+            })
+            .clamp(1, 4)
     };
     let worker_count = worker_limit.min(package.entries.len());
-    let chunk_size = package.entries.len().div_ceil(worker_count);
     let mut slots = vec![None; package.entries.len()];
     let mut first_error = None;
     let mut exclusive_us = 0u128;
+    let next_entry = AtomicUsize::new(0);
 
     thread::scope(|scope| {
         let mut workers = Vec::with_capacity(worker_count);
-        for (chunk_index, entries) in package.entries.chunks(chunk_size).enumerate() {
-            workers.push(
-                scope.spawn(move || -> Result<(Vec<(usize, CachedResource)>, u128), String> {
+        for _ in 0..worker_count {
+            workers.push(scope.spawn(
+                || -> Result<(Vec<(usize, CachedResource)>, u128), String> {
                     let worker_started = Instant::now();
                     let mut data_file = File::open(&package.path).map_err(|error| {
                         format!("Could not reopen {}: {error}", package.path.display())
                     })?;
-                    let start = chunk_index * chunk_size;
-                    let mut results = Vec::with_capacity(entries.len());
-                    for (offset, entry) in entries.iter().enumerate() {
+                    let mut results = Vec::new();
+                    loop {
+                        let index = next_entry.fetch_add(1, Ordering::Relaxed);
+                        let Some(entry) = package.entries.get(index) else {
+                            break;
+                        };
                         let (data, payload_digest) = package
                             .data_from_file_with_digest(&mut data_file, entry)
                             .map_err(|error| format!("{}: {error}", entry.key_string()))?;
                         results.push((
-                            start + offset,
+                            index,
                             CachedResource {
                                 type_id: entry.type_id,
                                 group: entry.group,
@@ -588,8 +595,8 @@ fn decode_resource_fingerprints(
                         ));
                     }
                     Ok((results, worker_started.elapsed().as_micros()))
-                }),
-            );
+                },
+            ));
         }
 
         for worker in workers {

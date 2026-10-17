@@ -87,7 +87,14 @@ pub struct Package {
     pub major: u32,
     pub minor: u32,
     pub entries: Vec<ResourceEntry>,
-    payload_cache: Arc<Mutex<std::collections::HashMap<(u32, u32, u64), Vec<u8>>>>,
+    payload_cache: Arc<Mutex<std::collections::HashMap<(u32, u32, u64), CachedPayload>>>,
+    data_file: Arc<Mutex<File>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedPayload {
+    data: Vec<u8>,
+    digest: [u8; 32],
 }
 
 fn payload_is_reused_by_scanner(type_id: u32) -> bool {
@@ -154,6 +161,7 @@ impl Package {
                 minor,
                 entries: Vec::new(),
                 payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                data_file: Arc::new(Mutex::new(file)),
             });
         }
         if index_position == 0 {
@@ -239,11 +247,15 @@ impl Package {
             minor,
             entries,
             payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_file: Arc::new(Mutex::new(file)),
         })
     }
 
     pub fn raw_data(&self, entry: &ResourceEntry) -> Result<Vec<u8>> {
-        let mut file = File::open(&self.path)?;
+        let mut file = self
+            .data_file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("package data file lock poisoned"))?;
         self.raw_data_from_file(&mut file, entry)
     }
 
@@ -255,7 +267,10 @@ impl Package {
     }
 
     pub fn data(&self, entry: &ResourceEntry) -> Result<Vec<u8>> {
-        let mut file = File::open(&self.path)?;
+        let mut file = self
+            .data_file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("package data file lock poisoned"))?;
         self.data_from_file(&mut file, entry)
     }
 
@@ -285,7 +300,7 @@ impl Package {
                 .get(&cache_key)
                 .cloned()
             {
-                return Ok((cached.clone(), sha2::Sha256::digest(&cached).into()));
+                return Ok((cached.data, cached.digest));
             }
         }
         let raw = self.raw_data_from_file(file, entry)?;
@@ -299,7 +314,8 @@ impl Package {
                         entry.mem_size
                     );
                 }
-                Ok((raw.clone(), sha2::Sha256::digest(&raw).into()))
+                let digest = sha2::Sha256::digest(&raw).into();
+                Ok((raw, digest))
             }
             0xFFFF => compression::uncompress_stream_with_digest(
                 &raw,
@@ -316,7 +332,13 @@ impl Package {
             self.payload_cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("package payload cache poisoned"))?
-                .insert(cache_key, data.clone());
+                .insert(
+                    cache_key,
+                    CachedPayload {
+                        data: data.clone(),
+                        digest,
+                    },
+                );
         }
         Ok((data, digest))
     }
