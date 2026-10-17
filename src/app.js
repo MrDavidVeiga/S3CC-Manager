@@ -2520,6 +2520,13 @@ function renderLanguage() {
     element.placeholder = t(element.dataset.i18nPlaceholder);
   }
   if (el.languageCode) el.languageCode.textContent = state.language.toUpperCase();
+  // Only other languages are selectable. The active language stays bold in the button.
+  for (const option of el.languageMenuItems) {
+    const isActive = option.dataset.lang === state.language;
+    option.hidden = isActive;
+    option.classList.toggle("hidden", isActive);
+    option.setAttribute("aria-hidden", String(isActive));
+  }
   el.languageButton?.setAttribute(
     "aria-expanded",
     String(!el.languageMenu?.classList.contains("hidden"))
