@@ -1338,7 +1338,10 @@ fn fallback_relative_path(
     source_relative: &str,
     source_hash: &str,
 ) -> Result<(PathBuf, Vec<String>), String> {
-    let source_relative = Path::new(source_relative);
+    // Accept Windows-style separators on every supported host; fallback paths
+    // are persisted as textual relative paths and may originate on Windows.
+    let source_relative_normalized = source_relative.replace('\\', "/");
+    let source_relative = Path::new(&source_relative_normalized);
     if source_uses_overrides(root, &root.join(source_relative)) {
         // An uncategorized/colliding Override must never be redirected into
         // Packages or an unsupported Overrides subfolder.
@@ -4820,7 +4823,7 @@ mod tests {
         assert!(path.starts_with("Packages"));
         assert_eq!(
             path,
-            PathBuf::from("Packages\\#Sem Categoria\\PenisButtBones.package")
+            PathBuf::from("Packages").join("#Sem Categoria").join("PenisButtBones.package")
         );
         assert!(!path.to_string_lossy().contains("Pns (TS3)"));
         assert!(!path.to_string_lossy().contains("Rigged"));
@@ -4834,7 +4837,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             override_path,
-            PathBuf::from("Overrides\\Overhaul\\unknown.package")
+            PathBuf::from("Overrides").join("Overhaul").join("unknown.package")
         );
         assert!(override_parts.is_empty());
         std::fs::remove_dir_all(base).unwrap();
@@ -5021,10 +5024,12 @@ mod tests {
         .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].plan_status, "ready_duplicate_quarantine_migration");
-        assert_eq!(
-            Path::new(items[0].destination_relative_path.as_deref().unwrap()).parent(),
-            Some(Path::new("#Duplicados"))
-        );
+        // Planner stores portable backslash-separated relative keys. Do not
+        // parse such persisted keys with host-specific Path::parent().
+        let destination = items[0].destination_relative_path.as_deref().unwrap();
+        let normalized = destination.replace('/', "\\");
+        let flat_file = normalized.strip_prefix("#Duplicados\\").unwrap();
+        assert!(!flat_file.contains('\\'), "quarantine must remain flat: {destination}");
         assert!(!items[0]
             .destination_relative_path
             .as_deref()
