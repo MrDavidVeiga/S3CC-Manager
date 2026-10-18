@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: manager-beta2-eight-targets-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
