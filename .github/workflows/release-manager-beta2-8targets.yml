@@ -1,0 +1,189 @@
+name: "Manager Beta 2 - eight target release"
+
+on:
+  push:
+    branches:
+      - release/manager-beta2-eight-targets-20261017
+    paths:
+      - ".github/workflows/release-manager-beta2-8targets.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: manager-beta2-eight-targets-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: "${{ matrix.slug }}"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, target: x86_64-pc-windows-msvc, slug: Windows_x64, platform: windows, bundling: --no-bundle }
+          - { runner: windows-2022, target: i686-pc-windows-msvc, slug: Windows_x86, platform: windows, bundling: --no-bundle }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, slug: Windows_ARM64, platform: windows, bundling: --no-bundle }
+          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu, slug: Linux_x64, platform: linux, bundling: --no-bundle }
+          - { runner: ubuntu-22.04, target: i686-unknown-linux-gnu, slug: Linux_x86, platform: linux-x86, bundling: --no-bundle }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, slug: Linux_ARM64, platform: linux, bundling: --no-bundle }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, slug: macOS_Intel, platform: macos, bundling: --bundles app }
+          - { runner: macos-15, target: aarch64-apple-darwin, slug: macOS_Apple_Silicon, platform: macos, bundling: --bundles app }
+
+    steps:
+      - name: Checkout approved Beta 2 snapshot
+        uses: actions/checkout@v4
+
+      - name: Install Linux Tauri dependencies
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config file zip unzip curl wget libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+
+      - name: Install Linux 32-bit cross compilation dependencies
+        if: matrix.platform == 'linux-x86'
+        shell: bash
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib pkg-config file zip unzip curl wget libssl-dev:i386 libgtk-3-dev:i386 libwebkit2gtk-4.1-dev:i386 libayatana-appindicator3-dev:i386 librsvg2-dev:i386 libxdo-dev:i386
+          echo 'PKG_CONFIG_ALLOW_CROSS=1' >> "$GITHUB_ENV"
+          echo 'PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=gcc' >> "$GITHUB_ENV"
+          echo 'RUSTFLAGS=-C link-arg=-m32' >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          key: ${{ matrix.slug }}
+
+      - name: Install Node.js packages
+        run: npm install
+
+      - name: Validate Beta 2 frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check src/app.js
+          node scripts/test-beta2-interface-final.mjs
+          node scripts/test-language-theme-ui.mjs
+          npm run build
+
+      - name: Validate Rust library on host
+        if: matrix.platform != 'linux-x86'
+        shell: bash
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Compile for exact target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+          npm run tauri build -- --target ${{ matrix.target }} ${{ matrix.bundling }}
+
+      - name: Package Windows portable binary
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binary = "src-tauri/target/${{ matrix.target }}/release/s3cc-organizer.exe"
+          if (-not (Test-Path $binary)) { throw "Expected executable missing: $binary" }
+          New-Item -ItemType Directory -Force -Path stage,out | Out-Null
+          Copy-Item $binary "stage/VeigasS3CCManager.exe"
+          Copy-Item "README.md" "stage/README.md"
+          Copy-Item "docs/RELEASE-NOTES-v1.0.0-BETA2.md" "stage/CHANGELOG.md"
+          $zip = "VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}.zip"
+          Compress-Archive -Path "stage/*" -DestinationPath "out/$zip" -Force
+          $hash = (Get-FileHash "out/$zip" -Algorithm SHA256).Hash
+          "$hash  $zip" | Out-File -FilePath "out/VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}_SHA256.txt" -Encoding ascii
+
+      - name: Package Linux portable binary
+        if: matrix.platform == 'linux' || matrix.platform == 'linux-x86'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="src-tauri/target/${{ matrix.target }}/release/s3cc-organizer"
+          test -f "$binary"
+          mkdir -p stage out
+          cp "$binary" stage/VeigasS3CCManager
+          chmod +x stage/VeigasS3CCManager
+          cp README.md stage/README.md
+          cp docs/RELEASE-NOTES-v1.0.0-BETA2.md stage/CHANGELOG.md
+          zipname="VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}.zip"
+          (cd stage && zip -q -r "../out/$zipname" .)
+          (cd out && sha256sum "$zipname" > "VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}_SHA256.txt")
+          unzip -t "out/$zipname"
+
+      - name: Package macOS application bundle
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find "src-tauri/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -d "$app"
+          mkdir -p stage out
+          ditto "$app" "stage/$(basename "$app")"
+          cp README.md stage/README.md
+          cp docs/RELEASE-NOTES-v1.0.0-BETA2.md stage/CHANGELOG.md
+          zipname="VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent stage "out/$zipname"
+          (cd out && shasum -a 256 "$zipname" > "VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}_SHA256.txt")
+          unzip -t "out/$zipname"
+
+      - name: Upload validated portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: S3CC-Manager-Beta2-${{ matrix.slug }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish only if all 8 builds pass
+    needs: build
+    runs-on: ubuntu-22.04
+    if: success()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all eight platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+      - name: Verify eight ZIP files and checksum files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find release-assets -name '*.zip' -type f | wc -l)" -eq 8
+          test "$(find release-assets -name '*_SHA256.txt' -type f | wc -l)" -eq 8
+          while IFS= read -r dir; do
+            (cd "$dir" && sha256sum -c -- *_SHA256.txt)
+          done < <(find release-assets -mindepth 1 -maxdepth 1 -type d | sort)
+      - name: Publish separate updated Beta 2 prerelease without modifying the historical tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v1.0.0-beta.2-winui3-8targets"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to overwrite a prior release."
+            exit 1
+          fi
+          shopt -s globstar nullglob
+          assets=(release-assets/**/*.zip release-assets/**/*_SHA256.txt)
+          test "${#assets[@]}" -eq 16
+          gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" --title "Veiga's S3CC Manager v1.0.0 Beta 2 (8 targets)" --notes-file docs/RELEASE-NOTES-v1.0.0-BETA2.md --prerelease
