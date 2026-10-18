@@ -2415,7 +2415,8 @@ mod tests {
                     "nested duplicate source must be executable once"
                 );
                 assert!(plan.items.iter().any(|item| {
-                    item.source_path.ends_with("Other\\Same.package")
+                    normalized_path_key(&packages, Path::new(&item.source_path))
+                        .ends_with("other\\same.package")
                         && item.plan_status == "collision_different_content"
                 }));
                 assert!(plan.items.iter().any(|item| {
