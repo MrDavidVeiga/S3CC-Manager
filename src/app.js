@@ -3511,10 +3511,17 @@ function renderLanguage() {
     es: t("languageSpanish"),
   };
   if (el.languageCode) {
-    el.languageCode.textContent = languageLabels[state.language] || languageLabels.en;
+    el.languageCode.textContent = state.language.toUpperCase();
+    el.languageCode.setAttribute("aria-label", languageLabels[state.language] || languageLabels.en);
   }
   for (const option of el.languageMenuItems) {
-    option.setAttribute("aria-selected", String(option.dataset.lang === state.language));
+    const isActive = option.dataset.lang === state.language;
+    option.hidden = isActive;
+    option.classList.toggle("hidden", isActive);
+    option.setAttribute("aria-hidden", String(isActive));
+    option.setAttribute("aria-selected", String(isActive));
+    option.title = languageLabels[option.dataset.lang] || option.dataset.lang.toUpperCase();
+    option.setAttribute("aria-label", option.title);
   }
   el.languageButton?.setAttribute(
     "aria-expanded",
