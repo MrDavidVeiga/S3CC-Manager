@@ -7,7 +7,6 @@ on:
     branches:
       - release/manager-beta2-eight-targets-20261017
     paths:
-      - ".github/workflows/release-manager-beta2-8targets.yml"
       - "src-tauri/src/**"
       - "src/**"
       - "index.html"
@@ -136,7 +135,7 @@ jobs:
           $zip = "VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}.zip"
           Compress-Archive -Path "stage/*" -DestinationPath "out/$zip" -Force
           $hash = (Get-FileHash "out/$zip" -Algorithm SHA256).Hash
-          "$hash  $zip" | Out-File -FilePath "out/VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}_SHA256.txt" -Encoding ascii
+          [System.IO.File]::WriteAllText("out/VeigasS3CCManager_v1.0.0_Beta2_${{ matrix.slug }}_SHA256.txt", "$hash  $zip`n", [System.Text.Encoding]::ASCII)
 
       - name: Package Linux portable binary
         if: matrix.platform == 'linux' || matrix.platform == 'linux-x86'
@@ -179,6 +178,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Restore Linux i386 build directory ownership for Rust cache
+        if: always() && matrix.platform == 'linux-x86'
+        shell: bash
+        run: |
+          if [ -d src-tauri/target ]; then
+            sudo chown -R "$(id -u):$(id -g)" src-tauri/target
+          fi
+
   publish:
     name: Publish only if all 8 builds pass
     needs: build
@@ -197,7 +204,10 @@ jobs:
           test "$(find release-assets -name '*.zip' -type f | wc -l)" -eq 8
           test "$(find release-assets -name '*_SHA256.txt' -type f | wc -l)" -eq 8
           while IFS= read -r dir; do
-            (cd "$dir" && sha256sum -c -- *_SHA256.txt)
+            (cd "$dir" && for checksum in *_SHA256.txt; do
+              sed -i 's/\r$//' "$checksum"
+              sha256sum -c -- "$checksum"
+            done)
           done < <(find release-assets -mindepth 1 -maxdepth 1 -type d | sort)
       - name: Publish separate updated Beta 2 prerelease without modifying the historical tag
         env:
