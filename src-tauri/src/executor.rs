@@ -237,6 +237,26 @@ fn package_extension(path: &Path) -> bool {
         || lower.ends_with(".package.duplicated")
 }
 
+fn is_stable_review_or_quarantine_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy();
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "#sem categoria"
+                | "sem categoria"
+                | "#not categorized"
+                | "not categorized"
+                | "#sin categoría"
+                | "sin categoría"
+                | "#duplicados"
+                | "#duplicates"
+                | "previews de ccs"
+                | "cc previews"
+                | "vistas previas de cc"
+        )
+    })
+}
+
 fn snapshot_extension(path: &Path) -> bool {
     if package_extension(path) {
         return true;
@@ -814,6 +834,21 @@ fn remaining_legacy_details(
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
     plan_items: &[PlanItem],
 ) -> Vec<LegacyRemainder> {
+    remaining_legacy_details_with_context(root, moved_pairs, plan_items, &[])
+}
+
+/// Reconcile the physical tree after an organization independently of which
+/// folders were selected for that transaction. The old implementation only
+/// walked parents of moved/blocked plan items, so cleanup-only runs could
+/// report zero legacy files while an older unselected folder still contained
+/// content. This inventory is directory/file-only: it never opens or hashes
+/// DBPF files.
+fn remaining_legacy_details_with_context(
+    root: &Path,
+    moved_pairs: &[(PathBuf, PathBuf, String, u64)],
+    plan_items: &[PlanItem],
+    protected_relative_directories: &[String],
+) -> Vec<LegacyRemainder> {
     let moved_destinations = moved_pairs
         .iter()
         .filter_map(|(_, destination, _, _)| destination.strip_prefix(root).ok())
@@ -823,37 +858,40 @@ fn remaining_legacy_details(
                 .to_ascii_lowercase()
         })
         .collect::<BTreeSet<_>>();
-    let mut folders = BTreeSet::new();
-    for (source, _, _, _) in moved_pairs {
-        if let Some(parent) = source.parent() {
-            if parent.starts_with(root) && parent != root {
-                folders.insert(parent.to_path_buf());
-            }
-        }
-    }
-
-    for item in plan_items {
-        let source = PathBuf::from(&item.source_path);
-        let Some(parent) = source.parent() else {
-            continue;
-        };
-        if !source.is_file() || !parent.starts_with(root) || parent == root {
-            continue;
-        }
-        let source_relative = item.source_relative_path.replace('/', "\\");
-        let destination_same = item
-            .destination_relative_path
-            .as_ref()
-            .is_some_and(|destination| same_relative_path(&source_relative, destination));
-        if !destination_same {
-            folders.insert(parent.to_path_buf());
-        }
-    }
+    let package_root = if crate::resource_cfg::is_mods_layout_root(root) {
+        root.join("Packages")
+    } else {
+        root.to_path_buf()
+    };
+    let inventory_roots = if package_root.is_dir() {
+        vec![package_root]
+    } else {
+        vec![root.to_path_buf()]
+    };
+    let is_under_relative_directory = |path: &Path, relative: &str| {
+        let candidate = normalized_path_key(root, path);
+        let directory = normalized_path_key(root, Path::new(relative));
+        candidate == directory || candidate.starts_with(&format!("{directory}\\"))
+    };
+    let is_canonical_or_stable = |path: &Path| {
+        is_stable_review_or_quarantine_path(path)
+            || protected_relative_directories
+                .iter()
+                .any(|relative| is_under_relative_directory(path, relative))
+    };
+    let item_by_source = plan_items
+        .iter()
+        .map(|item| (normalized_path_key(root, Path::new(&item.source_path)), item))
+        .collect::<HashMap<_, _>>();
+    let moved_sources = moved_pairs
+        .iter()
+        .map(|(source, _, _, _)| normalized_path_key(root, source))
+        .collect::<BTreeSet<_>>();
 
     let mut remaining = BTreeSet::new();
     let mut details = Vec::new();
-    for folder in folders {
-        for entry in WalkDir::new(folder)
+    for inventory_root in inventory_roots {
+        for entry in WalkDir::new(inventory_root)
             .follow_links(false)
             .into_iter()
             .flatten()
@@ -861,19 +899,36 @@ fn remaining_legacy_details(
             if entry.file_type().is_file() {
                 if let Ok(relative) = entry.path().strip_prefix(root) {
                     let relative = relative.to_string_lossy().replace('/', "\\");
+                    let path = entry.path();
+                    if crate::resource_cfg::is_mods_layout_root(root)
+                        && relative
+                            .split('\\')
+                            .next()
+                            .is_some_and(|part| part.eq_ignore_ascii_case("Overrides"))
+                    {
+                        continue;
+                    }
                     // A destination can legitimately remain below the same
                     // ancestor as its old source (for example
                     // Packages\\Substituições -> Packages\\Substituições\\CAS).
                     // It is current content, not a legacy remainder.
-                    if moved_destinations.contains(&relative.to_ascii_lowercase()) {
+                    if moved_destinations.contains(&relative.to_ascii_lowercase())
+                        || is_canonical_or_stable(path)
+                        || moved_sources.contains(&normalized_path_key(root, path))
+                    {
                         continue;
                     }
                     if !remaining.insert(relative.clone()) {
                         continue;
                     }
-                    let plan = plan_items
-                        .iter()
-                        .find(|item| same_relative_path(&item.source_relative_path, &relative));
+                    let plan = item_by_source
+                        .get(&normalized_path_key(root, path))
+                        .copied()
+                        .or_else(|| {
+                            plan_items.iter().find(|item| {
+                                same_relative_path(&item.source_relative_path, &relative)
+                            })
+                        });
                     let (reason, plan_status, warning) = if let Some(item) = plan {
                         (
                             remaining_reason(item),
@@ -1053,7 +1108,12 @@ fn execute_organization_plan_core(
             );
         timings.cleanup_ms = cleanup_started.elapsed().as_millis();
         timings.total_ms = total_started.elapsed().as_millis();
-        let remaining_legacy_details = remaining_legacy_details(&root, &[], &plan.items);
+        let remaining_legacy_details = remaining_legacy_details_with_context(
+            &root,
+            &[],
+            &plan.items,
+            &plan.protected_empty_directories,
+        );
         let remaining_legacy_files = remaining_legacy_details.len();
         let remaining_legacy_examples = remaining_legacy_details
             .iter()
@@ -1395,7 +1455,12 @@ fn execute_organization_plan_core(
         );
     timings.cleanup_ms = cleanup_started.elapsed().as_millis();
 
-    let remaining_legacy_details = remaining_legacy_details(&root, &moved_pairs, &plan.items);
+    let remaining_legacy_details = remaining_legacy_details_with_context(
+        &root,
+        &moved_pairs,
+        &plan.items,
+        &plan.protected_empty_directories,
+    );
     let remaining_legacy_files = remaining_legacy_details.len();
     let remaining_legacy_examples = remaining_legacy_details
         .iter()
@@ -1743,6 +1808,39 @@ mod tests {
             "destination must not be counted as legacy content: {details:?}"
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn residual_inventory_reports_unselected_legacy_files_but_not_canonical_review_content() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-residual-inventory-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let legacy = root.join("#4 Hair").join("Female").join("Adult");
+        let canonical = root.join("Cabelos e Pêlos").join("Pelos Corporais");
+        let review = root.join("#Sem Categoria");
+        let review_alias = root.join("Sem Categoria");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&canonical).unwrap();
+        fs::create_dir_all(&review).unwrap();
+        fs::create_dir_all(&review_alias).unwrap();
+        fs::write(legacy.join("unselected.package"), b"legacy").unwrap();
+        fs::write(canonical.join("keeper.package"), b"canonical").unwrap();
+        fs::write(review.join("unknown.package"), b"review").unwrap();
+        fs::write(review_alias.join("alias.package"), b"review alias").unwrap();
+
+        let details = remaining_legacy_details_with_context(
+            &root,
+            &[],
+            &[],
+            &["Cabelos e Pêlos".to_string()],
+        );
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].relative_path, "#4 Hair\\Female\\Adult\\unselected.package");
+        assert_eq!(details[0].reason, "not_selected");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

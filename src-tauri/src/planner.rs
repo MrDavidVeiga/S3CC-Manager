@@ -3026,8 +3026,11 @@ fn is_stable_review_or_quarantine_path(path: &Path) -> bool {
         matches!(
             value.to_ascii_lowercase().as_str(),
             "#sem categoria"
+                | "sem categoria"
                 | "#not categorized"
+                | "not categorized"
                 | "#sin categoría"
+                | "sin categoría"
                 | "#duplicados"
                 | "#duplicates"
                 | "previews de ccs"
@@ -6799,17 +6802,23 @@ mod tests {
                 .as_nanos()
         ));
         let stable = base.join("#Sem Categoria").join("Arquivos Auxiliares");
+        let stable_alias = base.join("Sem Categoria").join("Arquivos Auxiliares");
         let legacy = base.join("Jonas");
         std::fs::create_dir_all(&stable).unwrap();
+        std::fs::create_dir_all(&stable_alias).unwrap();
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(stable.join("Jonas_Scott.sim"), b"stable").unwrap();
+        std::fs::write(stable_alias.join("alias.sim"), b"stable alias").unwrap();
         std::fs::write(legacy.join("pending.txt"), b"pending").unwrap();
 
         let stable_count =
             projected_remaining_legacy_files(&HashSet::new(), &[stable.clone()], &[]);
+        let stable_alias_count =
+            projected_remaining_legacy_files(&HashSet::new(), &[stable_alias.clone()], &[]);
         let legacy_count =
             projected_remaining_legacy_files(&HashSet::new(), &[legacy.clone()], &[]);
         assert_eq!(stable_count, 0);
+        assert_eq!(stable_alias_count, 0);
         assert_eq!(legacy_count, 1);
         std::fs::remove_dir_all(base).unwrap();
     }
