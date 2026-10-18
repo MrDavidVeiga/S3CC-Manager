@@ -87,7 +87,9 @@ jobs:
       - name: Validate Rust library on host
         if: matrix.platform != 'linux-x86'
         shell: bash
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        # Integration tests share the process-wide operation registry. Run them
+        # sequentially to avoid unrelated tests racing on `structure_write`.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
 
       - name: Compile for exact target
         if: matrix.platform != 'linux-x86'
