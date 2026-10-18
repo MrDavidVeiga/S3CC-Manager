@@ -43,17 +43,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config file zip unzip curl wget libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 
-      - name: Install Linux 32-bit cross compilation dependencies
+      - name: Prepare Linux i386 build environment
         if: matrix.platform == 'linux-x86'
         shell: bash
         run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib pkg-config file zip unzip curl wget libssl-dev:i386 libgtk-3-dev:i386 libwebkit2gtk-4.1-dev:i386 libayatana-appindicator3-dev:i386 librsvg2-dev:i386 libxdo-dev:i386
-          echo 'PKG_CONFIG_ALLOW_CROSS=1' >> "$GITHUB_ENV"
-          echo 'PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig' >> "$GITHUB_ENV"
-          echo 'CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=gcc' >> "$GITHUB_ENV"
-          echo 'RUSTFLAGS=-C link-arg=-m32' >> "$GITHUB_ENV"
+          docker pull i386/debian:bookworm
+          mkdir -p out
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -89,11 +84,32 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Compile for exact target
+        if: matrix.platform != 'linux-x86'
         shell: bash
         run: |
           set -euo pipefail
           cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
           npm run tauri build -- --target ${{ matrix.target }} ${{ matrix.bundling }}
+
+      - name: Build native Linux i386 binary in Debian i386 container
+        if: matrix.platform == 'linux-x86'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/386 -v "$PWD:/workspace" -w /workspace i386/debian:bookworm bash -lc '
+            set -euo pipefail
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              ca-certificates curl git build-essential pkg-config libssl-dev \
+              libgtk-3-dev libwebkit2gtk-4.1-dev \
+              libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            rustup target add i686-unknown-linux-gnu
+            cargo check --manifest-path src-tauri/Cargo.toml --target i686-unknown-linux-gnu
+            cargo build --manifest-path src-tauri/Cargo.toml --release --target i686-unknown-linux-gnu --bin s3cc-organizer
+            file src-tauri/target/i686-unknown-linux-gnu/release/s3cc-organizer
+          '
 
       - name: Package Windows portable binary
         if: matrix.platform == 'windows'
