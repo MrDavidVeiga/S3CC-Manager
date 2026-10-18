@@ -1,5 +1,7 @@
 name: "Manager Beta 2 - eight target release"
 
+# Release candidate: Beta 1 comparison notes; build and verify all eight targets.
+
 on:
   push:
     branches:
