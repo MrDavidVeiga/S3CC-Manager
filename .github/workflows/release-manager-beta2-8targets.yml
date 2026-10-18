@@ -211,10 +211,14 @@ jobs:
           done < <(find release-assets -mindepth 1 -maxdepth 1 -type d | sort)
       - name: Publish separate updated Beta 2 prerelease without modifying the historical tag
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.MANAGER_RELEASE_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::Configure the MANAGER_RELEASE_TOKEN Actions secret (Contents: write, Workflows: write) to publish Beta 2."
+            exit 1
+          fi
           tag="v1.0.0-beta.2-winui3-8targets"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists; refusing to overwrite a prior release."
