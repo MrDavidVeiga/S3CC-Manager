@@ -1,0 +1,86 @@
+name: "Publish validated Manager Beta 2 builds"
+
+# This one-time publish workflow reuses eight successful build artifacts from
+# run 39086093626; it does not rebuild or alter the approved Beta 2 snapshot.
+on:
+  push:
+    branches:
+      - release/manager-beta2-eight-targets-20261017
+    paths:
+      - ".github/workflows/publish-validated-manager-beta2.yml"
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: manager-beta2-validated-prerelease
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish eight existing validated targets
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout the source commit validated by all eight builds
+        uses: actions/checkout@v5
+        with:
+          ref: d8217b2da303ed2dd099d202b02b2971180b8081
+
+      - name: Verify provenance and success of all eight build jobs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source_sha="d8217b2da303ed2dd099d202b02b2971180b8081"
+          test "$(git rev-parse HEAD)" = "$source_sha"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/39086093626" --jq '.head_sha')" = "$source_sha"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/39086093626/jobs?per_page=100" --jq '[.jobs[] | {name, conclusion}]' > verified-jobs.json
+          for slug in Windows_x64 Windows_x86 Windows_ARM64 Linux_x64 Linux_x86 Linux_ARM64 macOS_Intel macOS_Apple_Silicon; do
+            test "$(jq --arg slug "$slug" '[.[] | select(.name == $slug and .conclusion == "success")] | length' verified-jobs.json)" -eq 1
+          done
+
+      - name: Download the eight existing GitHub Actions artifacts
+        uses: actions/download-artifact@v8
+        with:
+          run-id: 39086093626
+          github-token: ${{ github.token }}
+          path: release-assets
+
+      - name: Validate all eight archives against SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find release-assets -type f -name '*.zip' | wc -l)" -eq 8
+          test "$(find release-assets -type f -name '*_SHA256.txt' | wc -l)" -eq 8
+          for slug in Windows_x64 Windows_x86 Windows_ARM64 Linux_x64 Linux_x86 Linux_ARM64 macOS_Intel macOS_Apple_Silicon; do
+            dir="release-assets/S3CC-Manager-Beta2-$slug"
+            zip="VeigasS3CCManager_v1.0.0_Beta2_$slug.zip"
+            checksum="VeigasS3CCManager_v1.0.0_Beta2_${slug}_SHA256.txt"
+            test -s "$dir/$zip"
+            test -s "$dir/$checksum"
+            sed -i 's/\r$//' "$dir/$checksum"
+            (cd "$dir" && sha256sum -c -- "$checksum")
+            unzip -tqq "$dir/$zip"
+          done
+
+      - name: Publish the eight verified Beta 2 archives without overwriting historical releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v1.0.0-beta.2-winui3-8targets"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already has a release; refusing to overwrite it."
+            exit 1
+          fi
+          shopt -s globstar nullglob
+          assets=(release-assets/**/*.zip release-assets/**/*_SHA256.txt)
+          test "${#assets[@]}" -eq 16
+          gh release create "$tag" "${assets[@]}" \
+            --target d8217b2da303ed2dd099d202b02b2971180b8081 \
+            --title "Veiga's S3CC Manager v1.0.0 Beta 2 (8 targets)" \
+            --notes-file docs/RELEASE-NOTES-v1.0.0-BETA2.md \
+            --prerelease
