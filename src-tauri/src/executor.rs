@@ -2548,7 +2548,8 @@ mod tests {
                 );
                 assert!(idempotent_plan.items.iter().any(|item| {
                     item.plan_status == "collision_different_content"
-                        && item.source_path.ends_with("Other\\Same.package")
+                        && normalized_path_key(&packages, Path::new(&item.source_path))
+                            .ends_with("other\\same.package")
                 }));
 
                 let manifest = result.manifest_path.clone().expect("restore manifest");
