@@ -68,9 +68,13 @@ jobs:
       - name: Publish the eight verified Beta 2 archives without overwriting historical releases
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.MANAGER_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::Configure the MANAGER_RELEASE_TOKEN Actions secret (Contents: write, Workflows: write) to publish Beta 2."
+            exit 1
+          fi
           tag="v1.0.0-beta.2-winui3-8targets"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Tag $tag already has a release; refusing to overwrite it."
