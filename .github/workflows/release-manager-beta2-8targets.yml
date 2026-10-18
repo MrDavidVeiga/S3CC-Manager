@@ -6,6 +6,10 @@ on:
       - release/manager-beta2-eight-targets-20261017
     paths:
       - ".github/workflows/release-manager-beta2-8targets.yml"
+      - "src-tauri/src/**"
+      - "src/**"
+      - "index.html"
+      - "scripts/**"
   workflow_dispatch:
 
 permissions:
