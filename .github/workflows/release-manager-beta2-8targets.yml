@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout approved Beta 2 snapshot
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Linux Tauri dependencies
         if: matrix.platform == 'linux'
@@ -57,7 +57,7 @@ jobs:
           mkdir -p out
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -106,7 +106,7 @@ jobs:
             set -euo pipefail
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              ca-certificates curl git build-essential pkg-config libssl-dev \
+              ca-certificates curl git file build-essential pkg-config libssl-dev \
               libgtk-3-dev libwebkit2gtk-4.1-dev \
               libayatana-appindicator3-dev librsvg2-dev libxdo-dev
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-host i686-unknown-linux-gnu
@@ -114,7 +114,10 @@ jobs:
             rustup target add i686-unknown-linux-gnu
             cargo check --manifest-path src-tauri/Cargo.toml --target i686-unknown-linux-gnu
             cargo build --manifest-path src-tauri/Cargo.toml --release --target i686-unknown-linux-gnu --bin s3cc-organizer
-            file src-tauri/target/i686-unknown-linux-gnu/release/s3cc-organizer
+            bin=src-tauri/target/i686-unknown-linux-gnu/release/s3cc-organizer
+            test -s "$bin"
+            file "$bin"
+            file -b "$bin" | grep -q "ELF 32-bit"
           '
 
       - name: Package Windows portable binary
@@ -167,7 +170,7 @@ jobs:
           unzip -t "out/$zipname"
 
       - name: Upload validated portable build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: S3CC-Manager-Beta2-${{ matrix.slug }}
           path: out/*
@@ -180,9 +183,9 @@ jobs:
     runs-on: ubuntu-22.04
     if: success()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Download all eight platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
       - name: Verify eight ZIP files and checksum files
