@@ -15,12 +15,18 @@ use std::{
 };
 
 const CACHE_VERSION: u32 = 1;
+const IDENTITY_CACHE_VERSION: u32 = 1;
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02X}")).collect()
 }
 
 fn cache_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn identity_cache_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -32,6 +38,15 @@ fn cache_write_lock() -> &'static Mutex<()> {
 /// issue prevents writing the cache file.
 fn transient_root_caches() -> &'static Mutex<HashMap<String, FingerprintCache>> {
     static CACHES: OnceLock<Mutex<HashMap<String, FingerprintCache>>> = OnceLock::new();
+    CACHES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Planner identity records intentionally contain no DBPF resource payloads.
+/// A plan only needs a current whole-file SHA-256 to resolve exact duplicates;
+/// forcing it to build every resource fingerprint would repeat the expensive
+/// Duplicates/Conflicts work before those analyses were requested.
+fn transient_root_identity_caches() -> &'static Mutex<HashMap<String, IdentityCache>> {
+    static CACHES: OnceLock<Mutex<HashMap<String, IdentityCache>>> = OnceLock::new();
     CACHES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -103,6 +118,30 @@ pub struct CachedPackage {
 pub struct FingerprintCache {
     pub version: u32,
     pub entries: HashMap<String, CachedPackage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedIdentity {
+    pub path: String,
+    pub size: u64,
+    pub modified_ns: u128,
+    pub quick_fingerprint: String,
+    pub file_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityCache {
+    pub version: u32,
+    pub entries: HashMap<String, CachedIdentity>,
+}
+
+impl Default for IdentityCache {
+    fn default() -> Self {
+        Self {
+            version: IDENTITY_CACHE_VERSION,
+            entries: HashMap::new(),
+        }
+    }
 }
 
 impl Default for FingerprintCache {
@@ -242,10 +281,23 @@ pub fn analysis_snapshot_path(root: &Path) -> PathBuf {
     cache_path(root).with_file_name("analysis-snapshot-v1.json")
 }
 
+/// Small, dedicated cache for the Planner's exact-file identity checks.  It is
+/// separate from `FingerprintCache` so opening a plan does not create resource
+/// fingerprints or make the Duplicates/Conflicts analyses appear complete.
+pub fn identity_cache_path(root: &Path) -> PathBuf {
+    cache_path(root).with_file_name("identities-v1.json")
+}
+
 fn read_cache_file(path: &Path) -> Option<FingerprintCache> {
     let text = fs::read_to_string(path).ok()?;
     let cache = serde_json::from_str::<FingerprintCache>(&text).ok()?;
     (cache.version == CACHE_VERSION).then_some(cache)
+}
+
+fn read_identity_cache_file(path: &Path) -> Option<IdentityCache> {
+    let text = fs::read_to_string(path).ok()?;
+    let cache = serde_json::from_str::<IdentityCache>(&text).ok()?;
+    (cache.version == IDENTITY_CACHE_VERSION).then_some(cache)
 }
 
 pub fn load_cache(root: &Path) -> FingerprintCache {
@@ -269,6 +321,20 @@ pub fn load_cache(root: &Path) -> FingerprintCache {
         let _ = fs::remove_file(&legacy);
     }
 
+    cache
+}
+
+pub fn load_identity_cache(root: &Path) -> IdentityCache {
+    let key = root_cache_key(root);
+    if let Ok(caches) = transient_root_identity_caches().lock() {
+        if let Some(cache) = caches.get(&key) {
+            return cache.clone();
+        }
+    }
+    let cache = read_identity_cache_file(&identity_cache_path(root)).unwrap_or_default();
+    if let Ok(mut caches) = transient_root_identity_caches().lock() {
+        caches.insert(key, cache.clone());
+    }
     cache
 }
 
@@ -327,6 +393,66 @@ pub fn save_cache(root: &Path, cache: &FingerprintCache) -> Result<(), String> {
     }
 }
 
+/// Persist only the planner's bounded identity records.  This cache is a
+/// read-only optimization: executor preflight and every actual write still
+/// recalculate the full SHA-256 from disk.
+pub fn save_identity_cache(root: &Path, cache: &IdentityCache) -> Result<(), String> {
+    if let Ok(mut caches) = transient_root_identity_caches().lock() {
+        caches.insert(root_cache_key(root), cache.clone());
+    }
+    let _guard = identity_cache_write_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = identity_cache_path(root);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Identity cache path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Could not create identity-cache directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let temp = parent.join(".identities-v1.json.tmp");
+    let data = serde_json::to_vec(cache)
+        .map_err(|error| format!("Could not serialize identity cache: {error}"))?;
+    fs::write(&temp, data).map_err(|error| {
+        format!(
+            "Could not write identity cache temp {}: {error}",
+            temp.display()
+        )
+    })?;
+
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| {
+            format!(
+                "Could not replace identity cache {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    match fs::rename(&temp, &path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            fs::copy(&temp, &path).map_err(|error| {
+                format!(
+                    "Could not commit identity cache {} after rename failed ({rename_error}): {error}",
+                    path.display()
+                )
+            })?;
+            fs::remove_file(&temp).map_err(|error| {
+                format!(
+                    "Could not remove temporary identity cache {}: {error}",
+                    temp.display()
+                )
+            })?;
+            Ok(())
+        }
+    }
+}
+
 /// Rename cache keys after a verified same-volume file move. The resource
 /// index remains valid because the executor has already verified the source
 /// SHA-256 and `rename` does not alter package bytes. This is deliberately not
@@ -371,7 +497,110 @@ pub fn relocate_cached_entries(root: &Path, moves: &[(PathBuf, PathBuf)]) -> Res
     // transaction or force a DBPF rescan; the next successful cache write
     // will persist the same entries.
     let _ = save_cache(root, &cache);
+
+    // Planner identity entries describe the same immutable bytes.  Keep them
+    // aligned with an executor-verified rename so a follow-up plan can reuse
+    // the already-computed SHA-256 without ever treating the old path as
+    // current. A persistence failure is harmless here: the next preview will
+    // recompute the missing identity before it can be used.
+    let mut identities = load_identity_cache(root);
+    let mut identities_changed = false;
+    for (source, destination) in moves {
+        let source_key = move_path_key(source);
+        let matching_key = identities
+            .entries
+            .keys()
+            .find(|key| move_path_key(Path::new(key)) == source_key)
+            .cloned();
+        let Some(key) = matching_key else {
+            continue;
+        };
+        let mut identity = identities
+            .entries
+            .remove(&key)
+            .expect("identity key exists");
+        let destination_key = canonical_key(destination)?;
+        if identities.entries.contains_key(&destination_key) {
+            return Err(format!(
+                "Identity-cache destination collision after verified move: {}",
+                destination.display()
+            ));
+        }
+        let (size, modified_ns) = metadata_signature(destination)?;
+        identity.path = destination_key.clone();
+        identity.size = size;
+        identity.modified_ns = modified_ns;
+        identity.quick_fingerprint = quick_fingerprint(destination, size)?;
+        identities.entries.insert(destination_key, identity);
+        identities_changed = true;
+    }
+    if identities_changed {
+        let _ = save_identity_cache(root, &identities);
+    }
     Ok(())
+}
+
+/// Get a verified-for-display whole-file identity without opening the DBPF or
+/// decoding its resources. This is the Planner's fast path: exact duplicate
+/// planning needs the file SHA-256, whereas CASP/OBJD/FBLN fingerprinting is
+/// intentionally deferred to the dedicated analyses that use it.
+pub fn get_or_build_identity_with_metrics(
+    path: &Path,
+    cache: &mut IdentityCache,
+) -> Result<(CachedIdentity, CacheBuildMetrics), String> {
+    let total_started = Instant::now();
+    let key = canonical_key(path)?;
+    let (size, modified_ns) = metadata_signature(path)?;
+    let quick_started = Instant::now();
+    let quick = quick_fingerprint(path, size)?;
+    let quick_us = quick_started.elapsed().as_micros();
+
+    if let Some(existing) = cache.entries.get(&key) {
+        if existing.size == size
+            && existing.modified_ns == modified_ns
+            && existing.quick_fingerprint.eq_ignore_ascii_case(&quick)
+        {
+            return Ok((
+                existing.clone(),
+                CacheBuildMetrics {
+                    cache_hit: true,
+                    total_ms: total_started.elapsed().as_millis(),
+                    total_us: total_started.elapsed().as_micros(),
+                    quick_fingerprint_ms: quick_us / 1_000,
+                    quick_fingerprint_us: quick_us,
+                    integrity_verified: false,
+                    ..CacheBuildMetrics::default()
+                },
+            ));
+        }
+    }
+
+    let hash_started = Instant::now();
+    let (file_sha256, _) =
+        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let hash_us = hash_started.elapsed().as_micros();
+    let identity = CachedIdentity {
+        path: key.clone(),
+        size,
+        modified_ns,
+        quick_fingerprint: quick,
+        file_sha256,
+    };
+    cache.entries.insert(key, identity.clone());
+    Ok((
+        identity,
+        CacheBuildMetrics {
+            total_ms: total_started.elapsed().as_millis(),
+            total_us: total_started.elapsed().as_micros(),
+            hash_ms: hash_us / 1_000,
+            hash_us,
+            hash_exclusive_us: hash_us,
+            quick_fingerprint_ms: quick_us / 1_000,
+            quick_fingerprint_us: quick_us,
+            integrity_verified: true,
+            ..CacheBuildMetrics::default()
+        },
+    ))
 }
 
 pub fn get_or_build_with_metrics(
@@ -568,9 +797,6 @@ fn decode_resource_fingerprints(
             workers.push(scope.spawn(
                 || -> Result<(Vec<(usize, CachedResource)>, u128), String> {
                     let worker_started = Instant::now();
-                    let mut data_file = File::open(&package.path).map_err(|error| {
-                        format!("Could not reopen {}: {error}", package.path.display())
-                    })?;
                     let mut results = Vec::new();
                     loop {
                         let index = next_entry.fetch_add(1, Ordering::Relaxed);
@@ -578,7 +804,7 @@ fn decode_resource_fingerprints(
                             break;
                         };
                         let (data, payload_digest) = package
-                            .data_from_file_with_digest(&mut data_file, entry)
+                            .data_with_digest(entry)
                             .map_err(|error| format!("{}: {error}", entry.key_string()))?;
                         results.push((
                             index,
@@ -735,8 +961,6 @@ fn get_or_build_with_validation(
         Ok(package) => {
             let mut resources = Vec::with_capacity(package.entries.len());
             let mut parse_error = None;
-            let mut data_file = File::open(&package.path).ok();
-
             for (entry_index, entry) in package.entries.iter().enumerate() {
                 if entry_index % 1000 == 0 && package.entries.len() >= 1000 {
                     eprintln!(
@@ -746,10 +970,7 @@ fn get_or_build_with_validation(
                         package.entries.len()
                     );
                 }
-                let result = data_file
-                    .as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("could not reopen package data"))
-                    .and_then(|file| package.data_from_file_with_digest(file, entry));
+                let result = package.data_with_digest(entry);
                 match result {
                     Ok((data, payload_digest)) => resources.push(CachedResource {
                         type_id: entry.type_id,
@@ -882,11 +1103,19 @@ pub fn clear_cache(folder: String) -> Result<bool, String> {
         if let Ok(mut caches) = transient_root_caches().lock() {
             caches.remove(&root_cache_key(&root));
         }
+        if let Ok(mut caches) = transient_root_identity_caches().lock() {
+            caches.remove(&root_cache_key(&root));
+        }
         // The learned Fix/Override model is a separate persistent evidence store.
         // Clearing transient DBPF fingerprints must never remove or invalidate it;
         // it is independently rebuilt through fix_signatures commands.
         let mut removed = false;
-        for path in [cache_path(&root), legacy_cache_path(&root)] {
+        for path in [
+            cache_path(&root),
+            identity_cache_path(&root),
+            analysis_snapshot_path(&root),
+            legacy_cache_path(&root),
+        ] {
             if path.exists() {
                 fs::remove_file(&path).map_err(|error| {
                     format!("Could not remove cache {}: {error}", path.display())
@@ -989,6 +1218,55 @@ mod tests {
             "analysis_cache_changed hash_ms={} hash_us={} quick_fingerprint_ms={} quick_fingerprint_us={} total_ms={} total_us={}",
             second.hash_ms, second.hash_us, second.quick_fingerprint_ms, second.quick_fingerprint_us, second.total_ms, second.total_us
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn planner_identity_cache_reuses_hash_without_decoding_dbpf_resources() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-planner-identity-cache-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("identity-only.package");
+        write_empty_dbpf(&package, 0);
+        let mut identities = IdentityCache::default();
+
+        let (first_identity, first) =
+            get_or_build_identity_with_metrics(&package, &mut identities).unwrap();
+        assert!(!first.cache_hit);
+        assert!(first.integrity_verified);
+        assert!(first.hash_us > 0);
+        assert_eq!(first.dbpf_load_ms, 0);
+        assert_eq!(first.resource_decode_us, 0);
+
+        let (second_identity, second) =
+            get_or_build_identity_with_metrics(&package, &mut identities).unwrap();
+        assert!(second.cache_hit);
+        assert!(!second.integrity_verified);
+        assert_eq!(second.hash_us, 0);
+        assert_eq!(second.dbpf_load_ms, 0);
+        assert_eq!(second.resource_decode_us, 0);
+        assert_eq!(first_identity.file_sha256, second_identity.file_sha256);
+
+        // Same-size changes must invalidate the preview identity even if a
+        // caller reuses the prior timestamp in the cache record.
+        write_empty_dbpf(&package, 1);
+        let key = canonical_key(&package).unwrap();
+        let (size, modified_ns) = metadata_signature(&package).unwrap();
+        let entry = identities.entries.get_mut(&key).unwrap();
+        entry.size = size;
+        entry.modified_ns = modified_ns;
+        let (changed, third) =
+            get_or_build_identity_with_metrics(&package, &mut identities).unwrap();
+        assert!(!third.cache_hit);
+        assert_ne!(first_identity.file_sha256, changed.file_sha256);
+        assert_eq!(third.dbpf_load_ms, 0);
+        assert_eq!(third.resource_decode_us, 0);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

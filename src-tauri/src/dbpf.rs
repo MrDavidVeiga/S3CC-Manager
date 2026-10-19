@@ -9,6 +9,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
+
 const MAGIC_DBPF: u32 = 0x4650_4244;
 const INDEX_VERSION: u32 = 3;
 // A malformed DBPF can advertise an enormous decompressed size and otherwise
@@ -16,6 +21,32 @@ const INDEX_VERSION: u32 = 3;
 // Sims 3 resources are well below this limit; exceeding it is reported as a
 // parse error and never treated as an identity match.
 const MAX_RESOURCE_MEMORY: u32 = 64 * 1024 * 1024;
+
+/// Read a complete resource payload without sharing or changing a file cursor.
+///
+/// Scanner resource work is deliberately parallel for large merged packages.
+/// A positioned read keeps those workers on the handle already opened by
+/// `Package::load`, avoiding one reopen per worker while making concurrent
+/// seeks impossible. Windows and Unix expose this with different `FileExt`
+/// method names, but both guarantee that the ordinary stream position is left
+/// untouched.
+fn read_exact_at(file: &File, mut offset: u64, mut buffer: &mut [u8]) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        #[cfg(unix)]
+        let count = file.read_at(buffer, offset)?;
+        #[cfg(windows)]
+        let count = file.seek_read(buffer, offset)?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "resource payload ended before its declared size",
+            ));
+        }
+        offset = offset.saturating_add(count as u64);
+        buffer = &mut buffer[count..];
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct IndexRecord {
@@ -88,7 +119,7 @@ pub struct Package {
     pub minor: u32,
     pub entries: Vec<ResourceEntry>,
     payload_cache: Arc<Mutex<std::collections::HashMap<(u32, u32, u64), CachedPayload>>>,
-    data_file: Arc<Mutex<File>>,
+    data_file: Arc<File>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +192,7 @@ impl Package {
                 minor,
                 entries: Vec::new(),
                 payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                data_file: Arc::new(Mutex::new(file)),
+                data_file: Arc::new(file),
             });
         }
         if index_position == 0 {
@@ -247,41 +278,40 @@ impl Package {
             minor,
             entries,
             payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            data_file: Arc::new(Mutex::new(file)),
+            data_file: Arc::new(file),
         })
     }
 
     pub fn raw_data(&self, entry: &ResourceEntry) -> Result<Vec<u8>> {
-        let mut file = self
-            .data_file
-            .lock()
-            .map_err(|_| anyhow::anyhow!("package data file lock poisoned"))?;
-        self.raw_data_from_file(&mut file, entry)
+        self.raw_data_from_file(&self.data_file, entry)
     }
 
-    pub fn raw_data_from_file(&self, file: &mut File, entry: &ResourceEntry) -> Result<Vec<u8>> {
-        file.seek(SeekFrom::Start(entry.chunk_offset as u64))?;
+    pub fn raw_data_from_file(&self, file: &File, entry: &ResourceEntry) -> Result<Vec<u8>> {
         let mut data = vec![0u8; entry.file_size as usize];
-        file.read_exact(&mut data)?;
+        read_exact_at(file, entry.chunk_offset as u64, &mut data)?;
         Ok(data)
     }
 
     pub fn data(&self, entry: &ResourceEntry) -> Result<Vec<u8>> {
-        let mut file = self
-            .data_file
-            .lock()
-            .map_err(|_| anyhow::anyhow!("package data file lock poisoned"))?;
-        self.data_from_file(&mut file, entry)
+        self.data_with_digest(entry).map(|(data, _)| data)
     }
 
-    pub fn data_from_file(&self, file: &mut File, entry: &ResourceEntry) -> Result<Vec<u8>> {
+    /// Decode one resource from the package's existing positioned-read handle.
+    /// The returned digest is the decompressed payload identity used by the
+    /// resource cache; it is not a substitute for the full-file SHA-256 used
+    /// by mutating operations.
+    pub fn data_with_digest(&self, entry: &ResourceEntry) -> Result<(Vec<u8>, [u8; 32])> {
+        self.data_from_file_with_digest(&self.data_file, entry)
+    }
+
+    pub fn data_from_file(&self, file: &File, entry: &ResourceEntry) -> Result<Vec<u8>> {
         self.data_from_file_with_digest(file, entry)
             .map(|(data, _)| data)
     }
 
     pub fn data_from_file_with_digest(
         &self,
-        file: &mut File,
+        file: &File,
         entry: &ResourceEntry,
     ) -> Result<(Vec<u8>, [u8; 32])> {
         if entry.mem_size > MAX_RESOURCE_MEMORY {
@@ -347,6 +377,7 @@ impl Package {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Seek, SeekFrom, Write};
 
     #[test]
     fn index_record_field_mapping_covers_all_eight_fields() {
@@ -357,5 +388,32 @@ mod tests {
         for index in 0..8 {
             assert_eq!(record.field(index), (index as u32) + 10);
         }
+    }
+
+    #[test]
+    fn positioned_reads_do_not_move_the_shared_package_cursor() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "s3cc-positioned-read-{}-{unique}.bin",
+            std::process::id()
+        ));
+        let mut writer = File::create(&path).unwrap();
+        writer.write_all(b"0123456789").unwrap();
+        drop(writer);
+
+        let mut sequential = File::open(&path).unwrap();
+        sequential.seek(SeekFrom::Start(2)).unwrap();
+        let positioned = File::open(&path).unwrap();
+        let mut payload = [0u8; 3];
+        read_exact_at(&positioned, 6, &mut payload).unwrap();
+        assert_eq!(&payload, b"678");
+
+        let mut next = [0u8; 1];
+        sequential.read_exact(&mut next).unwrap();
+        assert_eq!(&next, b"2");
+        std::fs::remove_file(path).unwrap();
     }
 }

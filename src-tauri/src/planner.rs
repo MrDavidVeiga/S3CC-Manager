@@ -1,5 +1,8 @@
 use crate::{
-    cache::{get_or_build_analysis_with_metrics, load_cache, save_cache},
+    cache::{
+        get_or_build_identity_with_metrics, load_cache, load_identity_cache, save_identity_cache,
+        FingerprintCache, IdentityCache,
+    },
     i18n::AppLanguage,
     manifest::sha256_file,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
@@ -2588,6 +2591,9 @@ fn index_exact_duplicates(
     root: &Path,
     scan_items: &[ScanPackageItem],
     selected_hashes: &HashMap<PathBuf, String>,
+    selected_identity_fingerprints: &HashSet<(u64, String)>,
+    identities: &mut IdentityCache,
+    identities_changed: &mut bool,
 ) -> HashMap<String, Vec<String>> {
     let selected_sizes = selected_hashes
         .keys()
@@ -2596,7 +2602,6 @@ fn index_exact_duplicates(
     if selected_sizes.is_empty() {
         return HashMap::new();
     }
-    let cache = load_cache(root);
     let mut by_hash = HashMap::<String, Vec<String>>::new();
     let mut indexed_paths = HashSet::<PathBuf>::new();
     for item in scan_items {
@@ -2610,29 +2615,31 @@ fn index_exact_duplicates(
         let hash = if let Some(hash) = selected_hashes.get(&path) {
             hash.clone()
         } else {
-            // Reuse the same fingerprints the Duplicates analysis already
-            // recorded. Never trust a cached hash if size or mtime changed.
-            let cached_hash =
-                cache
-                    .entries
-                    .get(path.to_string_lossy().as_ref())
-                    .and_then(|cached| {
-                        let metadata = fs::metadata(&path).ok()?;
-                        let modified = metadata
-                            .modified()
-                            .ok()?
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .ok()?
-                            .as_nanos();
-                        (cached.size == metadata.len() && cached.modified_ns == modified)
-                            .then(|| cached.file_sha256.clone())
-                    });
-            match cached_hash {
-                Some(hash) => hash,
-                None => match sha256_file(&path) {
-                    Ok((hash, _)) => hash,
-                    Err(_) => continue,
-                },
+            // A full SHA-256 is authoritative, but is intentionally not the
+            // first comparison for every same-sized package in the library.
+            // Equal bytes necessarily have the same bounded fingerprint; only
+            // those candidates pay for the full-file confirmation below.
+            let Ok((size, _, quick)) = crate::cache::analysis_file_fingerprint(&path) else {
+                continue;
+            };
+            if !selected_identity_fingerprints
+                .iter()
+                .any(|(selected_size, selected_quick)| {
+                    *selected_size == size && selected_quick.eq_ignore_ascii_case(&quick)
+                })
+            {
+                continue;
+            }
+            // Exact duplicate planning requires the whole-file identity, but
+            // not every decompressed resource fingerprint. Reuse the bounded
+            // identity cache or calculate only this file SHA-256; the
+            // Duplicates/Conflicts resource work remains independent.
+            match get_or_build_identity_with_metrics(&path, identities) {
+                Ok((identity, metrics)) => {
+                    *identities_changed |= !metrics.cache_hit;
+                    identity.file_sha256
+                }
+                Err(_) => continue,
             }
         };
         by_hash
@@ -2640,37 +2647,40 @@ fn index_exact_duplicates(
             .or_default()
             .push(item.relative_path.clone());
     }
-    // The targeted scan may omit canonical peers in other roots. The
-    // persistent fingerprint cache remains valid evidence when the current
-    // size and modification timestamp match the file on disk.
-    for (raw_path, cached) in &cache.entries {
-        let Ok(path) = PathBuf::from(raw_path).canonicalize() else {
+    // A targeted scan can omit an already known canonical peer. Identity
+    // records retain only file hashes, not resource payloads, and are checked
+    // again with the bounded fingerprint before they influence this preview.
+    let identity_paths = identities
+        .entries
+        .values()
+        .filter(|identity| {
+            selected_sizes.contains(&identity.size)
+                && selected_identity_fingerprints.iter().any(|(selected_size, selected_quick)| {
+                    *selected_size == identity.size
+                        && selected_quick.eq_ignore_ascii_case(&identity.quick_fingerprint)
+                })
+        })
+        .map(|identity| PathBuf::from(&identity.path))
+        .collect::<Vec<_>>();
+    for raw_path in identity_paths {
+        let Ok(path) = raw_path.canonicalize() else {
             continue;
         };
         if indexed_paths.contains(&path)
             || !path_is_within_root(root, &path)
-            || !selected_sizes.contains(&cached.size)
         {
             continue;
         }
-        let Ok(metadata) = fs::metadata(&path) else {
+        let Ok((identity, metrics)) = get_or_build_identity_with_metrics(&path, identities) else {
             continue;
         };
-        let Ok(modified) = metadata.modified().and_then(|time| {
-            time.duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| std::io::Error::other(error.to_string()))
-        }) else {
-            continue;
-        };
-        if metadata.len() != cached.size || modified.as_nanos() != cached.modified_ns {
-            continue;
-        }
+        *identities_changed |= !metrics.cache_hit;
         let relative = path
             .strip_prefix(root)
             .map(relative_key)
             .unwrap_or_else(|_| relative_key(&path));
         by_hash
-            .entry(cached.file_sha256.to_ascii_uppercase())
+            .entry(identity.file_sha256.to_ascii_uppercase())
             .or_default()
             .push(relative);
     }
@@ -2721,11 +2731,10 @@ fn detect_merged_resource_supersets(
 // morph and a strictly larger package. Data comes from the valid DBPF cache;
 // missing or stale cache entries never trigger a move/block.
 fn index_suspected_merged_sliders(
-    root: &Path,
     scan_items: &[ScanPackageItem],
+    cache: &FingerprintCache,
 ) -> HashMap<String, Vec<String>> {
     type Indexed = (String, BTreeSet<String>, bool);
-    let cache = load_cache(root);
     let mut indexed = Vec::<Indexed>::new();
     for item in scan_items {
         let Ok(path) = PathBuf::from(&item.path).canonicalize() else {
@@ -3541,31 +3550,51 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         ));
     }
 
-    // The unified analysis has already populated this resource cache.  The
-    // plan preview needs a current planning identity, not a mutation-grade
-    // integrity proof, so validate with the bounded fingerprint instead of
-    // reading every selected package a second time.  Execution still hashes
-    // every ready source before its first write.
-    let mut planning_cache = load_cache(&root);
+    // The preview needs a current whole-file identity for exact duplicates,
+    // but it does not need every decompressed resource fingerprint. Keep that
+    // expensive Duplicates/Conflicts work separate: the Planner uses the
+    // bounded identity cache and streams SHA-256 only on a cache miss.
+    // Executor preflight still hashes every ready source immediately before
+    // its first write, so this is never a mutation-grade shortcut.
+    let mut identity_cache = load_identity_cache(&root);
+    let mut identity_cache_changed = false;
     let mut selected_hashes = HashMap::<PathBuf, String>::new();
     let mut selected_hash_set = HashSet::<String>::new();
+    let mut selected_identity_fingerprints = HashSet::<(u64, String)>::new();
     for path in &selected {
-        let (cached, _) =
-            get_or_build_analysis_with_metrics(path, &mut planning_cache).map_err(|error| {
+        let (identity, metrics) =
+            get_or_build_identity_with_metrics(path, &mut identity_cache).map_err(|error| {
                 format!(
                     "Could not validate selected package {} for planning: {error}",
                     path.display()
                 )
             })?;
-        selected_hashes.insert(path.clone(), cached.file_sha256.clone());
-        selected_hash_set.insert(cached.file_sha256);
+        identity_cache_changed |= !metrics.cache_hit;
+        selected_hashes.insert(path.clone(), identity.file_sha256.clone());
+        selected_hash_set.insert(identity.file_sha256);
+        selected_identity_fingerprints
+            .insert((identity.size, identity.quick_fingerprint.to_ascii_uppercase()));
     }
-    // Persist a one-off cache miss, but ignore a write failure here: it must
-    // never invalidate a safe, read-only plan preview.
-    let _ = save_cache(&root, &planning_cache);
+    let duplicate_peers = index_exact_duplicates(
+        &root,
+        &scan.items,
+        &selected_hashes,
+        &selected_identity_fingerprints,
+        &mut identity_cache,
+        &mut identity_cache_changed,
+    );
+    // A duplicate peer outside the selected set can add its identity lazily.
+    // Persist only when something changed; serializing a large cache on every
+    // repeated Preview Plan click used to be a measurable source of latency.
+    if identity_cache_changed {
+        let _ = save_identity_cache(&root, &identity_cache);
+    }
 
-    let duplicate_peers = index_exact_duplicates(&root, &scan.items, &selected_hashes);
-    let possible_merged_peers = index_suspected_merged_sliders(&root, &scan.items);
+    // Potential merged-slider relations are review-only evidence. Reuse a
+    // resource index only when one already exists; no plan preview creates or
+    // decodes resource fingerprints merely to populate this advisory field.
+    let resource_cache = load_cache(&root);
+    let possible_merged_peers = index_suspected_merged_sliders(&scan.items, &resource_cache);
 
     let mut partial_group_hashes = HashSet::<String>::new();
 
@@ -5955,13 +5984,16 @@ mod tests {
         std::fs::create_dir_all(packages.join("Sliders")).unwrap();
         let first = packages.join("Jonha_BASE.package");
         let second = packages.join("Sliders").join("Jonha_Sliders_BASE.package");
-        std::fs::write(&first, b"identical Jonha STBL resources").unwrap();
-        std::fs::write(&second, b"identical Jonha STBL resources").unwrap();
+        let different = packages.join("Sliders").join("Jonha_Sliders_DIFFERENT.package");
+        let identical_bytes = b"identical Jonha STBL resources";
+        std::fs::write(&first, identical_bytes).unwrap();
+        std::fs::write(&second, identical_bytes).unwrap();
+        std::fs::write(&different, vec![b'x'; identical_bytes.len()]).unwrap();
 
         let mut selected = HashMap::new();
         let (hash, _) = sha256_file(&first).unwrap();
         selected.insert(first.canonicalize().unwrap(), hash.clone());
-        let scan_items = vec![&first, &second]
+        let scan_items = vec![&first, &second, &different]
             .into_iter()
             .map(|path| ScanPackageItem {
                 id: path.to_string_lossy().to_string(),
@@ -6007,8 +6039,25 @@ mod tests {
                 profile: None,
             })
             .collect::<Vec<_>>();
-        let groups = index_exact_duplicates(&packages, &scan_items, &selected);
+        let mut identities = IdentityCache::default();
+        let mut identities_changed = false;
+        let (size, _, quick) = crate::cache::analysis_file_fingerprint(&first).unwrap();
+        let selected_fingerprints = HashSet::from([(size, quick)]);
+        let groups = index_exact_duplicates(
+            &packages,
+            &scan_items,
+            &selected,
+            &selected_fingerprints,
+            &mut identities,
+            &mut identities_changed,
+        );
         assert_eq!(groups[&hash.to_ascii_uppercase()].len(), 2);
+        assert!(identities_changed);
+        assert_eq!(
+            identities.entries.len(),
+            1,
+            "only the quick-fingerprint match is fully hashed"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

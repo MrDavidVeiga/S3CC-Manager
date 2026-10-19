@@ -28,7 +28,9 @@ assert(scanner.includes("PersistentScan") && cache.includes("analysis-snapshot-v
 assert(scanner.includes("scan_packages_core_with_progress(folder, language, operation_kind, true, true, false)"), "Organizer scans must not prebuild full resource fingerprints.");
 assert(scanner.includes("scan_packages_core_with_progress(folder, language, operation_kind, false, false, true)"), "Legacy unified callers must retain the complete shared fingerprint path.");
 assert(unified.includes("analyze_duplicates_core") && unified.includes("analyze_conflicts_core"), "The compatibility unified path must retain shared-index analyzers.");
-assert(planner.includes("get_or_build_analysis_with_metrics"), "Plan preview must reuse the bounded analysis cache before execution revalidates SHA-256.");
+assert(planner.includes("get_or_build_identity_with_metrics"), "Plan preview must use its bounded identity cache before execution revalidates SHA-256.");
+assert(!planner.includes("get_or_build_analysis_with_metrics"), "Plan preview must not build resource fingerprints owned by Duplicates/Conflicts.");
+assert(planner.includes("analysis_file_fingerprint"), "Plan preview must narrow same-size duplicate candidates before a full hash.");
 assert(planner.includes("pub async fn build_organization_plan_with_cfg"), "Planner command must be asynchronous.");
 assert(app.includes("beginToolsOperation") && app.includes("cancelToolsOperation"), "Tools operations need progress and cancellation wiring.");
 assert(html.includes('id="tools-cancel"'), "Tools cancellation control is missing.");

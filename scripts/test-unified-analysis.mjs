@@ -28,8 +28,10 @@ assert.match(scanner, /reconcile_latest_scan_moves/);
 assert.match(cache, /relocate_cached_entries/);
 assert.match(scanner, /PersistentScan/);
 assert.match(cache, /analysis-snapshot-v1\.json/);
-assert.match(planner, /get_or_build_analysis_with_metrics/);
-assert.match(planner, /Execution still hashes\s+\/\/ every ready source/);
+assert.match(planner, /get_or_build_identity_with_metrics/);
+assert.doesNotMatch(planner, /get_or_build_analysis_with_metrics/);
+assert.match(planner, /analysis_file_fingerprint/);
+assert.match(planner, /Executor preflight still hashes every ready source/);
 assert.match(executor, /universal_cleanup_roots/);
 assert.doesNotMatch(executor, /requires_post_execution_package_scan/);
 
