@@ -9216,7 +9216,9 @@ function renderPlan() {
   if (el.planModal.__renderedPlan === plan) return;
   el.planModal.__renderedPlan = plan;
 
-  el.planItems.innerHTML = "";
+  const planRenderStarted = performance.now();
+  const planItemsStarted = performance.now();
+  const planItemsFragment = document.createDocumentFragment();
   for (const item of plan.items || []) {
     const card = document.createElement("article");
     card.className = `plan-item plan-${item.planStatus}`;
@@ -9264,24 +9266,30 @@ function renderPlan() {
       note.textContent = item.warnings.join(" ");
       card.appendChild(note);
     }
-    el.planItems.appendChild(card);
+    planItemsFragment.appendChild(card);
   }
+  // A large plan must not force a layout decision for every card while the
+  // modal is opening. Its nodes are prepared off-DOM and committed once.
+  el.planItems.replaceChildren(planItemsFragment);
 
-  el.planDirectories.innerHTML = "";
+  const directoriesStarted = performance.now();
+  const directoriesFragment = document.createDocumentFragment();
   if (!plan.directoriesToCreate?.length) {
     const empty = document.createElement("div");
     empty.className = "planner-empty";
     empty.textContent = t("noFoldersNeeded");
-    el.planDirectories.appendChild(empty);
+    directoriesFragment.appendChild(empty);
   } else {
     for (const path of plan.directoriesToCreate) {
       const line = document.createElement("code");
       line.textContent = path;
-      el.planDirectories.appendChild(line);
+      directoriesFragment.appendChild(line);
     }
   }
+  el.planDirectories.replaceChildren(directoriesFragment);
 
-  el.planTree.innerHTML = "";
+  const treeStarted = performance.now();
+  const planTreeFragment = document.createDocumentFragment();
   for (const item of plan.items || []) {
     const row = document.createElement("div");
     row.className = "plan-tree-row";
@@ -9292,10 +9300,18 @@ function renderPlan() {
     const after = document.createElement("code");
     after.textContent = item.destinationRelativePath || "—";
     row.append(before, arrow, after);
-    el.planTree.appendChild(row);
+    planTreeFragment.appendChild(row);
   }
+  el.planTree.replaceChildren(planTreeFragment);
 
   el.manifestPreviewText.textContent = plan.manifestPreview || "";
+  console.info("[S3CC timings] plan-render", {
+    items: plan.items?.length || 0,
+    itemsMs: directoriesStarted - planItemsStarted,
+    directoriesMs: treeStarted - directoriesStarted,
+    treeMs: performance.now() - treeStarted,
+    totalMs: performance.now() - planRenderStarted,
+  });
 }
 
 function renderRestore() {

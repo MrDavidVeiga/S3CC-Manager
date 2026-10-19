@@ -12,8 +12,8 @@ use crate::{
         TYPE_SKIN_TONE,
     },
     project_grouping::{
-        assign_project_groups, extract_package_evidence, ProjectRelationship,
-        ProjectTechnicalEvidence,
+        assign_project_groups_references, extract_package_evidence_with_metrics,
+        ProjectRelationship, ProjectTechnicalEvidence, INTERNAL_IDENTIFIER_MARKERS,
     },
     reference_catalog::{self, ReferenceEvidence},
     resource_cfg::is_mods_layout_root,
@@ -90,6 +90,17 @@ pub(crate) struct ScanPackageProfile {
     resource_count: usize,
     decompression_count: usize,
     resource_decode_us: u128,
+    project_payload_analysis_us: u128,
+    project_stbl_resources: usize,
+    project_nmap_resources: usize,
+    project_objk_resources: usize,
+    project_other_resources: usize,
+    catalog_classification_us: u128,
+    auxiliary_analysis_us: u128,
+    directed_family_us: u128,
+    special_package_us: u128,
+    script_metadata_us: u128,
+    final_resolution_us: u128,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +112,17 @@ struct ScanPackageProfileEntry {
     resource_count: usize,
     decompression_count: usize,
     resource_decode_us: u128,
+    project_payload_analysis_us: u128,
+    project_stbl_resources: usize,
+    project_nmap_resources: usize,
+    project_objk_resources: usize,
+    project_other_resources: usize,
+    catalog_classification_us: u128,
+    auxiliary_analysis_us: u128,
+    directed_family_us: u128,
+    special_package_us: u128,
+    script_metadata_us: u128,
+    final_resolution_us: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -164,9 +186,16 @@ struct LatestScan {
     classification_context: String,
 }
 
+#[derive(Debug, Default)]
+struct PresentationSnapshotTiming {
+    signatures_ms: u128,
+    context_ms: u128,
+    persistence_ms: u128,
+}
+
 // Project-evidence fields are part of the serialized scan result. Bump the
 // snapshot schema so an older result cannot reintroduce stale project paths.
-const PERSISTENT_SCAN_VERSION: u32 = 2;
+const PERSISTENT_SCAN_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistentScan {
@@ -292,29 +321,67 @@ fn move_path_key(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-fn remember_latest_scan(result: &ScanResult, language: AppLanguage) {
+fn remember_latest_scan(result: &ScanResult, language: AppLanguage) -> PresentationSnapshotTiming {
     let root = stable_path(Path::new(&result.root));
-    let file_signatures = result
-        .items
-        .iter()
-        .filter_map(|item| {
-            let path = PathBuf::from(&item.path);
-            let canonical = stable_path(&path);
-            let signature = cache::analysis_file_fingerprint(&canonical).ok()?;
-            Some((canonical.to_string_lossy().to_string(), signature))
-        })
-        .collect::<HashMap<_, _>>();
+    let signatures_started = Instant::now();
+    let file_signatures = analysis_file_signatures(
+        result.items.iter().map(|item| PathBuf::from(&item.path)).collect(),
+    );
+    let signatures_ms = signatures_started.elapsed().as_millis();
+    let context_started = Instant::now();
+    let classification_context = classification_context_fingerprint(&root, language);
+    let context_ms = context_started.elapsed().as_millis();
     let latest = LatestScan {
         root: root.clone(),
         language,
         result: result.clone(),
         file_signatures,
-        classification_context: classification_context_fingerprint(&root, language),
+        classification_context,
     };
+    let persistence_started = Instant::now();
     save_persistent_scan(&latest);
     if let Ok(mut slot) = latest_scan_slot().lock() {
         slot.insert(latest_scan_key(&root, language), latest);
     }
+    PresentationSnapshotTiming {
+        signatures_ms,
+        context_ms,
+        persistence_ms: persistence_started.elapsed().as_millis(),
+    }
+}
+
+fn analysis_file_signatures(paths: Vec<PathBuf>) -> HashMap<String, (u64, u128, String)> {
+    if paths.is_empty() {
+        return HashMap::new();
+    }
+    let worker_count = thread::available_parallelism()
+        .map(|count| count.get().div_ceil(2))
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(paths.len());
+    let next = AtomicUsize::new(0);
+    let output = Mutex::new(HashMap::with_capacity(paths.len()));
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let paths = &paths;
+            let next = &next;
+            let output = &output;
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(path) = paths.get(index) else {
+                    break;
+                };
+                let canonical = stable_path(path);
+                let Ok(signature) = cache::analysis_file_fingerprint(&canonical) else {
+                    continue;
+                };
+                if let Ok(mut signatures) = output.lock() {
+                    signatures.insert(canonical.to_string_lossy().to_string(), signature);
+                }
+            });
+        }
+    });
+    output.into_inner().unwrap_or_default()
 }
 
 pub(crate) fn current_package_signatures(root: &Path) -> HashMap<String, (u64, u128, String)> {
@@ -333,14 +400,7 @@ pub(crate) fn current_package_signatures(root: &Path) -> HashMap<String, (u64, u
     {
         paths.truncate(limit);
     }
-    paths
-        .into_iter()
-        .filter_map(|path| {
-            let path = stable_path(&path);
-            let signature = cache::analysis_file_fingerprint(&path).ok()?;
-            Some((path.to_string_lossy().to_string(), signature))
-        })
-        .collect()
+    analysis_file_signatures(paths)
 }
 
 fn latest_scan_is_current(cached: &LatestScan) -> bool {
@@ -477,12 +537,22 @@ fn contains_ascii_case_insensitive(data: &[u8], needle: &str) -> bool {
         return false;
     }
 
-    data.windows(needle.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle.iter())
-            .all(|(left, right)| left.to_ascii_lowercase() == right.to_ascii_lowercase())
-    })
+    // Most positions cannot start a match.  Checking the first ASCII byte
+    // before comparing the rest avoids a complete case-folded comparison at
+    // every offset in large S3SA and manifest payloads while retaining the
+    // exact case-insensitive substring semantics.
+    let first = needle[0].to_ascii_lowercase();
+    for start in 0..=data.len() - needle.len() {
+        if data[start].to_ascii_lowercase() == first
+            && data[start + 1..start + needle.len()]
+                .iter()
+                .zip(&needle[1..])
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn store_name_hint(value: &str) -> bool {
@@ -500,34 +570,15 @@ fn store_name_hint(value: &str) -> bool {
 }
 
 fn detect_store_source(
-    package: &Package,
+    project_evidence: &ProjectTechnicalEvidence,
     name: &str,
     relative: &str,
     has_s3sa: bool,
 ) -> (String, Option<String>) {
-    let mut strong_internal_evidence = false;
-
-    for entry in &package.entries {
-        if !matches!(
-            entry.type_id,
-            TYPE_S3SA | TYPE_STBL_LOCAL | TYPE_MANIFEST_LOCAL | TYPE_NMAP_LOCAL
-        ) {
-            continue;
-        }
-        let Ok(data) = package.data(entry) else {
-            continue;
-        };
-
-        if contains_ascii_case_insensitive(&data, "sims3.store")
-            || contains_ascii_case_insensitive(&data, "the sims 3 store")
-            || contains_ascii_case_insensitive(&data, "sims3store")
-        {
-            strong_internal_evidence = true;
-            break;
-        }
-    }
-
-    if strong_internal_evidence {
+    // Project evidence already decoded the relevant S3SA/STBL/manifest/NMAP
+    // resources. Reopening every such resource here made large Store worlds
+    // pay for a second full pass after scanning had apparently finished.
+    if project_evidence.store_marker {
         return ("the_sims_3_store".to_string(), Some("strong".to_string()));
     }
 
@@ -1018,53 +1069,48 @@ fn package_nmap_names(package: &Package) -> Vec<String> {
         .collect()
 }
 
+// The phase-3 families only consult a small set of NMAP subjects. Materialize
+// those matching names, not every unrelated identifier in a large script
+// package. This preserves each rule's actual evidence while avoiding millions
+// of short-lived String allocations in merged core mods.
+fn phase3_nmap_identifiers(package: &Package) -> Vec<String> {
+    const PHASE3_TERMS: &[&str] = &[
+        "rabbit", "rhd", "rhr", "window", "knitting", "baking", "buhudain", "sims3logo",
+        "stereo", "contact", "iris", "eyeball", "default", "lip", "makeup", "face", "eye",
+        "body", "genital",
+    ];
+    package
+        .entries
+        .iter()
+        .filter(|entry| entry.type_id == TYPE_NMAP_LOCAL)
+        .filter_map(|entry| package.data(entry).ok())
+        .flat_map(|data| nmap_names_with_ascii_terms(&data, PHASE3_TERMS))
+        .collect()
+}
+
 // NMAP is the preferred source for readable identifiers, but several of the
 // directed families expose their identity in another DBPF resource. Keep a
 // small allow-list of functional markers and inspect the decoded payloads so
 // relocation never turns a proven package back into unknown merely because
 // its filename or source folder changed.
-fn package_internal_identifiers(package: &Package) -> Vec<String> {
-    let mut identifiers = package_nmap_names(package);
-    let markers = [
-        "casdetails",
-        "ui/caption/cas/physical:",
-        "deathbymeteorjig",
-        "minerexclusionjig",
-        "acbody",
-        "adbody",
-        "albody",
-        "ambody",
-        "embody",
-        "tmbody",
-        "ccbody",
-        "cdbody",
-        "genital",
-        "defaultface",
-        "defaultwhisker",
-        "defaultbrow",
-        "defaulttextures",
-        "sims_need_less_space",
-        "pets_need_less_space",
-        "king_qings_window",
-    ];
-    for entry in &package.entries {
-        if !matches!(
-            entry.type_id,
-            TYPE_LAYO_LOCAL | TYPE_NMAP_LOCAL | TYPE_STBL_LOCAL | TYPE_MANIFEST_LOCAL | TYPE_S3SA
-        ) {
-            continue;
-        }
-        let Ok(data) = package.data(entry) else {
-            continue;
-        };
-        for marker in markers {
-            if contains_ascii_case_insensitive(&data, marker)
-                && !identifiers
-                    .iter()
-                    .any(|value| value.eq_ignore_ascii_case(marker))
-            {
-                identifiers.push(marker.to_string());
-            }
+fn package_internal_identifiers(
+    package: &Package,
+    project_evidence: &ProjectTechnicalEvidence,
+) -> Vec<String> {
+    let mut identifiers = phase3_nmap_identifiers(package);
+    // The shared project pass already decoded LAYO/NMAP/STBL/manifest/S3SA
+    // payloads and recorded these exact byte markers. Reuse it here instead
+    // of reopening and scanning the same large resources once per package.
+    for marker in INTERNAL_IDENTIFIER_MARKERS {
+        if project_evidence
+            .internal_markers
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(marker))
+            && !identifiers
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(marker))
+        {
+            identifiers.push((*marker).to_string());
         }
     }
     identifiers
@@ -1290,13 +1336,14 @@ fn broad_window_replacement_set(
 // bundles can be categorized without treating generic game TGIs as matches.
 fn phase3_directed_family_classification(
     package: &Package,
+    project_evidence: &ProjectTechnicalEvidence,
     types: &BTreeSet<u32>,
     name: &str,
     relative: &str,
     language: AppLanguage,
     catalog_classifications: &[CatalogClassification],
 ) -> Option<PackageFamilyClassification> {
-    let internal_names = package_internal_identifiers(package);
+    let internal_names = package_internal_identifiers(package, project_evidence);
     if let Some(classification) =
         path_independent_directed_classification(types, &internal_names, language)
     {
@@ -2171,9 +2218,11 @@ fn nraas_internal_evidence(package: &Package, name: &str, relative: &str) -> Opt
         let Ok(data) = package.data(entry) else {
             continue;
         };
-        if let Some(identifier) = nmap_names(&data)
-            .into_iter()
-            .find(|value| authoritative_nraas_identifier(value))
+        if let Some(identifier) = nmap_first_with_ascii_prefix(
+            &data,
+            b"nraas",
+            authoritative_nraas_identifier,
+        )
         {
             return Some(format!("NMAP authoritative identifier '{identifier}'"));
         }
@@ -2558,7 +2607,7 @@ fn special_package_classification(
     None
 }
 
-fn nmap_names(data: &[u8]) -> Vec<String> {
+fn nmap_names_matching(data: &[u8], mut keep: impl FnMut(&str) -> bool) -> Vec<String> {
     if data.len() < 8 {
         return Vec::new();
     }
@@ -2584,16 +2633,144 @@ fn nmap_names(data: &[u8]) -> Vec<String> {
         if next > data.len() {
             return Vec::new();
         }
-        let name = String::from_utf8_lossy(&data[offset..next])
-            .trim()
-            .to_string();
-        if !name.is_empty() {
-            names.push(name);
+        let name = String::from_utf8_lossy(&data[offset..next]);
+        let name = name.trim();
+        if !name.is_empty() && keep(name) {
+            names.push(name.to_string());
         }
         offset = next;
     }
 
     names
+}
+
+fn nmap_names(data: &[u8]) -> Vec<String> {
+    nmap_names_matching(data, |_| true)
+}
+
+// Do the common Phase 3 keyword pass on bytes.  Converting every NMAP record
+// to an owned lowercase String is disproportionately expensive in large core
+// mods; only identifiers that actually match a rule need to be materialized.
+fn nmap_names_with_ascii_terms(data: &[u8], terms: &[&str]) -> Vec<String> {
+    if data.len() < 8 {
+        return Vec::new();
+    }
+    let version = u32::from_le_bytes(data[0..4].try_into().unwrap());
+    if version != 1 {
+        return Vec::new();
+    }
+    let count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    let mut offset = 8usize;
+    let mut names = Vec::new();
+    for _ in 0..count {
+        if offset.checked_add(12).map(|end| end <= data.len()) != Some(true) {
+            return Vec::new();
+        }
+        let name_start = offset + 12;
+        let byte_count =
+            u32::from_le_bytes(data[offset + 8..name_start].try_into().unwrap()) as usize;
+        let Some(next) = name_start.checked_add(byte_count) else {
+            return Vec::new();
+        };
+        if next > data.len() {
+            return Vec::new();
+        }
+        let name_bytes = &data[name_start..next];
+        if contains_any_ascii_case_insensitive(name_bytes, terms) {
+            let name = String::from_utf8_lossy(name_bytes);
+            let name = name.trim();
+            if !name.is_empty() {
+                names.push(name.to_string());
+            }
+        }
+        offset = next;
+    }
+    names
+}
+
+fn contains_any_ascii_case_insensitive(data: &[u8], terms: &[&str]) -> bool {
+    (0..data.len()).any(|start| {
+        terms.iter().any(|term| {
+            let needle = term.as_bytes();
+            data.get(start..start.saturating_add(needle.len()))
+                .is_some_and(|candidate| {
+                    candidate
+                        .iter()
+                        .zip(needle)
+                        .all(|(value, expected)| value.eq_ignore_ascii_case(expected))
+                })
+        })
+    })
+}
+
+fn nmap_first_matching(data: &[u8], mut keep: impl FnMut(&str) -> bool) -> Option<String> {
+    if data.len() < 8 || u32::from_le_bytes(data[0..4].try_into().ok()?) != 1 {
+        return None;
+    }
+    let count = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
+    let mut offset = 8usize;
+    for _ in 0..count {
+        let name_start = offset.checked_add(12)?;
+        if name_start > data.len() {
+            return None;
+        }
+        let byte_count = u32::from_le_bytes(data[offset + 8..name_start].try_into().ok()?) as usize;
+        let next = name_start.checked_add(byte_count)?;
+        if next > data.len() {
+            return None;
+        }
+        let name = String::from_utf8_lossy(&data[name_start..next]);
+        let name = name.trim();
+        if !name.is_empty() && keep(name) {
+            return Some(name.to_string());
+        }
+        offset = next;
+    }
+    None
+}
+
+// `authoritative_nraas_identifier` can only accept names beginning with the
+// NRaas namespace.  Large core mods may contain hundreds of thousands of
+// unrelated NMAP entries, so avoid constructing and normalizing a `String`
+// for each one before applying that rule.  The full textual predicate still
+// runs for every possible namespace candidate, preserving its boundary and
+// false-positive checks.
+fn nmap_first_with_ascii_prefix(
+    data: &[u8],
+    prefix: &[u8],
+    mut keep: impl FnMut(&str) -> bool,
+) -> Option<String> {
+    if data.len() < 8 || u32::from_le_bytes(data[0..4].try_into().ok()?) != 1 {
+        return None;
+    }
+    let count = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
+    let mut offset = 8usize;
+    for _ in 0..count {
+        let name_start = offset.checked_add(12)?;
+        if name_start > data.len() {
+            return None;
+        }
+        let byte_count = u32::from_le_bytes(data[offset + 8..name_start].try_into().ok()?) as usize;
+        let next = name_start.checked_add(byte_count)?;
+        if next > data.len() {
+            return None;
+        }
+        let name_bytes = &data[name_start..next];
+        let has_prefix = name_bytes.len() >= prefix.len()
+            && name_bytes
+                .iter()
+                .zip(prefix)
+                .all(|(value, expected)| value.eq_ignore_ascii_case(expected));
+        if has_prefix {
+            let name = String::from_utf8_lossy(name_bytes);
+            let name = name.trim();
+            if !name.is_empty() && keep(name) {
+                return Some(name.to_string());
+            }
+        }
+        offset = next;
+    }
+    None
 }
 
 fn stbl_entries(data: &[u8]) -> Vec<(u64, String)> {
@@ -2689,8 +2866,8 @@ fn clothing_mesh_subtype(names: &[String]) -> Option<&'static str> {
 }
 
 fn geometry_clothing_from_nmap(
-    package: &Package,
     types: &BTreeSet<u32>,
+    names: &[String],
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
     if !types.contains(&0x015A_1849)
@@ -2700,14 +2877,7 @@ fn geometry_clothing_from_nmap(
     {
         return None;
     }
-    let names = package
-        .entries
-        .iter()
-        .filter(|entry| entry.type_id == TYPE_NMAP_LOCAL)
-        .filter_map(|entry| package.data(entry).ok())
-        .flat_map(|data| nmap_names(&data))
-        .collect::<Vec<_>>();
-    let subtype = clothing_mesh_subtype(&names)?;
+    let subtype = clothing_mesh_subtype(names)?;
     let label = if subtype == "top" {
         language.top()
     } else {
@@ -2737,8 +2907,8 @@ fn geometry_clothing_from_nmap(
 // must both be present, with no CASP or S3SA. Keep unrelated custom meshes for
 // manual review instead of automatically calling them replacements.
 fn replacement_mesh_classification(
-    package: &Package,
     types: &BTreeSet<u32>,
+    internal_names: &[String],
     filename: &str,
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
@@ -2749,13 +2919,6 @@ fn replacement_mesh_classification(
     {
         return None;
     }
-    let internal_names = package
-        .entries
-        .iter()
-        .filter(|entry| entry.type_id == TYPE_NMAP_LOCAL)
-        .filter_map(|entry| package.data(entry).ok())
-        .flat_map(|data| nmap_names(&data))
-        .collect::<Vec<_>>();
     let mut evidence = internal_names.join(" ").to_ascii_lowercase();
     evidence.push(' ');
     evidence.push_str(&filename.to_ascii_lowercase());
@@ -2803,8 +2966,8 @@ fn replacement_mesh_classification(
 // standalone eye default replacements. Do not infer them from the folder
 // where a user stored them (often 'Sliders/Eyes').
 fn verified_eye_mesh_replacement(
-    package: &Package,
     types: &BTreeSet<u32>,
+    names: &[String],
     filename: &str,
     language: AppLanguage,
 ) -> Option<PackageFamilyClassification> {
@@ -2822,13 +2985,6 @@ fn verified_eye_mesh_replacement(
     if !explicit {
         return None;
     }
-    let names = package
-        .entries
-        .iter()
-        .filter(|entry| entry.type_id == TYPE_NMAP_LOCAL)
-        .filter_map(|entry| package.data(entry).ok())
-        .flat_map(|data| nmap_names(&data))
-        .collect::<Vec<_>>();
     // The uploaded 2016 packages declare face geometry in the NMAP; verify
     // that internal evidence before treating a filename as a replacement.
     if !names
@@ -3071,7 +3227,7 @@ fn slider_internal_candidates(package: &Package) -> Vec<(String, &'static str)> 
         let Ok(data) = package.data(entry) else {
             continue;
         };
-        if let Some(name) = nmap_names(&data).into_iter().next() {
+        if let Some(name) = nmap_first_matching(&data, |_| true) {
             let key = name.to_ascii_lowercase();
             if seen.insert(key) {
                 candidates.push((name, "NMAP"));
@@ -3368,11 +3524,30 @@ fn value_is_authoritative_mod_source(source: &str) -> bool {
 }
 
 fn apply_universal_project_grouping(items: &mut [ScanPackageItem], language: AppLanguage) {
+    // No anchor means no technical project relationship is possible.  Avoid
+    // cloning potentially large STBL/XML evidence only to return an empty
+    // assignment set during post-scan finalization.
+    let anchor_count = items
+        .iter()
+        .filter(|item| {
+            item.project_evidence.has_s3sa
+                && !item.project_evidence.assembly_identities.is_empty()
+        })
+        .count();
+    if std::env::var_os("S3CC_PROFILE_ROOT").is_some() {
+        eprintln!(
+            "scanner_profile_project_grouping packages={} script_anchors={anchor_count}",
+            items.len()
+        );
+    }
+    if anchor_count == 0 {
+        return;
+    }
     let evidence = items
         .iter()
-        .map(|item| (item.path.clone(), item.project_evidence.clone()))
+        .map(|item| (item.path.as_str(), &item.project_evidence))
         .collect::<Vec<_>>();
-    let assignments = assign_project_groups(&evidence);
+    let assignments = assign_project_groups_references(&evidence);
     let scripts = localized_special_folder(language, "scripts").to_string();
     let gameplay = localized_special_folder(language, "gameplay").to_string();
 
@@ -4219,6 +4394,7 @@ fn scan_one_with_index(
     // readers and report the specific cache error.
     let mut shared_cached = None;
     let mut profile_resource_decode_us = 0u128;
+    let mut profile_project_payload_analysis_us = 0u128;
     let shared_index_error = if let Some(shared_index) = shared_index {
         match cache::current_cached_entry(path, shared_index) {
             Ok(Some(cached)) => {
@@ -4253,8 +4429,12 @@ fn scan_one_with_index(
     };
 
     let project_started = Instant::now();
-    let project_evidence = extract_package_evidence(path, &package);
+    let (project_evidence, project_metrics) =
+        extract_package_evidence_with_metrics(path, &package);
     timing.project_grouping_us += project_started.elapsed().as_micros();
+    timing.resource_decode_us += project_metrics.resource_decode_us;
+    profile_resource_decode_us += project_metrics.resource_decode_us;
+    profile_project_payload_analysis_us += project_metrics.payload_analysis_us;
     let reference_started = Instant::now();
     let mut reference_evidence = match (shared_cached.as_ref(), reference_catalogs) {
         (Some(cached), Some(catalogs)) => {
@@ -4277,9 +4457,11 @@ fn scan_one_with_index(
     if let Some(error) = shared_index_error {
         warnings.push(error);
     }
+    let auxiliary_started = Instant::now();
     let mut catalog_resource_count = 0usize;
     let is_merged_sim_export = merged_sim_export_evidence(&package).is_some();
     let fbln_metadata = read_fbln_metadata(&package);
+    let profile_auxiliary_analysis_us = auxiliary_started.elapsed().as_micros();
     let has_fbln = !fbln_metadata.is_empty();
     if has_fbln {
         detected_from.insert("FBLN".to_string());
@@ -4288,6 +4470,7 @@ fn scan_one_with_index(
         }
     }
 
+    let catalog_classification_started = Instant::now();
     for entry in &package.entries {
         type_ids.insert(entry.type_id);
         type_set.insert(resource_type_label(entry.type_id));
@@ -4329,7 +4512,12 @@ fn scan_one_with_index(
             Err(error) => warnings.push(format!("{}: {error}", entry.key_string())),
         }
     }
+    let profile_catalog_classification_us =
+        catalog_classification_started.elapsed().as_micros();
 
+    let final_resolution_started = Instant::now();
+    let mut profile_directed_family_us = 0;
+    let mut profile_special_package_us = 0;
     let special_primary = preserved_correction_family_classification(&type_ids, &relative)
         .or_else(|| merged_sim_export_classification(&package, language))
         .or_else(|| {
@@ -4355,24 +4543,31 @@ fn scan_one_with_index(
             })
         })
         .or_else(|| {
-            phase3_directed_family_classification(
+            let started = Instant::now();
+            let classification = phase3_directed_family_classification(
                 &package,
+                &project_evidence,
                 &type_ids,
                 &name,
                 &relative,
                 language,
                 &classifications,
-            )
+            );
+            profile_directed_family_us = started.elapsed().as_micros();
+            classification
         })
         .or_else(|| {
-            special_package_classification(
+            let started = Instant::now();
+            let classification = special_package_classification(
                 &package,
                 &type_ids,
                 &name,
                 &relative,
                 language,
                 catalog_resource_count,
-            )
+            );
+            profile_special_package_us = started.elapsed().as_micros();
+            classification
         });
     if let Some(special) = &special_primary {
         for source in &special.detected_from {
@@ -4477,9 +4672,18 @@ fn scan_one_with_index(
         if catalog_first { None } else { special_primary };
 
     if status == "unknown" && catalog_resource_count == 0 {
-        let family_result = geometry_clothing_from_nmap(&package, &type_ids, language)
-            .or_else(|| replacement_mesh_classification(&package, &type_ids, &name, language))
-            .or_else(|| verified_eye_mesh_replacement(&package, &type_ids, &name, language))
+        // These three mesh classifiers inspect the same NMAP payloads. Read
+        // them once and share the decoded names rather than reopening every
+        // compressed resource for each candidate rule.
+        let nmap_names = (type_ids.contains(&0x015A_1849)
+            && type_ids.contains(&TYPE_NMAP_LOCAL)
+            && !type_ids.contains(&TYPE_CASP)
+            && !type_ids.contains(&TYPE_S3SA))
+        .then(|| package_nmap_names(&package))
+        .unwrap_or_default();
+        let family_result = geometry_clothing_from_nmap(&type_ids, &nmap_names, language)
+            .or_else(|| replacement_mesh_classification(&type_ids, &nmap_names, &name, language))
+            .or_else(|| verified_eye_mesh_replacement(&type_ids, &nmap_names, &name, language))
             .map(PackageFamilyResult::Classified)
             .unwrap_or_else(|| classify_package_family(&type_ids, language));
         match family_result {
@@ -4640,9 +4844,10 @@ fn scan_one_with_index(
         );
     }
 
+    let script_metadata_started = Instant::now();
     let scripted = type_ids.contains(&TYPE_S3SA);
     let (content_source, source_confidence) =
-        detect_store_source(&package, &name, &relative, scripted);
+        detect_store_source(&project_evidence, &name, &relative, scripted);
 
     let is_nraas = detected_from.contains("NRaasInternal");
     let creator = if is_nraas {
@@ -4664,8 +4869,10 @@ fn scan_one_with_index(
     } else {
         None
     };
+    let profile_script_metadata_us = script_metadata_started.elapsed().as_micros();
     let classification_confidence = classification_confidence(&status).to_string();
 
+    let profile_final_resolution_us = final_resolution_started.elapsed().as_micros();
     ScanPackageItem {
         id,
         name,
@@ -4727,6 +4934,17 @@ fn scan_one_with_index(
                 .filter(|entry| entry.compressed == 0xFFFF)
                 .count(),
             resource_decode_us: profile_resource_decode_us,
+            project_payload_analysis_us: profile_project_payload_analysis_us,
+            project_stbl_resources: project_metrics.stbl_resource_count,
+            project_nmap_resources: project_metrics.nmap_resource_count,
+            project_objk_resources: project_metrics.objk_resource_count,
+            project_other_resources: project_metrics.other_resource_count,
+            catalog_classification_us: profile_catalog_classification_us,
+            auxiliary_analysis_us: profile_auxiliary_analysis_us,
+            directed_family_us: profile_directed_family_us,
+            special_package_us: profile_special_package_us,
+            script_metadata_us: profile_script_metadata_us,
+            final_resolution_us: profile_final_resolution_us,
         }),
     }
 }
@@ -5105,6 +5323,17 @@ fn scan_packages_core_with_progress(
                                 resource_count: profile.resource_count,
                                 decompression_count: profile.decompression_count,
                                 resource_decode_us: profile.resource_decode_us,
+                                project_payload_analysis_us: profile.project_payload_analysis_us,
+                                project_stbl_resources: profile.project_stbl_resources,
+                                project_nmap_resources: profile.project_nmap_resources,
+                                project_objk_resources: profile.project_objk_resources,
+                                project_other_resources: profile.project_other_resources,
+                                catalog_classification_us: profile.catalog_classification_us,
+                                auxiliary_analysis_us: profile.auxiliary_analysis_us,
+                                directed_family_us: profile.directed_family_us,
+                                special_package_us: profile.special_package_us,
+                                script_metadata_us: profile.script_metadata_us,
+                                final_resolution_us: profile.final_resolution_us,
                             });
                         }
                     }
@@ -5272,10 +5501,21 @@ fn scan_packages_core_with_progress(
         );
         for (index, profile) in profile_packages.iter().take(20).enumerate() {
             eprintln!(
-                "scanner_profile_slowest rank={} elapsed_ms={} resource_decode_ms={} compressed_mb={:.2} decompressed_mb={:.2} resources={} decompressions={} path={}",
+                "scanner_profile_slowest rank={} elapsed_ms={} resource_decode_ms={} project_payload_analysis_ms={} project_stbl_resources={} project_nmap_resources={} project_objk_resources={} project_other_resources={} catalog_classification_ms={} auxiliary_analysis_ms={} directed_family_ms={} special_package_ms={} script_metadata_ms={} final_resolution_ms={} compressed_mb={:.2} decompressed_mb={:.2} resources={} decompressions={} path={}",
                 index + 1,
                 (profile.elapsed_us as f64) / 1000.0,
                 (profile.resource_decode_us as f64) / 1000.0,
+                (profile.project_payload_analysis_us as f64) / 1000.0,
+                profile.project_stbl_resources,
+                profile.project_nmap_resources,
+                profile.project_objk_resources,
+                profile.project_other_resources,
+                (profile.catalog_classification_us as f64) / 1000.0,
+                (profile.auxiliary_analysis_us as f64) / 1000.0,
+                (profile.directed_family_us as f64) / 1000.0,
+                (profile.special_package_us as f64) / 1000.0,
+                (profile.script_metadata_us as f64) / 1000.0,
+                (profile.final_resolution_us as f64) / 1000.0,
                 profile.compressed_bytes as f64 / 1_048_576.0,
                 profile.decompressed_bytes as f64 / 1_048_576.0,
                 profile.resource_count,
@@ -5292,7 +5532,17 @@ fn scan_packages_core_with_progress(
         cache_hit: false,
         reused_packages,
     };
-    remember_latest_scan(&result, language);
+    let snapshot_started = Instant::now();
+    let snapshot_timing = remember_latest_scan(&result, language);
+    if profile_enabled {
+        eprintln!(
+            "scanner_profile_presentation_snapshot_ms={} signatures_ms={} context_ms={} persistence_ms={}",
+            snapshot_started.elapsed().as_millis(),
+            snapshot_timing.signatures_ms,
+            snapshot_timing.context_ms,
+            snapshot_timing.persistence_ms,
+        );
+    }
     Ok(result)
 }
 
@@ -5433,9 +5683,6 @@ pub async fn scan_packages(folder: String, language: AppLanguage) -> Result<Scan
         scan_packages_core(folder, language, Some(KIND))
     })
     .await;
-    if let Ok(scan) = &result {
-        remember_latest_scan(scan, language);
-    }
     result
 }
 
@@ -5447,8 +5694,9 @@ mod tests {
             return;
         };
         let language = crate::i18n::AppLanguage::Pt;
-        let result = super::scan_packages_core_with_progress(root, language, None, false, true, false)
-            .expect("external scanner profile should complete");
+        let result =
+            super::scan_packages_core_with_progress(root.clone(), language, None, false, true, false)
+                .expect("external scanner profile should complete");
         eprintln!(
             "scanner_profile_result packages={} total_ms={} package_reads={} reused={}",
             result.stats.packages,
@@ -5456,6 +5704,18 @@ mod tests {
             result.stats.package_reads,
             result.stats.reused_packages,
         );
+        if std::env::var_os("S3CC_PROFILE_WARM_CACHE").is_some() {
+            let warm = super::scan_packages_core(root, language, None)
+                .expect("external warm scanner profile should complete");
+            eprintln!(
+                "scanner_profile_warm_cache packages={} total_ms={} package_reads={} reused={} cache_hit={}",
+                warm.stats.packages,
+                warm.stats.total_ms,
+                warm.stats.package_reads,
+                warm.stats.reused_packages,
+                warm.cache_hit,
+            );
+        }
     }
 
     use super::*;
@@ -5796,7 +6056,8 @@ mod tests {
                 panic!("could not decode targeted DBPF package {target}: {error}")
             });
             let resources = fix_signatures::package_resources(&package).unwrap();
-            let internal_identifiers = package_internal_identifiers(&package);
+            let (project_evidence, _) = extract_package_evidence_with_metrics(path, &package);
+            let internal_identifiers = package_internal_identifiers(&package, &project_evidence);
             let ascii_preview = package
                 .entries
                 .iter()
@@ -6538,6 +6799,14 @@ mod tests {
     }
 
     #[test]
+    fn ascii_signature_lookup_remains_case_insensitive() {
+        let data = b"prefix NRaas.MasterController suffix";
+        assert!(contains_ascii_case_insensitive(data, "nraas.mastercontroller"));
+        assert!(!contains_ascii_case_insensitive(data, "nraas.woohooer"));
+        assert!(!contains_ascii_case_insensitive(data, ""));
+    }
+
+    #[test]
     fn stbl_key_parser_reads_slider_label_hashes() {
         let key = 0x745F_376D_11D5_E6C3u64;
         let text = "Butt".encode_utf16().collect::<Vec<_>>();
@@ -6566,6 +6835,54 @@ mod tests {
         data.extend_from_slice(name);
 
         assert_eq!(nmap_names(&data), vec!["Bloom_LegLenght_slider"]);
+    }
+
+    #[test]
+    fn nmap_namespace_lookup_only_materializes_matching_prefixes() {
+        let names = [
+            b"Gameplay.Core.Entry".as_slice(),
+            b"Battery.NRaasLogo2".as_slice(),
+            b"NRaas.MasterController".as_slice(),
+        ];
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        for (index, name) in names.iter().enumerate() {
+            data.extend_from_slice(&(index as u64).to_le_bytes());
+            data.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            data.extend_from_slice(name);
+        }
+
+        assert_eq!(
+            nmap_first_with_ascii_prefix(&data, b"nraas", authoritative_nraas_identifier),
+            Some("NRaas.MasterController".to_string())
+        );
+        assert_eq!(
+            nmap_first_with_ascii_prefix(&data, b"missing", |_| true),
+            None
+        );
+    }
+
+    #[test]
+    fn nmap_term_lookup_keeps_only_phase3_candidates() {
+        let names = [
+            b"Gameplay.Core.Entry".as_slice(),
+            b"RabbitHoleDoor".as_slice(),
+            b"Baking.CustomRecipe".as_slice(),
+        ];
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        for (index, name) in names.iter().enumerate() {
+            data.extend_from_slice(&(index as u64).to_le_bytes());
+            data.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            data.extend_from_slice(name);
+        }
+
+        assert_eq!(
+            nmap_names_with_ascii_terms(&data, &["rabbit", "baking"]),
+            vec!["RabbitHoleDoor", "Baking.CustomRecipe"]
+        );
     }
 
     #[test]
@@ -7122,7 +7439,10 @@ mod tests {
                 "resourceCount": package.entries.len(),
                 "resources": resources,
                 "nmapNames": package_nmap_names(&package),
-                "internalIdentifiers": package_internal_identifiers(&package),
+                "internalIdentifiers": package_internal_identifiers(
+                    &package,
+                    &extract_package_evidence_with_metrics(&path, &package).0,
+                ),
                 "detectedFrom": item.detected_from,
                 "classificationReason": item.classification_reason,
                 "warnings": item.warnings,

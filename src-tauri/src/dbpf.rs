@@ -125,7 +125,7 @@ pub struct Package {
 #[derive(Debug, Clone)]
 struct CachedPayload {
     data: Vec<u8>,
-    digest: [u8; 32],
+    digest: Option<[u8; 32]>,
 }
 
 fn payload_is_reused_by_scanner(type_id: u32) -> bool {
@@ -135,7 +135,6 @@ fn payload_is_reused_by_scanner(type_id: u32) -> bool {
             | 0x319E_4F1D // OBJD
             | 0xB52F_5055 // FBLN
             | 0x0166_038C // NMAP
-            | 0x2205_57DA // STBL
             | 0x073F_AA07 // S3SA
             | 0x73E9_3EEB // manifest
             | 0x025C_95B6 // LAYO
@@ -293,7 +292,7 @@ impl Package {
     }
 
     pub fn data(&self, entry: &ResourceEntry) -> Result<Vec<u8>> {
-        self.data_with_digest(entry).map(|(data, _)| data)
+        self.data_from_file(&self.data_file, entry)
     }
 
     /// Decode one resource from the package's existing positioned-read handle.
@@ -305,8 +304,63 @@ impl Package {
     }
 
     pub fn data_from_file(&self, file: &File, entry: &ResourceEntry) -> Result<Vec<u8>> {
-        self.data_from_file_with_digest(file, entry)
-            .map(|(data, _)| data)
+        if entry.mem_size > MAX_RESOURCE_MEMORY {
+            bail!(
+                "resource {} declares unsupported decompressed size {} bytes",
+                entry.key_string(),
+                entry.mem_size
+            );
+        }
+        let cache_key = (entry.type_id, entry.group, entry.instance);
+        if payload_is_reused_by_scanner(entry.type_id) {
+            let cached = {
+                self.payload_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("package payload cache poisoned"))?
+                    .get(&cache_key)
+                    .cloned()
+            };
+            if let Some(cached) = cached {
+                return Ok(cached.data);
+            }
+        }
+        let raw = self.raw_data_from_file(file, entry)?;
+        let data = match entry.compressed {
+            0x0000 => {
+                if entry.file_size != entry.mem_size {
+                    bail!(
+                        "resource {} is marked uncompressed but disk size {} != memory size {}",
+                        entry.key_string(),
+                        entry.file_size,
+                        entry.mem_size
+                    );
+                }
+                raw
+            }
+            0xFFFF => compression::uncompress_stream(
+                &raw,
+                entry.file_size as usize,
+                entry.mem_size as usize,
+            )
+            .with_context(|| format!("decompress {}", entry.key_string()))?,
+            other => bail!(
+                "resource {} uses unsupported compression flag 0x{other:04X}",
+                entry.key_string()
+            ),
+        };
+        if payload_is_reused_by_scanner(entry.type_id) {
+            self.payload_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("package payload cache poisoned"))?
+                .insert(
+                    cache_key,
+                    CachedPayload {
+                        data: data.clone(),
+                        digest: None,
+                    },
+                );
+        }
+        Ok(data)
     }
 
     pub fn data_from_file_with_digest(
@@ -323,14 +377,25 @@ impl Package {
         }
         let cache_key = (entry.type_id, entry.group, entry.instance);
         if payload_is_reused_by_scanner(entry.type_id) {
-            if let Some(cached) = self
-                .payload_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("package payload cache poisoned"))?
-                .get(&cache_key)
-                .cloned()
-            {
-                return Ok((cached.data, cached.digest));
+            let cached = {
+                self.payload_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("package payload cache poisoned"))?
+                    .get(&cache_key)
+                    .cloned()
+            };
+            if let Some(cached) = cached {
+                let digest = cached
+                    .digest
+                    .unwrap_or_else(|| sha2::Sha256::digest(&cached.data).into());
+                if cached.digest.is_none() {
+                    self.payload_cache
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("package payload cache poisoned"))?
+                        .entry(cache_key)
+                        .and_modify(|payload| payload.digest = Some(digest));
+                }
+                return Ok((cached.data, digest));
             }
         }
         let raw = self.raw_data_from_file(file, entry)?;
@@ -366,7 +431,7 @@ impl Package {
                     cache_key,
                     CachedPayload {
                         data: data.clone(),
-                        digest,
+                        digest: Some(digest),
                     },
                 );
         }
@@ -414,6 +479,65 @@ mod tests {
         let mut next = [0u8; 1];
         sequential.read_exact(&mut next).unwrap();
         assert_eq!(&next, b"2");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn ordinary_reads_defer_digest_until_a_fingerprint_is_requested() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "s3cc-deferred-digest-{}-{unique}.package",
+            std::process::id()
+        ));
+        let payload = b"small decoded payload".to_vec();
+        std::fs::write(&path, &payload).unwrap();
+        let entry = ResourceEntry {
+            type_id: 0x0166_038C, // NMAP: cached by the scanner
+            group: 0,
+            instance: 1,
+            chunk_offset: 0,
+            file_size: payload.len() as u32,
+            mem_size: payload.len() as u32,
+            compressed: 0,
+            unknown2: 0,
+            file_size_high_bit: false,
+        };
+        let package = Package {
+            path: path.clone(),
+            major: 2,
+            minor: 0,
+            entries: vec![entry.clone()],
+            payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_file: Arc::new(File::open(&path).unwrap()),
+        };
+
+        assert_eq!(package.data(&entry).unwrap(), payload);
+        let cached_before = package
+            .payload_cache
+            .lock()
+            .unwrap()
+            .get(&(entry.type_id, entry.group, entry.instance))
+            .unwrap()
+            .digest;
+        assert!(cached_before.is_none());
+
+        let (decoded, digest) = package.data_with_digest(&entry).unwrap();
+        assert_eq!(decoded, payload);
+        let expected_digest: [u8; 32] = sha2::Sha256::digest(&decoded).into();
+        assert_eq!(digest, expected_digest);
+        let cached_after = package
+            .payload_cache
+            .lock()
+            .unwrap()
+            .get(&(entry.type_id, entry.group, entry.instance))
+            .unwrap()
+            .digest;
+        assert_eq!(cached_after, Some(digest));
+
+        drop(package);
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -29,12 +29,16 @@ assert(scanner.includes("scan_packages_core_with_progress(folder, language, oper
 assert(scanner.includes("scan_packages_core_with_progress(folder, language, operation_kind, false, false, true)"), "Legacy unified callers must retain the complete shared fingerprint path.");
 assert(unified.includes("analyze_duplicates_core") && unified.includes("analyze_conflicts_core"), "The compatibility unified path must retain shared-index analyzers.");
 assert(planner.includes("get_or_build_identity_with_metrics"), "Plan preview must use its bounded identity cache before execution revalidates SHA-256.");
+assert(cache.includes("get_or_build_identities_with_metrics"), "Large previews must resolve independent identity checks through the bounded batch helper.");
+assert(planner.includes("get_or_build_identities_with_metrics"), "Planner must use the bounded identity batch instead of serial full-file hashing.");
 assert(!planner.includes("get_or_build_analysis_with_metrics"), "Plan preview must not build resource fingerprints owned by Duplicates/Conflicts.");
 assert(planner.includes("analysis_file_fingerprint"), "Plan preview must narrow same-size duplicate candidates before a full hash.");
 assert(planner.includes("pub async fn build_organization_plan_with_cfg"), "Planner command must be asynchronous.");
 assert(app.includes("beginToolsOperation") && app.includes("cancelToolsOperation"), "Tools operations need progress and cancellation wiring.");
 assert(html.includes('id="tools-cancel"'), "Tools cancellation control is missing.");
 assert(app.includes("requestAnimationFrame"), "Large Manager lists must retain batched rendering.");
+assert(app.includes("el.planItems.replaceChildren(planItemsFragment)"), "Plan cards must be committed as one DOM batch.");
+assert(app.includes("el.planTree.replaceChildren(planTreeFragment)"), "Before/after rows must be committed as one DOM batch.");
 
 console.log(JSON.stringify({
   ok: true,
@@ -45,6 +49,8 @@ console.log(JSON.stringify({
     "scan-cache-external-change-validation",
     "unified-analysis",
     "async-planner",
+    "bounded-planner-identities",
+    "batched-plan-dom",
     "tools-progress-cancellation",
     "virtualized-rendering",
   ],

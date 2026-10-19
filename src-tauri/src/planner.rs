@@ -1,7 +1,7 @@
 use crate::{
     cache::{
-        get_or_build_identity_with_metrics, load_cache, load_identity_cache, save_identity_cache,
-        FingerprintCache, IdentityCache,
+        get_or_build_identities_with_metrics, get_or_build_identity_with_metrics, load_cache,
+        load_identity_cache, save_identity_cache, FingerprintCache, IdentityCache,
     },
     i18n::AppLanguage,
     manifest::sha256_file,
@@ -2595,9 +2595,12 @@ fn index_exact_duplicates(
     identities: &mut IdentityCache,
     identities_changed: &mut bool,
 ) -> HashMap<String, Vec<String>> {
-    let selected_sizes = selected_hashes
-        .keys()
-        .filter_map(|path| fs::metadata(path).ok().map(|metadata| metadata.len()))
+    // `selected_identity_fingerprints` was produced by the same current
+    // identity validation that yielded `selected_hashes`; reopening every
+    // selected file merely to recover its size is redundant.
+    let selected_sizes = selected_identity_fingerprints
+        .iter()
+        .map(|(size, _)| *size)
         .collect::<HashSet<_>>();
     if selected_sizes.is_empty() {
         return HashMap::new();
@@ -3435,9 +3438,11 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     }
     // Read the official model for every plan. Folder names that merely look
     // like categories are never enough to mark a package organized.
+    let model_started = Instant::now();
     let manual_model_root = manual_model_packages_root()?;
     let manual_model = load_or_build_manual_model_index(&manual_model_root)?;
     let protected_empty_directories = canonical_model_directories_for_root(&root, &manual_model);
+    let model_ms = model_started.elapsed().as_millis();
     // The selected root can be Mods, any Packages/Overrides subfolder, or a
     // self-contained CC staging library elsewhere. All moves remain inside
     // this canonical root. Never invent an out-of-root destination.
@@ -3458,6 +3463,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         None
     };
 
+    let selection_started = Instant::now();
     let mut selected = HashSet::<PathBuf>::new();
     let mut selected_roots = Vec::<PathBuf>::new();
     for raw in &selected_paths {
@@ -3502,10 +3508,14 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let selection_ms = selection_started.elapsed().as_millis();
 
+    let workspace_started = Instant::now();
     let workspace = load_workspace_for_root(&root);
     let profile = active_profile(&workspace);
     let resource_cfg = resource_cfg_context(&root);
+    let workspace_ms = workspace_started.elapsed().as_millis();
+    let scan_started = Instant::now();
     let scan = if selected.is_empty() {
         // The selected roots are still handled below for previews and
         // auxiliary companions; no package parser is needed for them.
@@ -3522,6 +3532,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             None => scan_selected_roots(&root, language, &selected)?,
         }
     };
+    let scan_ms = scan_started.elapsed().as_millis();
     if crate::operation::is_cancelled("planning") {
         return Err(crate::operation::CANCELLED_ERROR.to_string());
     }
@@ -3556,25 +3567,27 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     // bounded identity cache and streams SHA-256 only on a cache miss.
     // Executor preflight still hashes every ready source immediately before
     // its first write, so this is never a mutation-grade shortcut.
+    let identity_started = Instant::now();
     let mut identity_cache = load_identity_cache(&root);
     let mut identity_cache_changed = false;
     let mut selected_hashes = HashMap::<PathBuf, String>::new();
     let mut selected_hash_set = HashSet::<String>::new();
     let mut selected_identity_fingerprints = HashSet::<(u64, String)>::new();
-    for path in &selected {
-        let (identity, metrics) =
-            get_or_build_identity_with_metrics(path, &mut identity_cache).map_err(|error| {
-                format!(
-                    "Could not validate selected package {} for planning: {error}",
-                    path.display()
-                )
-            })?;
+    let mut selected_identity_paths = selected.iter().cloned().collect::<Vec<_>>();
+    selected_identity_paths.sort_by_key(|path| normalized_path_key(&root, path));
+    for (path, identity, metrics) in
+        get_or_build_identities_with_metrics(&selected_identity_paths, &mut identity_cache)?
+    {
         identity_cache_changed |= !metrics.cache_hit;
-        selected_hashes.insert(path.clone(), identity.file_sha256.clone());
+        selected_hashes.insert(path, identity.file_sha256.clone());
         selected_hash_set.insert(identity.file_sha256);
-        selected_identity_fingerprints
-            .insert((identity.size, identity.quick_fingerprint.to_ascii_uppercase()));
+        selected_identity_fingerprints.insert((
+            identity.size,
+            identity.quick_fingerprint.to_ascii_uppercase(),
+        ));
     }
+    let identity_ms = identity_started.elapsed().as_millis();
+    let duplicates_started = Instant::now();
     let duplicate_peers = index_exact_duplicates(
         &root,
         &scan.items,
@@ -3583,6 +3596,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         &mut identity_cache,
         &mut identity_cache_changed,
     );
+    let duplicate_index_ms = duplicates_started.elapsed().as_millis();
     // A duplicate peer outside the selected set can add its identity lazily.
     // Persist only when something changed; serializing a large cache on every
     // repeated Preview Plan click used to be a measurable source of latency.
@@ -3596,6 +3610,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     let resource_cache = load_cache(&root);
     let possible_merged_peers = index_suspected_merged_sliders(&scan.items, &resource_cache);
 
+    let resolution_started = Instant::now();
     let mut partial_group_hashes = HashSet::<String>::new();
 
     for group in workspace.groups.iter().filter(|group| group.keep_together) {
@@ -4769,6 +4784,22 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     };
 
     stats.planning_ms = planning_started.elapsed().as_millis();
+    // Plan construction is a normal UI action. Keep profiling diagnostics
+    // opt-in so every production preview does not add console noise.
+    if std::env::var_os("S3CC_PLAN_PROFILE_ROOT").is_some() {
+        eprintln!(
+            "[S3CC timings] plan-backend selected={} model_ms={} selection_ms={} workspace_ms={} scan_ms={} identity_ms={} duplicate_index_ms={} resolution_ms={} total_ms={}",
+            selected.len(),
+            model_ms,
+            selection_ms,
+            workspace_ms,
+            scan_ms,
+            identity_ms,
+            duplicate_index_ms,
+            resolution_started.elapsed().as_millis(),
+            stats.planning_ms,
+        );
+    }
     Ok(OrganizationPlan {
         root: root.to_string_lossy().to_string(),
         manifest_preview: manifest_preview(&root, language, &ready_items),
@@ -6910,6 +6941,50 @@ mod tests {
         .unwrap();
         assert!(scan.items.is_empty());
         assert_eq!(scan.stats.packages, 0);
+    }
+
+    /// Opt-in physical planner benchmark. It never moves files: the input
+    /// must be an isolated corpus and this test only performs Organizer scan
+    /// plus two plan previews so logs can distinguish scan, cold identity
+    /// work and a warm reopen. It is inert in ordinary test runs.
+    #[test]
+    fn profile_external_planner_when_requested() {
+        let Ok(root) = std::env::var("S3CC_PLAN_PROFILE_ROOT") else {
+            return;
+        };
+        let language = AppLanguage::Pt;
+        let scan_started = Instant::now();
+        let scan = crate::scanner::scan_packages_core(root.clone(), language, None)
+            .expect("external planner profile scan should complete");
+        let scan_ms = scan_started.elapsed().as_millis();
+        assert!(
+            crate::scanner::cached_scan_for(Path::new(&root), language).is_some(),
+            "the Organizer scan must be reusable by the Planner"
+        );
+
+        let selected = vec![root.clone()];
+        let first_started = Instant::now();
+        let first =
+            build_organization_plan_with_cfg_core(root.clone(), language, selected.clone(), false)
+                .expect("cold planner preview should complete");
+        let first_ms = first_started.elapsed().as_millis();
+        let warm_started = Instant::now();
+        let warm = build_organization_plan_with_cfg_core(root, language, selected, false)
+            .expect("warm planner preview should complete");
+        let warm_ms = warm_started.elapsed().as_millis();
+
+        assert_eq!(first.items.len(), warm.items.len());
+        assert_eq!(first.stats.ready, warm.stats.ready);
+        assert_eq!(first.stats.blocked, warm.stats.blocked);
+        eprintln!(
+            "[S3CC profile] planner packages={} scan_ms={} cold_plan_ms={} warm_plan_ms={} ready={} blocked={}",
+            scan.items.len(),
+            scan_ms,
+            first_ms,
+            warm_ms,
+            first.stats.ready,
+            first.stats.blocked,
+        );
     }
 
     #[test]

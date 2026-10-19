@@ -548,6 +548,81 @@ pub fn get_or_build_identity_with_metrics(
     path: &Path,
     cache: &mut IdentityCache,
 ) -> Result<(CachedIdentity, CacheBuildMetrics), String> {
+    let key = canonical_key(path)?;
+    let existing = cache.entries.get(&key).cloned();
+    let (identity, metrics) = build_identity_with_existing(path, existing)?;
+    cache
+        .entries
+        .insert(identity.path.clone(), identity.clone());
+    Ok((identity, metrics))
+}
+
+/// Resolve a bounded batch of whole-file identities without serializing every
+/// SHA-256 miss behind a single planner loop.  Each worker still uses the
+/// exact same metadata, bounded probe and full-file SHA-256 rules as the
+/// single-file API above; only independent read-only files run concurrently.
+///
+/// Four workers are deliberately the ceiling.  Planning frequently follows a
+/// scanner that is still warming OS caches, and unrestricted hashing would
+/// compete with DBPF decoding, exhaust handles, and make slow disks worse.
+pub fn get_or_build_identities_with_metrics(
+    paths: &[PathBuf],
+    cache: &mut IdentityCache,
+) -> Result<Vec<(PathBuf, CachedIdentity, CacheBuildMetrics)>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut work = Vec::with_capacity(paths.len());
+    for path in paths {
+        let key = canonical_key(path)?;
+        work.push((path.clone(), cache.entries.get(&key).cloned()));
+    }
+
+    let worker_count = thread::available_parallelism()
+        .map(|parallelism| parallelism.get().saturating_div(2))
+        .unwrap_or(1)
+        .clamp(1, 4)
+        .min(work.len());
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(Vec::with_capacity(work.len()));
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some((path, existing)) = work.get(index) else {
+                    break;
+                };
+                let result = build_identity_with_existing(path, existing.clone())
+                    .map(|(identity, metrics)| (path.clone(), identity, metrics));
+                results
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(result);
+            });
+        }
+    });
+
+    let resolved = results
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut output = Vec::with_capacity(resolved.len());
+    for resolved_identity in resolved {
+        let (path, identity, metrics) = resolved_identity?;
+        cache
+            .entries
+            .insert(identity.path.clone(), identity.clone());
+        output.push((path, identity, metrics));
+    }
+    Ok(output)
+}
+
+fn build_identity_with_existing(
+    path: &Path,
+    existing: Option<CachedIdentity>,
+) -> Result<(CachedIdentity, CacheBuildMetrics), String> {
     let total_started = Instant::now();
     let key = canonical_key(path)?;
     let (size, modified_ns) = metadata_signature(path)?;
@@ -555,13 +630,13 @@ pub fn get_or_build_identity_with_metrics(
     let quick = quick_fingerprint(path, size)?;
     let quick_us = quick_started.elapsed().as_micros();
 
-    if let Some(existing) = cache.entries.get(&key) {
+    if let Some(existing) = existing {
         if existing.size == size
             && existing.modified_ns == modified_ns
             && existing.quick_fingerprint.eq_ignore_ascii_case(&quick)
         {
             return Ok((
-                existing.clone(),
+                existing,
                 CacheBuildMetrics {
                     cache_hit: true,
                     total_ms: total_started.elapsed().as_millis(),
@@ -586,7 +661,6 @@ pub fn get_or_build_identity_with_metrics(
         quick_fingerprint: quick,
         file_sha256,
     };
-    cache.entries.insert(key, identity.clone());
     Ok((
         identity,
         CacheBuildMetrics {
@@ -1267,6 +1341,49 @@ mod tests {
         assert_ne!(first_identity.file_sha256, changed.file_sha256);
         assert_eq!(third.dbpf_load_ms, 0);
         assert_eq!(third.resource_decode_us, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn planner_identity_batch_preserves_exact_hashes_and_reuses_warm_entries() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-planner-identity-batch-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = (0..5)
+            .map(|index| {
+                let path = root.join(format!("identity-{index}.package"));
+                write_empty_dbpf(&path, index);
+                path
+            })
+            .collect::<Vec<_>>();
+        let mut identities = IdentityCache::default();
+
+        let cold = get_or_build_identities_with_metrics(&paths, &mut identities).unwrap();
+        assert_eq!(cold.len(), paths.len());
+        assert!(cold.iter().all(|(_, _, metrics)| !metrics.cache_hit));
+        assert!(cold
+            .iter()
+            .all(|(_, _, metrics)| metrics.integrity_verified));
+        assert!(cold
+            .iter()
+            .all(|(_, _, metrics)| metrics.dbpf_load_ms == 0 && metrics.resource_decode_us == 0));
+
+        let warm = get_or_build_identities_with_metrics(&paths, &mut identities).unwrap();
+        assert!(warm.iter().all(|(_, _, metrics)| metrics.cache_hit));
+        let cold_hashes = cold
+            .iter()
+            .map(|(path, identity, _)| (path.clone(), identity.file_sha256.clone()))
+            .collect::<HashMap<_, _>>();
+        for (path, identity, _) in warm {
+            assert_eq!(cold_hashes.get(&path), Some(&identity.file_sha256));
+        }
+        assert_eq!(identities.entries.len(), paths.len());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
