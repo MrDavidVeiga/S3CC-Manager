@@ -192,6 +192,25 @@ fn is_disabled_package_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_duplicate_quarantine_copy(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase().ends_with(".package.duplicated"))
+        .unwrap_or(false)
+}
+
+/// A file already in the duplicate quarantine can only be normalized when a
+/// live, loadable keeper is present.  Requiring the same inactive suffix here
+/// would incorrectly reject the canonical active copy and leave a confirmed
+/// duplicate blocked forever.
+fn keeper_state_matches(source: &Path, candidate: &Path) -> bool {
+    if is_duplicate_quarantine_copy(source) {
+        !is_disabled_package_path(candidate)
+    } else {
+        is_disabled_package_path(source) == is_disabled_package_path(candidate)
+    }
+}
+
 fn build_manual_model_index(root: &Path) -> Result<ManualModelIndex, String> {
     if !root.is_dir() {
         return Err(format!(
@@ -2321,11 +2340,10 @@ fn is_selected_content_keeper(
     sha256: &str,
     selected_hashes: &HashMap<PathBuf, String>,
 ) -> bool {
-    let inactive = is_disabled_package_path(source);
     let keeper = selected_hashes
         .iter()
         .filter(|(path, hash)| {
-            hash.eq_ignore_ascii_case(sha256) && is_disabled_package_path(path) == inactive
+            hash.eq_ignore_ascii_case(sha256) && keeper_state_matches(source, path)
         })
         .map(|(path, _)| path)
         .min_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
@@ -2391,8 +2409,8 @@ fn is_canonical_duplicate_peer(
 /// the keeper candidate for the current execution.
 fn add_existing_model_peer_paths(
     root: &Path,
+    source: &Path,
     sha256: &str,
-    inactive: bool,
     manual_model: &ManualModelIndex,
     candidate_paths: &mut BTreeSet<PathBuf>,
 ) {
@@ -2402,7 +2420,7 @@ fn add_existing_model_peer_paths(
     {
         for file in files {
             let path = root.join(&file.relative_path);
-            if path.is_file() && is_disabled_package_path(&path) == inactive {
+            if path.is_file() && keeper_state_matches(source, &path) {
                 candidate_paths.insert(path);
             }
         }
@@ -2419,21 +2437,21 @@ fn is_selected_content_keeper_for_scan(
     manual_model: &ManualModelIndex,
     resource_cfg: Option<&ResourceCfgContext>,
 ) -> bool {
-    let inactive = is_disabled_package_path(source);
     let mut candidate_paths = selected_hashes
         .iter()
-        .filter(|(path, hash)| {
-            hash.eq_ignore_ascii_case(sha256) && is_disabled_package_path(path) == inactive
+        .filter(|(_, hash)| {
+            hash.eq_ignore_ascii_case(sha256)
         })
         .map(|(path, _)| path.clone())
         .collect::<BTreeSet<_>>();
     for relative in peer_relative_paths {
         let path = root.join(relative);
-        if path.is_file() && is_disabled_package_path(&path) == inactive {
+        if path.is_file() {
             candidate_paths.insert(path);
         }
     }
-    add_existing_model_peer_paths(root, sha256, inactive, manual_model, &mut candidate_paths);
+    add_existing_model_peer_paths(root, source, sha256, manual_model, &mut candidate_paths);
+    candidate_paths.retain(|path| keeper_state_matches(source, path));
     let mut candidates = candidate_paths
         .into_iter()
         .map(|path| {
@@ -2476,21 +2494,21 @@ fn selected_content_keeper_relative_path(
     manual_model: &ManualModelIndex,
     resource_cfg: Option<&ResourceCfgContext>,
 ) -> Option<String> {
-    let inactive = is_disabled_package_path(source);
     let mut candidate_paths = selected_hashes
         .iter()
-        .filter(|(path, hash)| {
-            hash.eq_ignore_ascii_case(sha256) && is_disabled_package_path(path) == inactive
+        .filter(|(_, hash)| {
+            hash.eq_ignore_ascii_case(sha256)
         })
         .map(|(path, _)| path.clone())
         .collect::<BTreeSet<_>>();
     for relative in peer_relative_paths {
         let path = root.join(relative);
-        if path.is_file() && is_disabled_package_path(&path) == inactive {
+        if path.is_file() {
             candidate_paths.insert(path);
         }
     }
-    add_existing_model_peer_paths(root, sha256, inactive, manual_model, &mut candidate_paths);
+    add_existing_model_peer_paths(root, source, sha256, manual_model, &mut candidate_paths);
+    candidate_paths.retain(|path| keeper_state_matches(source, path));
     let mut candidates = candidate_paths
         .into_iter()
         .map(|path| {
@@ -5458,6 +5476,87 @@ mod tests {
             ),
             Some(relative_key(Path::new(canonical_relative)))
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quarantined_duplicate_can_use_a_live_canonical_keeper() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-quarantine-live-keeper-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let packages = root.join("Packages");
+        let quarantined = packages
+            .join("#Duplicados")
+            .join("same.package.duplicated");
+        let keeper = packages.join("Sliders").join("same.package");
+        std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&quarantined, b"same bytes").unwrap();
+        std::fs::write(&keeper, b"same bytes").unwrap();
+        let packages = packages.canonicalize().unwrap();
+
+        let (keeper_path, keeper_item) =
+            synthetic_scan_item(&packages, "Sliders\\same.package", &["Sliders"]);
+        let source_path = quarantined.canonicalize().unwrap();
+        let keeper_path = keeper_path.canonicalize().unwrap();
+        let mut selected_hashes = HashMap::new();
+        selected_hashes.insert(source_path.clone(), "SAME".into());
+        let mut scan = HashMap::new();
+        scan.insert(keeper_path.clone(), &keeper_item);
+        let mut directories = BTreeMap::new();
+        directories.insert(
+            model_key(&["Sliders".to_string()]),
+            vec!["Sliders".to_string()],
+        );
+        let mut files_by_sha256 = HashMap::new();
+        files_by_sha256.insert(
+            "SAME".to_string(),
+            vec![ManualModelFile {
+                relative_path: "Sliders\\same.package".to_string(),
+                directory_parts: vec!["Sliders".to_string()],
+                file_name: "same.package".to_string(),
+            }],
+        );
+        let manual_model = ManualModelIndex {
+            directories,
+            files_by_sha256,
+        };
+
+        assert!(is_selected_content_keeper_for_scan(
+            &packages,
+            &keeper_path,
+            "SAME",
+            &selected_hashes,
+            &["Sliders\\same.package".to_string()],
+            &scan,
+            &manual_model,
+            None,
+        ));
+        assert_eq!(
+            selected_content_keeper_relative_path(
+                &packages,
+                &source_path,
+                "SAME",
+                &selected_hashes,
+                &["Sliders\\same.package".to_string()],
+                &scan,
+                &manual_model,
+                None,
+            ),
+            Some("Sliders\\same.package".to_string())
+        );
+        assert!(!is_selected_content_keeper_for_scan(
+            &packages,
+            &source_path,
+            "SAME",
+            &selected_hashes,
+            &["Sliders\\same.package".to_string()],
+            &scan,
+            &manual_model,
+            None,
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 
