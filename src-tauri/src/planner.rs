@@ -1,4 +1,7 @@
 use crate::{
+    category_identity::{
+        canonicalize_managed_destination_parts, is_duplicate_quarantine_root, stable_empty_roots,
+    },
     cache::{
         get_or_build_identities_with_metrics, get_or_build_identity_with_metrics, load_cache,
         load_identity_cache, save_identity_cache, FingerprintCache, IdentityCache,
@@ -1322,6 +1325,7 @@ pub(crate) fn normalized_path_key(root: &Path, path: &Path) -> String {
 fn canonical_model_directories_for_root(
     root: &Path,
     manual_model: &ManualModelIndex,
+    language: AppLanguage,
 ) -> Vec<String> {
     if !(is_mods_root(root) || is_packages_root(root) || is_within_packages(root)) {
         return Vec::new();
@@ -1332,6 +1336,7 @@ fn canonical_model_directories_for_root(
         .values()
         .filter_map(|parts| {
             let mapped = model_parts_for_selected_root(root, root, parts).ok()?;
+            let mapped = canonicalize_managed_destination_parts(&mapped, language);
             let mut relative = PathBuf::new();
             for part in mapped {
                 relative.push(part);
@@ -1342,6 +1347,30 @@ fn canonical_model_directories_for_root(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+/// Detect only a Manager-owned duplicate bucket at the loading-root level.
+/// A creator folder named "Duplicates" deeper in the tree remains ordinary
+/// user content and is never reinterpreted as quarantine.
+fn is_duplicate_quarantine_source(root: &Path, source: &Path) -> bool {
+    let Ok(relative) = source.strip_prefix(root) else {
+        return false;
+    };
+    let mut parts = relative.components().filter_map(|component| match component {
+        Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+        _ => None,
+    });
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let category_root = if first.eq_ignore_ascii_case("Packages")
+        || first.eq_ignore_ascii_case("Overrides")
+    {
+        parts.next()
+    } else {
+        Some(first)
+    };
+    category_root.is_some_and(|name| is_duplicate_quarantine_root(&name))
 }
 
 fn same_relative_path(left: &str, right: &str) -> bool {
@@ -1576,6 +1605,45 @@ fn is_inside_duplicate_quarantine(path: &Path, quarantine: &Path) -> bool {
     path == quarantine || path.strip_prefix(quarantine).is_ok()
 }
 
+fn is_inside_any_duplicate_quarantine(path: &Path, quarantines: &[PathBuf]) -> bool {
+    quarantines
+        .iter()
+        .any(|quarantine| is_inside_duplicate_quarantine(path, quarantine))
+}
+
+/// Find only direct, Manager-owned quarantine roots.  Historical localized
+/// names are intentionally sources, while `canonical` is the only target.
+fn duplicate_quarantine_roots(root: &Path, language: AppLanguage) -> Vec<PathBuf> {
+    let base = if is_mods_root(root) {
+        root.join("Packages")
+    } else {
+        root.to_path_buf()
+    };
+    let canonical = base.join(language.duplicates_folder());
+    let mut roots = match fs::read_dir(&base) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                (file_type.is_dir()
+                    && !file_type.is_symlink()
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(is_duplicate_quarantine_root))
+                .then(|| entry.path())
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    if canonical.is_dir() && !roots.iter().any(|path| same_path_case_insensitive(path, &canonical)) {
+        roots.push(canonical);
+    }
+    roots.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    roots.dedup_by(|left, right| same_path_case_insensitive(left, right));
+    roots
+}
+
 /// Confirm an active keeper before changing an existing duplicate-quarantine
 /// entry. The quarantine tree itself is deliberately excluded: another stale
 /// copy there is not proof that the user still has a preserved, loadable
@@ -1584,7 +1652,7 @@ fn is_inside_duplicate_quarantine(path: &Path, quarantine: &Path) -> bool {
 /// accepted candidate is rehashed in full before it can authorize a move.
 fn confirmed_quarantine_keeper(
     root: &Path,
-    quarantine: &Path,
+    quarantines: &[PathBuf],
     source: &Path,
     source_hash: &str,
     manual_model: &ManualModelIndex,
@@ -1599,7 +1667,7 @@ fn confirmed_quarantine_keeper(
         for file in files {
             let candidate = root.join(&file.relative_path);
             if candidate.is_file()
-                && !is_inside_duplicate_quarantine(&candidate, quarantine)
+                && !is_inside_any_duplicate_quarantine(&candidate, quarantines)
                 && is_package_file(&candidate)
                 && !is_disabled_package_path(&candidate)
             {
@@ -1621,7 +1689,7 @@ fn confirmed_quarantine_keeper(
     {
         if !entry.file_type().is_file()
             || !is_package_file(entry.path())
-            || is_inside_duplicate_quarantine(entry.path(), quarantine)
+            || is_inside_any_duplicate_quarantine(entry.path(), quarantines)
             || is_disabled_package_path(entry.path())
             || duplicate_logical_name(entry.path()).as_deref() != Some(source_name.as_str())
         {
@@ -1676,41 +1744,42 @@ fn append_nested_duplicate_quarantine_items(
     stats: &mut PlanStats,
     reserved: &mut HashSet<String>,
 ) -> Result<(), String> {
-    let quarantine = if is_mods_root(root) {
-        root.join("Packages").join(language.duplicates_folder())
-    } else {
-        root.join(language.duplicates_folder())
-    };
-    if !quarantine.is_dir() {
+    let quarantine_roots = duplicate_quarantine_roots(root, language);
+    if quarantine_roots.is_empty() {
         return Ok(());
     }
 
-    let mut nested = WalkDir::new(&quarantine)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter_map(|entry| {
-            let relative = entry.path().strip_prefix(root).ok()?.to_path_buf();
-            let parent = relative.parent()?;
-            let flat_parent = if is_mods_root(root) {
-                Path::new("Packages").join(language.duplicates_folder())
-            } else {
-                PathBuf::from(language.duplicates_folder())
-            };
-            let is_flat = same_path_case_insensitive(parent, &flat_parent);
-            let inactive = entry
-                .path()
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value.to_ascii_lowercase().ends_with(".package.duplicated"));
-            if is_flat && inactive {
-                None
-            } else if is_package_file(entry.path()) {
-                Some(entry.path().to_path_buf())
-            } else {
-                None
-            }
+    let mut nested = quarantine_roots
+        .iter()
+        .flat_map(|quarantine_root| {
+            WalkDir::new(quarantine_root)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .filter_map(|entry| {
+                    let relative = entry.path().strip_prefix(root).ok()?.to_path_buf();
+                    let parent = relative.parent()?;
+                    let flat_parent = if is_mods_root(root) {
+                        Path::new("Packages").join(language.duplicates_folder())
+                    } else {
+                        PathBuf::from(language.duplicates_folder())
+                    };
+                    let is_flat_canonical = same_path_case_insensitive(parent, &flat_parent);
+                    let inactive = entry
+                        .path()
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.to_ascii_lowercase().ends_with(".package.duplicated"));
+                    if is_flat_canonical && inactive {
+                        None
+                    } else if is_package_file(entry.path()) {
+                        Some(entry.path().to_path_buf())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     nested.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
@@ -1728,8 +1797,13 @@ fn append_nested_duplicate_quarantine_items(
                 source.display()
             )
         })?;
-        let keeper =
-            confirmed_quarantine_keeper(root, &quarantine, &source_canonical, &hash, manual_model);
+        let keeper = confirmed_quarantine_keeper(
+            root,
+            &quarantine_roots,
+            &source_canonical,
+            &hash,
+            manual_model,
+        );
         if keeper.is_none() {
             let relative = source_canonical
                 .strip_prefix(root)
@@ -3441,7 +3515,16 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     let model_started = Instant::now();
     let manual_model_root = manual_model_packages_root()?;
     let manual_model = load_or_build_manual_model_index(&manual_model_root)?;
-    let protected_empty_directories = canonical_model_directories_for_root(&root, &manual_model);
+    let mut protected_empty_directories =
+        canonical_model_directories_for_root(&root, &manual_model, language);
+    let loading_prefix = if is_mods_root(&root) { "Packages\\" } else { "" };
+    protected_empty_directories.extend(
+        stable_empty_roots(language)
+            .into_iter()
+            .map(|name| format!("{loading_prefix}{name}")),
+    );
+    protected_empty_directories.sort();
+    protected_empty_directories.dedup();
     let model_ms = model_started.elapsed().as_millis();
     // The selected root can be Mods, any Packages/Overrides subfolder, or a
     // self-contained CC staging library elsewhere. All moves remain inside
@@ -3481,15 +3564,22 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                 .flatten()
             {
                 if entry.file_type().is_file() && is_package_file(entry.path()) {
-                    selected.insert(entry.path().canonicalize().map_err(|error| {
+                    let package = entry.path().canonicalize().map_err(|error| {
                         format!(
                             "Could not resolve selected package {}: {error}",
                             entry.path().display()
                         )
-                    })?);
+                    })?;
+                    // Duplicate-quarantine aliases are normalized by the
+                    // dedicated migration below.  Sending them through the
+                    // ordinary classifier as well could produce two writes
+                    // for one source in a single plan.
+                    if !is_duplicate_quarantine_source(&root, &package) {
+                        selected.insert(package);
+                    }
                 }
             }
-        } else {
+        } else if !is_duplicate_quarantine_source(&root, &canonical) {
             selected.insert(canonical);
         }
     }
@@ -3769,13 +3859,23 @@ pub(crate) fn build_organization_plan_with_cfg_core(
         let hash_model_destination = if is_override_source {
             None
         } else {
-            Some(resolve_model_destination(
-                &manual_model,
-                &root,
-                &source_canonical,
-                &source_hash,
-                &item.destination_parts,
-            ))
+            Some(
+                resolve_model_destination(
+                    &manual_model,
+                    &root,
+                    &source_canonical,
+                    &source_hash,
+                    &item.destination_parts,
+                )
+                .map(|mut destination| {
+                    // A model exemplar may still use an old translated
+                    // Manager bucket.  The identifier is stable; only the
+                    // physical root is localized for this active plan.
+                    destination.parts =
+                        canonicalize_managed_destination_parts(&destination.parts, language);
+                    destination
+                }),
+            )
         };
         let outside_active_branch = packages_root
             .as_ref()
@@ -5129,6 +5229,65 @@ mod tests {
             .unwrap()
             .contains("abcdef"));
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn historical_duplicate_root_migrates_once_to_the_active_language_root() {
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-historical-duplicate-root-{}",
+            std::process::id()
+        ));
+        let packages = base.join("Packages");
+        let legacy = packages.join("#Duplicates");
+        let source = legacy.join("same.package.duplicated");
+        let keeper = packages.join("Sliders").join("same.package");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"same bytes").unwrap();
+        std::fs::write(&keeper, b"same bytes").unwrap();
+        let packages = packages.canonicalize().unwrap();
+        let source = source.canonicalize().unwrap();
+        assert!(is_duplicate_quarantine_source(&packages, &source));
+
+        let mut items = Vec::new();
+        let mut directories = BTreeSet::new();
+        let mut stats = PlanStats::default();
+        let mut reserved = HashSet::new();
+        append_nested_duplicate_quarantine_items(
+            &packages,
+            AppLanguage::Pt,
+            &ManualModelIndex {
+                directories: BTreeMap::new(),
+                files_by_sha256: HashMap::new(),
+            },
+            &mut items,
+            &mut directories,
+            &mut stats,
+            &mut reserved,
+        )
+        .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].plan_status, "ready_duplicate_quarantine_migration");
+        assert_eq!(items[0].source_path, source.to_string_lossy().to_string());
+        assert!(items[0]
+            .destination_relative_path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("#Duplicados\\")));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn duplicate_root_recognition_never_claims_personal_nested_folder() {
+        let root = Path::new(r"C:\Mods\Packages");
+        assert!(is_duplicate_quarantine_source(
+            root,
+            &root.join("#Duplicates").join("same.package")
+        ));
+        assert!(!is_duplicate_quarantine_source(
+            root,
+            &root.join("Anthon").join("Duplicates").join("same.package")
+        ));
     }
 
     #[test]

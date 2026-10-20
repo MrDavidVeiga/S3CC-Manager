@@ -1,4 +1,5 @@
 use crate::{
+    category_identity::stable_empty_roots,
     i18n::AppLanguage,
     manifest::{
         replace_manifest_atomic, sha256_file, write_manifest_atomic, RestoreEntry, RestoreManifest,
@@ -237,26 +238,6 @@ fn package_extension(path: &Path) -> bool {
         || lower.ends_with(".package.duplicated")
 }
 
-fn is_stable_review_or_quarantine_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let value = component.as_os_str().to_string_lossy();
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "#sem categoria"
-                | "sem categoria"
-                | "#not categorized"
-                | "not categorized"
-                | "#sin categoría"
-                | "sin categoría"
-                | "#duplicados"
-                | "#duplicates"
-                | "previews de ccs"
-                | "cc previews"
-                | "vistas previas de cc"
-        )
-    })
-}
-
 fn snapshot_extension(path: &Path) -> bool {
     if package_extension(path) {
         return true;
@@ -435,7 +416,8 @@ pub(crate) fn cleanup_empty_directories_after_organization(
     root: &Path,
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
 ) -> (usize, usize, Vec<String>) {
-    cleanup_empty_directories_after_organization_with_protected(root, moved_pairs, None, &[])
+    let protected = default_stable_empty_directories(root);
+    cleanup_empty_directories_after_organization_with_protected(root, moved_pairs, None, &protected)
 }
 
 fn cleanup_empty_directories_after_organization_scoped(
@@ -443,7 +425,28 @@ fn cleanup_empty_directories_after_organization_scoped(
     moved_pairs: &[(PathBuf, PathBuf, String, u64)],
     scope_roots: Option<&[PathBuf]>,
 ) -> (usize, usize, Vec<String>) {
-    cleanup_empty_directories_after_organization_with_protected(root, moved_pairs, scope_roots, &[])
+    let protected = default_stable_empty_directories(root);
+    cleanup_empty_directories_after_organization_with_protected(
+        root,
+        moved_pairs,
+        scope_roots,
+        &protected,
+    )
+}
+
+/// Compatibility helpers used by targeted cleanup tests do not have a plan
+/// carrying its active language.  PT is the historical Manager default. Real
+/// plans pass their explicit, language-specific protected list below.
+fn default_stable_empty_directories(root: &Path) -> Vec<String> {
+    let prefix = if crate::resource_cfg::is_mods_layout_root(root) {
+        "Packages\\"
+    } else {
+        ""
+    };
+    stable_empty_roots(AppLanguage::Pt)
+        .into_iter()
+        .map(|name| format!("{prefix}{name}"))
+        .collect()
 }
 
 fn cleanup_remove_diagnostic(folder: &Path, error: &std::io::Error) -> String {
@@ -516,30 +519,10 @@ fn cleanup_empty_directories_after_organization_with_protected(
     scope_roots: Option<&[PathBuf]>,
     protected_relative_directories: &[String],
 ) -> (usize, usize, Vec<String>) {
-    let is_reserved_root = |path: &Path| {
-        // Protect the special-folder roots themselves, not every descendant.
-        // Older Manager versions created hash/category/source-path buckets
-        // inside #Duplicados and #Sem Categoria. Once those buckets become
-        // empty, keeping them would recreate the legacy hierarchy forever.
-        path.file_name().is_some_and(|name| {
-            matches!(
-                name.to_string_lossy().to_ascii_lowercase().as_str(),
-                "#duplicados"
-                    | "#duplicates"
-                    | "#sem categoria"
-                    | "#not categorized"
-                    | "#sin categorizar"
-                    | "previews de ccs"
-                    | "cc previews"
-                    | "vistas previas de cc"
-            )
-        })
-    };
     let is_protected_empty_directory = |path: &Path| {
-        is_reserved_root(path)
-            || protected_relative_directories.iter().any(|relative| {
-                normalized_path_key(root, path) == normalized_path_key(root, Path::new(relative))
-            })
+        protected_relative_directories.iter().any(|relative| {
+            normalized_path_key(root, path) == normalized_path_key(root, Path::new(relative))
+        })
     };
     let is_loading_branch_root = |path: &Path| {
         (path == root || path.parent() == Some(root))
@@ -874,10 +857,9 @@ fn remaining_legacy_details_with_context(
         candidate == directory || candidate.starts_with(&format!("{directory}\\"))
     };
     let is_canonical_or_stable = |path: &Path| {
-        is_stable_review_or_quarantine_path(path)
-            || protected_relative_directories
-                .iter()
-                .any(|relative| is_under_relative_directory(path, relative))
+        protected_relative_directories
+            .iter()
+            .any(|relative| is_under_relative_directory(path, relative))
     };
     let item_by_source = plan_items
         .iter()
@@ -1968,6 +1950,28 @@ mod tests {
         assert_eq!(retained, 0);
         assert!(canonical.is_dir());
         assert!(!legacy.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_empty_translated_alias_but_keeps_pt_canonical_root() {
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-cleanup-category-alias-{}-{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let packages = base.join("Packages");
+        let alias = packages.join("#Duplicates");
+        let canonical = packages.join("#Duplicados");
+        fs::create_dir_all(&alias).unwrap();
+        fs::create_dir_all(&canonical).unwrap();
+
+        let (removed, _, warnings) =
+            cleanup_empty_directories_after_organization(&packages, &[]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(removed >= 1);
+        assert!(!alias.exists(), "historical alias was retained");
+        assert!(canonical.is_dir(), "active canonical root was removed");
         fs::remove_dir_all(base).unwrap();
     }
 

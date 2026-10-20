@@ -1,6 +1,7 @@
 pub mod analyzer;
 pub mod audit_report;
 pub mod cache;
+pub mod category_identity;
 pub mod catalog;
 pub mod cc_catalog;
 pub mod compression;
