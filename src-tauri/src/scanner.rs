@@ -639,6 +639,100 @@ fn localized_special_folder(language: AppLanguage, key: &str) -> &'static str {
     }
 }
 
+// A package without CASP/OBJD can still be identified as an override without
+// inventing a semantic subtype from its file name or source directory.  The
+// reference catalog proves that a payload changes a game resource; the
+// Overrides branch is an explicit loading contract, not a creator/category
+// hint.  Both are sufficient for the *generic* replacement classification,
+// but never for a more specific body/object/CAS folder.
+fn reference_or_override_family_classification(
+    types: &BTreeSet<u32>,
+    reference_evidence: Option<&ReferenceEvidence>,
+    source_is_override: bool,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    if types.contains(&TYPE_CASP) || types.contains(&TYPE_OBJD) || types.contains(&TYPE_S3SA) {
+        return None;
+    }
+
+    let official_changed = reference_evidence.is_some_and(|evidence| {
+        evidence.changed_resource_count > 0
+            && matches!(
+                evidence.official_overlap_kind.as_deref(),
+                Some("replacement_candidate") | Some("mixed_official_and_new")
+            )
+    });
+
+    // LAYO is the UI layout resource.  A CAS-specific layout is classified by
+    // the stronger internal-marker rule above; all remaining layout packages
+    // are safely grouped as Interface without deriving a fake CAS subtype.
+    if types.contains(&TYPE_LAYO_LOCAL) {
+        let interface = localized_special_folder(language, "ui").to_string();
+        let mut detected_from = vec!["LAYO".to_string()];
+        if official_changed {
+            detected_from.push("OfficialReplacementEvidence".to_string());
+        }
+        if source_is_override {
+            detected_from.push("OverridesLoadingBranch".to_string());
+        }
+        return Some(PackageFamilyClassification {
+            main_category: interface.clone(),
+            sub_category: None,
+            folder_parts: vec![interface],
+            detected_from,
+            technical_reason: if official_changed {
+                "LAYO interface resource with changed payload for an official TGI => Interface. No narrower UI folder is inferred.".to_string()
+            } else {
+                "LAYO interface resource => Interface. No semantic subtype is inferred from the source path or filename.".to_string()
+            },
+        });
+    }
+
+    if !(official_changed || source_is_override) {
+        return None;
+    }
+
+    let replacements = localized_special_folder(language, "replacements").to_string();
+    let mut detected_from = Vec::new();
+    if official_changed {
+        detected_from.push("OfficialReplacementEvidence".to_string());
+    }
+    if source_is_override {
+        detected_from.push("OverridesLoadingBranch".to_string());
+    }
+    Some(PackageFamilyClassification {
+        main_category: replacements.clone(),
+        sub_category: None,
+        folder_parts: vec![replacements],
+        detected_from,
+        technical_reason: if official_changed {
+            "Changed payload for an official TGI proves an override/replacement. CASP/OBJD do not prove a narrower semantic subtype, so the package remains in the generic replacement category.".to_string()
+        } else {
+            "Package is in the explicit Overrides loading branch. It is recorded as a protected generic replacement; no semantic subtype is inferred from the source path or filename.".to_string()
+        },
+    })
+}
+
+fn store_reference_family_classification(
+    evidence: &ReferenceEvidence,
+) -> Option<PackageFamilyClassification> {
+    if evidence.store_confidence.as_deref() != Some("confirmed")
+        || evidence.store_category_parts.is_empty()
+    {
+        return None;
+    }
+    let folder_parts = evidence.store_category_parts.clone();
+    Some(PackageFamilyClassification {
+        main_category: folder_parts.first()?.clone(),
+        sub_category: folder_parts.get(1).cloned(),
+        folder_parts,
+        detected_from: vec!["StoreCatalogExact".to_string()],
+        technical_reason:
+            "Confirmed by the persistent Sims 3 Store technical package/resource-set catalog."
+                .to_string(),
+    })
+}
+
 fn internal_signature(
     package: &Package,
     resource_types: &[u32],
@@ -4749,7 +4843,58 @@ fn scan_one_with_index(
                 status = "needs_review".to_string();
             }
             PackageFamilyResult::None => {
-                warnings.push(localized_warning(language, "none").to_string());
+                if let Some(classification) = reference_or_override_family_classification(
+                    &type_ids,
+                    reference_evidence.as_ref(),
+                    source_is_override,
+                    language,
+                ) {
+                    for source in &classification.detected_from {
+                        detected_from.insert(source.clone());
+                    }
+                    destination_parts = classification.folder_parts.clone();
+                    destination_path = Some(destination_parts.join("\\"));
+                    status = "classified".to_string();
+                    classification_reason = Some(classification.technical_reason.clone());
+                    family_primary = Some(classification);
+                } else {
+                    warnings.push(localized_warning(language, "none").to_string());
+                }
+            }
+        }
+    }
+
+    // Store classification is authoritative only for a complete, unambiguous
+    // package/resource-set match.  Resolve it before the public category is
+    // projected so category, destination and status always remain coherent.
+    if status == "unknown" || status == "needs_review" {
+        if let Some(classification) = reference_evidence
+            .as_ref()
+            .and_then(store_reference_family_classification)
+        {
+            for source in &classification.detected_from {
+                detected_from.insert(source.clone());
+            }
+            destination_parts = classification.folder_parts.clone();
+            destination_path = Some(destination_parts.join("\\"));
+            status = "classified".to_string();
+            classification_reason = Some(classification.technical_reason.clone());
+            family_primary = Some(classification);
+        }
+    }
+
+    if let Some(evidence) = reference_evidence.as_ref() {
+        if evidence.official_overlap_kind.as_deref() == Some("replacement_candidate")
+            || evidence.official_overlap_kind.as_deref() == Some("mixed_official_and_new")
+        {
+            detected_from.insert("OfficialReplacementEvidence".to_string());
+        }
+        if evidence.official_overlap_kind.as_deref() == Some("official_copy") {
+            detected_from.insert("OfficialResourceMatch".to_string());
+        }
+        for message in &evidence.evidence {
+            if !warnings.contains(message) {
+                warnings.push(message.clone());
             }
         }
     }
@@ -4794,33 +4939,6 @@ fn scan_one_with_index(
             None,
         )
     };
-
-    if let Some(evidence) = reference_evidence.as_ref() {
-        if evidence.store_confidence.as_deref() == Some("confirmed")
-            && !evidence.store_category_parts.is_empty()
-            && (status == "unknown" || status == "needs_review")
-        {
-            detected_from.insert("StoreCatalogExact".to_string());
-            destination_parts = evidence.store_category_parts.clone();
-            destination_path = Some(destination_parts.join("\\"));
-            status = "classified".to_string();
-            classification_reason = Some(
-                "Confirmed by the persistent Sims 3 Store technical package/resource-set catalog."
-                    .to_string(),
-            );
-        }
-        if evidence.official_overlap_kind.as_deref() == Some("replacement_candidate") {
-            detected_from.insert("OfficialReplacementEvidence".to_string());
-        }
-        if evidence.official_overlap_kind.as_deref() == Some("official_copy") {
-            detected_from.insert("OfficialResourceMatch".to_string());
-        }
-        for message in &evidence.evidence {
-            if !warnings.contains(message) {
-                warnings.push(message.clone());
-            }
-        }
-    }
 
     if classification_reason.is_none() && !classifications.is_empty() {
         classification_reason = Some(
@@ -6234,6 +6352,100 @@ mod tests {
             .folder_parts,
             vec!["Correções", "Jogabilidade"]
         );
+    }
+
+    #[test]
+    fn official_resource_evidence_classifies_only_a_generic_replacement() {
+        let evidence = ReferenceEvidence {
+            official_overlap_kind: Some("mixed_official_and_new".to_string()),
+            changed_resource_count: 3,
+            ..ReferenceEvidence::default()
+        };
+        let classification = reference_or_override_family_classification(
+            &BTreeSet::from([TYPE_NMAP_LOCAL, TYPE_IMG]),
+            Some(&evidence),
+            false,
+            AppLanguage::Pt,
+        )
+        .expect("changed official TGIs should prove a replacement family");
+        assert_eq!(classification.folder_parts, vec!["Substituições"]);
+        assert!(classification
+            .detected_from
+            .contains(&"OfficialReplacementEvidence".to_string()));
+        assert!(!classification.technical_reason.contains("filename"));
+    }
+
+    #[test]
+    fn overrides_branch_is_protected_generic_replacement_without_fake_subtype() {
+        let classification = reference_or_override_family_classification(
+            &BTreeSet::from([TYPE_NMAP_LOCAL, TYPE_IMG]),
+            None,
+            true,
+            AppLanguage::Pt,
+        )
+        .expect("the explicit Overrides branch is a protected replacement family");
+        assert_eq!(classification.folder_parts, vec!["Substituições"]);
+        assert_eq!(classification.sub_category, None);
+        assert!(classification
+            .detected_from
+            .contains(&"OverridesLoadingBranch".to_string()));
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-overrides-branch-fixture-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("Packages")).unwrap();
+        std::fs::create_dir_all(root.join("Overrides")).unwrap();
+        assert_eq!(
+            physical_destination_parts(
+                &root,
+                "Overrides\\Legacy\\replacement.package",
+                &classification.folder_parts,
+            ),
+            vec!["Overrides", "Substituições"],
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn layo_resources_are_interface_without_a_source_path_subtype() {
+        let classification = reference_or_override_family_classification(
+            &BTreeSet::from([TYPE_LAYO_LOCAL, TYPE_NMAP_LOCAL]),
+            None,
+            false,
+            AppLanguage::Pt,
+        )
+        .expect("LAYO is an interface resource family");
+        assert_eq!(classification.folder_parts, vec!["Interface"]);
+        assert_eq!(classification.sub_category, None);
+    }
+
+    #[test]
+    fn generic_img_resources_remain_unknown_without_override_evidence() {
+        assert!(reference_or_override_family_classification(
+            &BTreeSet::from([TYPE_NMAP_LOCAL, TYPE_IMG]),
+            None,
+            false,
+            AppLanguage::Pt,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn store_reference_projection_keeps_category_and_destination_coherent() {
+        let evidence = ReferenceEvidence {
+            store_confidence: Some("confirmed".to_string()),
+            store_category_parts: vec!["Construção".to_string(), "Telhados".to_string()],
+            ..ReferenceEvidence::default()
+        };
+        let classification = store_reference_family_classification(&evidence).unwrap();
+        assert_eq!(classification.main_category, "Construção");
+        assert_eq!(classification.sub_category.as_deref(), Some("Telhados"));
+        assert_eq!(classification.folder_parts, vec!["Construção", "Telhados"]);
     }
 
     #[test]
