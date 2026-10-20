@@ -2284,11 +2284,13 @@ fn append_auxiliary_items(
                 "Arquivos Auxiliares".to_string(),
                 origin,
             ];
-            destination_parts.extend(
-                relative_parts[1..relative_parts.len().saturating_sub(1)]
-                    .iter()
-                    .cloned(),
-            );
+            // A companion may be directly in the selected root. In that
+            // case there are no intermediate origin folders to preserve; do
+            // not construct the invalid slice `1..0`.
+            let parent_end = relative_parts.len().saturating_sub(1);
+            if parent_end > 1 {
+                destination_parts.extend(relative_parts[1..parent_end].iter().cloned());
+            }
             destination_parts = ensure_packages_destination(root, &destination_parts);
             let mut destination =
                 destination_path(root, &destination_parts, std::ffi::OsStr::new(&name));
@@ -3009,6 +3011,117 @@ fn mark_intra_plan_source_destination_collisions(root: &Path, items: &mut [PlanI
             "This plan contains a source/destination overlap with another selected move. No operation in the overlap will run; review the plan order or destination before retrying.".to_string(),
         );
     }
+}
+
+/// A duplicate group may initially have no keeper at a canonical path while
+/// the same plan is also moving an active classified copy into that path. The
+/// first pass must not strand the other exact copies behind
+/// `blocked_duplicate_no_keeper` in that case. Reconcile only against a
+/// keeper operation that already survived the plan's destination/source
+/// collision checks; never promote disabled files, quarantine entries or
+/// review-only records.
+fn reconcile_planned_duplicate_keepers(
+    root: &Path,
+    language: AppLanguage,
+    items: &mut [PlanItem],
+    directories: &mut BTreeSet<String>,
+    reserved_duplicate_destinations: &mut HashSet<String>,
+) -> Result<(), String> {
+    let mut groups = HashMap::<String, Vec<usize>>::new();
+    for (index, item) in items.iter().enumerate() {
+        if let Some(hash) = item.sha256.as_deref() {
+            groups
+                .entry(hash.to_ascii_uppercase())
+                .or_default()
+                .push(index);
+        }
+    }
+
+    for (hash, indices) in groups {
+        if indices.len() < 2 {
+            continue;
+        }
+
+        // Prefer a live copy already at the exact destination. Otherwise the
+        // first active classified move that survived collision checks becomes
+        // the sole keeper for this plan. All other active peers are safe only
+        // as reversible quarantine moves.
+        let keeper = indices.iter().copied().find(|index| {
+            let item = &items[*index];
+            matches!(
+                item.plan_status.as_str(),
+                "already_organized" | "already_organized_review"
+            ) && item
+                .destination_path
+                .as_deref()
+                .is_some_and(|destination| {
+                    same_path_case_insensitive(Path::new(&item.source_path), Path::new(destination))
+                })
+                && PathBuf::from(&item.source_path)
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|source| can_promote_active_duplicate_keeper(root, &source, "classified"))
+        }).or_else(|| {
+            indices.iter().copied().find(|index| {
+                let item = &items[*index];
+                item.plan_status == "ready"
+                    && item.classification_status == "classified"
+                    && item.destination_path.as_deref().is_some_and(|destination| {
+                        !is_duplicate_quarantine_source(root, Path::new(destination))
+                    })
+                    && PathBuf::from(&item.source_path)
+                        .canonicalize()
+                        .ok()
+                        .is_some_and(|source| can_promote_active_duplicate_keeper(root, &source, "classified"))
+            })
+        });
+
+        let Some(keeper) = keeper else {
+            continue;
+        };
+        for index in indices {
+            if index == keeper
+                || !matches!(
+                    items[index].plan_status.as_str(),
+                    "ready" | "blocked_duplicate_no_keeper"
+                )
+            {
+                continue;
+            }
+            let source = PathBuf::from(&items[index].source_path);
+            // The peer may be unknown or review-only. Its exact SHA-256
+            // relationship is sufficient once the keeper is secured; only
+            // active/quarantine state matters here.
+            if !can_promote_active_duplicate_keeper(root, &source, "classified") {
+                continue;
+            }
+            let source_canonical = source.canonicalize().map_err(|error| {
+                format!("Could not resolve duplicate source {}: {error}", source.display())
+            })?;
+            let (quarantine_relative, quarantine_parts) = duplicate_quarantine_destination(
+                root,
+                language,
+                &source_canonical,
+                &hash,
+                reserved_duplicate_destinations,
+            )?;
+            let quarantine = root.join(&quarantine_relative);
+            if same_path_case_insensitive(&source_canonical, &quarantine) {
+                continue;
+            }
+
+            add_missing_directories(root, &quarantine_parts, directories);
+            reserved_duplicate_destinations
+                .insert(relative_key(&quarantine_relative).to_ascii_lowercase());
+            items[index].destination_path = Some(quarantine.to_string_lossy().to_string());
+            items[index].destination_relative_path = Some(relative_key(&quarantine_relative));
+            items[index].plan_status = "ready_duplicate_quarantine".to_string();
+            items[index].warnings.push(
+                "Exact duplicate released by a keeper in the same transaction; the keeper move is validated before this quarantine move.".to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// A source may be present in more than one planner input.  This happens in
@@ -4784,6 +4897,13 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     )?;
     resolve_intra_plan_source_conflicts(&root, &mut items);
     mark_intra_plan_source_destination_collisions(&root, &mut items);
+    reconcile_planned_duplicate_keepers(
+        &root,
+        language,
+        &mut items,
+        &mut directories,
+        &mut reserved_duplicate_destinations,
+    )?;
 
     for group in workspace.groups.iter().filter(|group| group.keep_together) {
         if !group
@@ -5572,6 +5692,111 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn planned_active_keeper_releases_exact_peer_in_same_plan() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-planned-keeper-{}-{nonce}",
+            std::process::id()
+        ));
+        let keeper = root.join("Legacy").join("keeper.package");
+        let peer = root.join("Legacy").join("peer.package");
+        std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+        std::fs::write(&keeper, b"same bytes").unwrap();
+        std::fs::write(&peer, b"same bytes").unwrap();
+
+        let mut items = vec![
+            PlanItem {
+                id: "keeper".to_string(),
+                name: "keeper.package".to_string(),
+                source_path: keeper.to_string_lossy().to_string(),
+                source_relative_path: "Legacy\\keeper.package".to_string(),
+                destination_path: Some(root.join("CAS").join("keeper.package").to_string_lossy().to_string()),
+                destination_relative_path: Some("CAS\\keeper.package".to_string()),
+                classification_status: "classified".to_string(),
+                classification_reason: None,
+                plan_status: "ready".to_string(),
+                sha256: Some("AAA".to_string()),
+                size: 10,
+                warnings: Vec::new(),
+            },
+            PlanItem {
+                id: "peer".to_string(),
+                name: "peer.package".to_string(),
+                source_path: peer.to_string_lossy().to_string(),
+                source_relative_path: "Legacy\\peer.package".to_string(),
+                destination_path: None,
+                destination_relative_path: None,
+                classification_status: "classified".to_string(),
+                classification_reason: None,
+                plan_status: "blocked_duplicate_no_keeper".to_string(),
+                sha256: Some("AAA".to_string()),
+                size: 10,
+                warnings: Vec::new(),
+            },
+        ];
+        let mut directories = BTreeSet::new();
+        let mut reserved = HashSet::new();
+        reconcile_planned_duplicate_keepers(
+            &root,
+            AppLanguage::Pt,
+            &mut items,
+            &mut directories,
+            &mut reserved,
+        )
+        .unwrap();
+
+        assert_eq!(items[1].plan_status, "ready_duplicate_quarantine");
+        assert!(items[1]
+            .destination_relative_path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("#Duplicados\\")));
+        assert!(reserved.iter().any(|path| path.starts_with("#duplicados\\")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn root_level_auxiliary_file_has_a_safe_destination() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-root-auxiliary-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let auxiliary = root.join("readme.txt");
+        std::fs::write(&auxiliary, b"auxiliary").unwrap();
+
+        let mut items = Vec::new();
+        let mut directories = BTreeSet::new();
+        let mut stats = PlanStats::default();
+        append_auxiliary_items(
+            &root,
+            AppLanguage::Pt,
+            std::slice::from_ref(&root),
+            &mut items,
+            &mut directories,
+            &mut stats,
+        )
+        .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].plan_status, "ready_auxiliary");
+        assert!(items[0]
+            .destination_relative_path
+            .as_deref()
+            .is_some_and(|path| path.contains("Arquivos Auxiliares")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn empty_manual_model_root_is_not_a_destination_for_unknown_content() {
