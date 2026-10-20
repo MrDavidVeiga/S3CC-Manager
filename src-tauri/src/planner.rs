@@ -217,6 +217,15 @@ fn keeper_state_matches(source: &Path, candidate: &Path) -> bool {
     }
 }
 
+/// A classified active file may establish the canonical keeper only through
+/// its ordinary, preflight-protected move. Existing inactive copies are never
+/// reactivated or repurposed by this rule.
+fn can_promote_active_duplicate_keeper(root: &Path, source: &Path, status: &str) -> bool {
+    status == "classified"
+        && !is_disabled_package_path(source)
+        && !is_duplicate_quarantine_source(root, source)
+}
+
 fn build_manual_model_index(root: &Path) -> Result<ManualModelIndex, String> {
     if !root.is_dir() {
         return Err(format!(
@@ -3908,7 +3917,16 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             })
         });
         if let Some(peers) = duplicate_group {
-            let Some(keeper) = duplicate_keeper.as_deref() else {
+            // A classified, loadable copy outside the quarantine may safely
+            // become the keeper by moving to its calculated canonical
+            // destination. This is deliberately narrower than promoting an
+            // arbitrary legacy copy: disabled files and existing quarantine
+            // entries remain untouched, and the normal destination preflight
+            // below still rejects collisions or unsafe destinations before
+            // any mutation is possible.
+            let promotion_eligible =
+                can_promote_active_duplicate_keeper(&root, &source_canonical, &item.status);
+            if duplicate_keeper.is_none() && !promotion_eligible {
                 stats.blocked += 1;
                 let mut blocked = make_blocked(
                     item,
@@ -3921,16 +3939,17 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                 blocked.sha256 = Some(source_hash.clone());
                 items.push(blocked);
                 continue;
-            };
-            if same_relative_path(&item.relative_path, keeper) {
-                // The confirmed keeper remains in its canonical location and
-                // continues through normal classification/idempotence checks.
-            } else {
-                // A confirmed byte-identical extra copy is not silently stranded
-                // in a legacy folder. Move it to a reversible quarantine bucket;
-                // the keeper continues through normal canonical-model handling.
-                // Suspected merged packages are handled separately below and are
-                // intentionally never auto-quarantined.
+            }
+            if let Some(keeper) = duplicate_keeper.as_deref() {
+                if same_relative_path(&item.relative_path, keeper) {
+                    // The confirmed keeper remains in its canonical location and
+                    // continues through normal classification/idempotence checks.
+                } else {
+                    // A confirmed byte-identical extra copy is not silently stranded
+                    // in a legacy folder. Move it to a reversible quarantine bucket;
+                    // the keeper continues through normal canonical-model handling.
+                    // Suspected merged packages are handled separately below and are
+                    // intentionally never auto-quarantined.
                 let (quarantine_relative, quarantine_parts) = duplicate_quarantine_destination(
                     &root,
                     language,
@@ -4003,6 +4022,7 @@ pub(crate) fn build_organization_plan_with_cfg_core(
             });
                 continue;
             }
+        }
         }
 
         if let Some(loose_files) = possible_merged_peers.get(&item.relative_path.to_lowercase()) {
@@ -5523,6 +5543,31 @@ mod tests {
             Path::new("Packages/Old/Z.package.disabled"),
             "AAA",
             &hashes
+        ));
+    }
+
+    #[test]
+    fn active_classified_duplicate_can_become_keeper_without_reactivating_disabled_peer() {
+        let root = Path::new(r"C:\isolated\Packages");
+        assert!(can_promote_active_duplicate_keeper(
+            root,
+            &root.join("#Sem Categoria").join("active.package"),
+            "classified",
+        ));
+        assert!(!can_promote_active_duplicate_keeper(
+            root,
+            &root.join("Maquiagem").join("active.package.disabled"),
+            "classified",
+        ));
+        assert!(!can_promote_active_duplicate_keeper(
+            root,
+            &root.join("#Duplicados").join("active.package"),
+            "classified",
+        ));
+        assert!(!can_promote_active_duplicate_keeper(
+            root,
+            &root.join("#Sem Categoria").join("unknown.package"),
+            "unknown",
         ));
     }
 
