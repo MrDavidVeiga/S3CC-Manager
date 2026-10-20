@@ -102,6 +102,7 @@ const I18N = {
     packages: "Packages",
     classified: "Classified",
     simExportMerged: "Merged Sim export",
+    quarantinedDuplicate: "Quarantined duplicate",
     simExportRoot: "Keep whole package at Packages root",
     simExportAlreadyRoot: "Already at Packages root",
     simExportCollision: "Root collision — no overwrite",
@@ -765,6 +766,7 @@ const I18N = {
     packages: "Packages",
     classified: "Classificados",
     simExportMerged: "Sim exportado (CC mesclado)",
+    quarantinedDuplicate: "Duplicado em quarentena",
     simExportRoot: "Manter package inteiro na raiz de Packages",
     simExportAlreadyRoot: "Já está na raiz de Packages",
     simExportCollision: "Colisão na raiz — sem sobrescrever",
@@ -1427,6 +1429,7 @@ const I18N = {
     packages: "Packages",
     classified: "Clasificados",
     simExportMerged: "Sim exportado (CC combinado)",
+    quarantinedDuplicate: "Duplicado en cuarentena",
     simExportRoot: "Mantener package completo en la raíz de Packages",
     simExportAlreadyRoot: "Ya está en la raíz de Packages",
     simExportCollision: "Colisión en la raíz — sin sobrescribir",
@@ -2999,6 +3002,11 @@ function buildAuditSnapshot() {
             subCategory: item.subCategory,
             destinationPath: item.destinationPath,
             classificationReason: item.classificationReason,
+            // The scanner derives this from cached resource fingerprints and
+            // the current reference catalogs. Keep the structured result in
+            // the audit JSON so a replacement decision is independently
+            // reviewable; do not persist it as a stale cache assertion.
+            referenceEvidence: item.referenceEvidence ?? null,
             warnings: item.warnings || [],
           })),
         }
@@ -3409,6 +3417,7 @@ function t(key) {
 function eligibleForPlan(item) {
   if (!item?.path) return false;
   const status = String(item.status || "");
+  if (status === "quarantined_duplicate") return false;
   if (status === "unknown") return true;
   if (status === "sim_export_merged") return true;
   if (status !== "classified" || !item.destinationPath) return false;
@@ -3423,6 +3432,7 @@ function statusLabel(status) {
   return {
     classified: t("classified"),
     sim_export_merged: t("simExportMerged"),
+    quarantined_duplicate: t("quarantinedDuplicate"),
     mixed: t("mixed"),
     needs_review: t("needsReview"),
     unknown: t("unknown"),
@@ -3558,6 +3568,7 @@ function renderStatusFilter() {
     ["all", t("allStatuses")],
     ["classified", t("classified")],
     ["sim_export_merged", t("simExportMerged")],
+    ["quarantined_duplicate", t("quarantinedDuplicate")],
     ["mixed", t("mixed")],
     ["needs_review", t("needsReview")],
     ["unknown", t("unknown")],

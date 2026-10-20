@@ -531,6 +531,10 @@ fn package_extension(path: &Path) -> bool {
         || name.ends_with(".package.duplicated")
 }
 
+fn is_quarantined_duplicate_name(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".package.duplicated")
+}
+
 fn contains_ascii_case_insensitive(data: &[u8], needle: &str) -> bool {
     let needle = needle.as_bytes();
     if needle.is_empty() || data.len() < needle.len() {
@@ -4138,7 +4142,7 @@ fn localized_mixed(language: AppLanguage) -> &'static str {
 
 fn classification_confidence(status: &str) -> &'static str {
     match status {
-        "classified" | "sim_export_merged" => "high",
+        "classified" | "sim_export_merged" | "quarantined_duplicate" => "high",
         "needs_review" | "mixed" => "medium",
         "unknown" | "invalid" => "low",
         _ => "low",
@@ -4906,39 +4910,62 @@ fn scan_one_with_index(
         }
     }
 
-    let (category, sub_category, gender, age, species) = if let Some(primary) = primary {
-        (
-            Some(primary.main_category),
-            primary.sub_category,
-            primary.gender,
-            primary.age,
-            primary.species,
-        )
-    } else if let Some(family) = family_primary {
-        (
-            Some(family.main_category),
-            family.sub_category,
-            None,
-            None,
-            None,
-        )
-    } else if status == "mixed" {
-        (
-            Some(localized_mixed(language).to_string()),
-            None,
-            None,
-            None,
-            None,
-        )
-    } else {
-        (
-            Some(localized_unknown(language).to_string()),
-            None,
-            None,
-            None,
-            None,
-        )
-    };
+    let (mut category, mut sub_category, mut gender, mut age, mut species) =
+        if let Some(primary) = primary {
+            (
+                Some(primary.main_category),
+                primary.sub_category,
+                primary.gender,
+                primary.age,
+                primary.species,
+            )
+        } else if let Some(family) = family_primary {
+            (
+                Some(family.main_category),
+                family.sub_category,
+                None,
+                None,
+                None,
+            )
+        } else if status == "mixed" {
+            (
+                Some(localized_mixed(language).to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+        } else {
+            (
+                Some(localized_unknown(language).to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+
+    // `.package.duplicated` is the Manager's explicit inactive quarantine
+    // marker. It remains indexed for duplicate evidence and restoration, but
+    // must not be presented as an unknown, loadable CC or be eligible for the
+    // organizer's ordinary fallback.
+    if is_quarantined_duplicate_name(&name) {
+        status = "quarantined_duplicate".to_string();
+        category = Some("#Duplicados".to_string());
+        sub_category = None;
+        gender = None;
+        age = None;
+        species = None;
+        destination_parts = vec!["#Duplicados".to_string()];
+        destination_path = Some(destination_parts.join("\\"));
+        candidate_destinations.clear();
+        detected_from.insert("DuplicateQuarantineMarker".to_string());
+        classification_reason = Some(
+            "Inactive duplicate quarantine marker (.package.duplicated); retained for duplicate evidence and restoration."
+                .to_string(),
+        );
+        warnings.retain(|warning| warning != localized_warning(language, "none"));
+    }
 
     if classification_reason.is_none() && !classifications.is_empty() {
         classification_reason = Some(
@@ -5571,6 +5598,7 @@ fn scan_packages_core_with_progress(
 
         match item.status.as_str() {
             "classified" | "sim_export_merged" => stats.classified += 1,
+            "quarantined_duplicate" => {}
             "mixed" => stats.mixed += 1,
             "needs_review" => stats.needs_review += 1,
             "invalid" => stats.invalid += 1,

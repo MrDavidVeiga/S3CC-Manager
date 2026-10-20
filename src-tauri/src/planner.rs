@@ -3033,7 +3033,7 @@ fn resolve_intra_plan_source_conflicts(root: &Path, items: &mut [PlanItem]) {
 }
 
 fn is_manual_review_status(status: &str) -> bool {
-    matches!(status, "needs_review" | "mixed")
+    matches!(status, "needs_review" | "mixed" | "quarantined_duplicate")
 }
 
 fn plan_can_execute(stats: &PlanStats, read_only: bool) -> bool {
@@ -6422,6 +6422,7 @@ mod tests {
     fn manual_review_items_are_protected_from_automatic_fallback_moves() {
         assert!(is_manual_review_status("needs_review"));
         assert!(is_manual_review_status("mixed"));
+        assert!(is_manual_review_status("quarantined_duplicate"));
         assert!(!is_manual_review_status("unknown"));
         assert!(!is_manual_review_status("classified"));
     }
