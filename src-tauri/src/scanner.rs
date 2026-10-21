@@ -4214,6 +4214,18 @@ fn localized_reference_message(language: AppLanguage, message: &str) -> String {
     }
 }
 
+fn is_partial_store_evidence_note(evidence: &ReferenceEvidence, message: &str) -> bool {
+    if evidence.store_match_kind.as_deref() != Some("partial_resource_overlap")
+        || evidence.store_confidence.as_deref() != Some("evidence")
+    {
+        return false;
+    }
+
+    message.starts_with("Store overlap is partial;")
+        || message.starts_with("A sobreposição com a Store é parcial.")
+        || message.starts_with("La superposición con la Store es parcial.")
+}
+
 fn localize_official_resources(language: AppLanguage, value: &str) -> String {
     let numbers = value
         .split(|character: char| !character.is_ascii_digit())
@@ -5065,6 +5077,13 @@ fn scan_one_with_index(
             detected_from.insert("OfficialResourceMatch".to_string());
         }
         for message in &evidence.evidence {
+            if is_partial_store_evidence_note(evidence, message) {
+                // Keep this diagnostic in structured referenceEvidence, but
+                // do not present a partial Store TGI overlap as a review
+                // warning. It is not a Store identity and must not make an
+                // otherwise classified package look unresolved.
+                continue;
+            }
             if !warnings.contains(message) {
                 warnings.push(message.clone());
             }
@@ -6659,6 +6678,32 @@ mod tests {
         assert_eq!(classification.main_category, "Construção");
         assert_eq!(classification.sub_category.as_deref(), Some("Telhados"));
         assert_eq!(classification.folder_parts, vec!["Construção", "Telhados"]);
+    }
+
+    #[test]
+    fn partial_store_overlap_is_diagnostic_not_review_warning() {
+        let evidence = ReferenceEvidence {
+            store_match_kind: Some("partial_resource_overlap".to_string()),
+            store_confidence: Some("evidence".to_string()),
+            ..ReferenceEvidence::default()
+        };
+
+        assert!(is_partial_store_evidence_note(
+            &evidence,
+            "A sobreposição com a Store é parcial. Um TGI compartilhado, isoladamente, não comprova que os packages sejam idênticos."
+        ));
+        assert!(is_partial_store_evidence_note(
+            &evidence,
+            "Store overlap is partial; a shared TGI alone is not a package identity."
+        ));
+        assert!(!is_partial_store_evidence_note(
+            &ReferenceEvidence {
+                store_match_kind: Some("technical_exact".to_string()),
+                store_confidence: Some("confirmed".to_string()),
+                ..ReferenceEvidence::default()
+            },
+            "A sobreposição com a Store é parcial. Um TGI compartilhado, isoladamente, não comprova que os packages sejam idênticos."
+        ));
     }
 
     #[test]

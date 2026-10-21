@@ -1094,7 +1094,12 @@ fn compare_resources(
             if let Some(shared) = shared_by_package.values().max().copied() {
                 if shared > 0 {
                     result.store_match_kind = Some("partial_resource_overlap".to_string());
-                    result.store_confidence = Some("review".to_string());
+                    // A shared TGI is useful diagnostic evidence, but it does
+                    // not establish Store package identity and must not put a
+                    // correctly classified package into the review state.
+                    // Only exact/technical identities can be confirmed by the
+                    // Store catalog.
+                    result.store_confidence = Some("evidence".to_string());
                     result.shared_tgi_count = shared;
                     result.evidence.push(
                         "Store overlap is partial; a shared TGI alone is not a package identity."
@@ -1443,7 +1448,7 @@ mod tests {
             evidence.store_match_kind.as_deref(),
             Some("partial_resource_overlap")
         );
-        assert_eq!(evidence.store_confidence.as_deref(), Some("review"));
+        assert_eq!(evidence.store_confidence.as_deref(), Some("evidence"));
         assert!(evidence.store_category_parts.is_empty());
     }
 
