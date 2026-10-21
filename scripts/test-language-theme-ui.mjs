@@ -91,7 +91,7 @@ assert.match(
 );
 assert.match(
   themeAudit,
-  /body\.release-v1 \.theme-button \{[\s\S]*?width:\s*76px;[\s\S]*?min-width:\s*76px;[\s\S]*?gap:\s*6px;[\s\S]*?padding-inline:\s*0;[\s\S]*?text-align:\s*center;/s,
+  /body\.release-v1 \.theme-button \{[\s\S]*?width:\s*76px;[\s\S]*?min-width:\s*76px;[\s\S]*?gap:\s*0;[\s\S]*?padding-inline:\s*0;[\s\S]*?text-align:\s*center;/s,
   "Theme icon and label must use the same centered spacing as the language control",
 );
 assert.match(

@@ -278,7 +278,10 @@ body.release-v1 .theme-button {
   justify-content: center;
   /* Match the language selector's icon/label spacing. The flex line box
    * keeps both the moon and the localized label on the same centerline. */
-  gap: 6px;
+  /* The crescent path occupies only the left side of its 16px viewBox;
+   * zero flex gap produces the same visible icon-to-label spacing as the
+   * language code and Font Awesome chevron. */
+  gap: 0;
   padding-inline: 0;
   text-align: center;
 }
