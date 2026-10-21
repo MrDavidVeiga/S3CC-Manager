@@ -79,6 +79,16 @@ assert.match(
   /--topbar-label-font-size:\s*14px;[\s\S]*\.language-switcher > span,[\s\S]*#language-code,[\s\S]*\.theme-button-label[\s\S]*font-size:\s*var\(--topbar-label-font-size\)/s,
   "Language label, language codes and Theme label must share one top-bar font metric",
 );
+assert.match(
+  themeAudit,
+  /body\.release-v1 \.lang-toggle-btn,[\s\S]*?body\.release-v1 \.theme-button \{[\s\S]*?align-items:\s*center;[\s\S]*?line-height:\s*0;/s,
+  "Language and Theme controls must center their text and icons on one flex baseline",
+);
+assert.match(
+  themeAudit,
+  /body\.release-v1 #language-code,[\s\S]*?body\.release-v1 \.theme-button-label \{[\s\S]*?display:\s*block;[\s\S]*?line-height:\s*20px;/s,
+  "Language code and Theme label must use explicit centered line boxes",
+);
 
 assert.match(index, /id="language-code"/);
 assert.match(index, /data-i18n-aria-label="languageSelector"/);

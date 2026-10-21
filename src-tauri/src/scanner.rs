@@ -285,7 +285,7 @@ fn load_persistent_scan(root: &Path, language: AppLanguage) -> Option<LatestScan
 // change.  The prior value allowed persistent scans created before the
 // CASP/OBJD-free override rules to be reused, leaving those packages shown as
 // Unknown until the user manually invalidated the cache.
-const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261020-override-evidence-roof-sheep-eyelash-7";
+const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261021-store-bundle-evidence-8";
 
 fn context_file_signature(path: &Path) -> String {
     if !path.is_file() {

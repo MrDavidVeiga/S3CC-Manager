@@ -309,25 +309,30 @@ body.release-v1 .theme-button {
   min-height: 32px;
   padding-block: 0;
   display: inline-flex;
+  box-sizing: border-box;
   align-items: center;
   justify-content: center;
-  line-height: 20px;
+  line-height: 0;
 }
 body.release-v1 #language-code,
 body.release-v1 .theme-button-label {
-  display: inline-flex;
-  align-items: center;
-  height: 20px;
+  display: block;
+  height: auto;
   line-height: 20px;
   vertical-align: middle;
 }
 body.release-v1 .theme-button > svg {
   display: block;
+  width: 16px;
+  height: 16px;
   flex: 0 0 16px;
 }
 body.release-v1 .lang-toggle-btn > i {
   display: inline-flex;
+  width: 16px;
+  height: 16px;
   align-items: center;
+  justify-content: center;
   line-height: 1;
 }
 

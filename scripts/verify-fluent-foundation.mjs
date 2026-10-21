@@ -41,7 +41,8 @@ assert.match(index, /src\/ui\/fluent\/feedback\.css/);
 assert.match(index, /src\/ui\/fluent\/feedback\.js/);
 assert.match(feedback, /syncFluentInfoBar/);
 assert.match(feedbackCss, /fluent-ring-spin/);
-assert.equal((index.match(/role="progressbar"/g) || []).length, 4);
+// Four operation-specific bars plus the global loading overlay.
+assert.equal((index.match(/role="progressbar"/g) || []).length, 5);
 assert.match(index, /id="organize-progress"/);
 assert.match(index, /id="organize-progress-bar"/);
 assert.match(index, /src\/ui\/fluent\/chrome\.js/);
