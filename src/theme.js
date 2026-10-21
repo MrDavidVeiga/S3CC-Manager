@@ -171,16 +171,32 @@ osDark.addEventListener?.("change",()=>{ if ((document.documentElement.dataset.t
 
 const appWindow=getCurrentWindow();
 const maximizeButton=document.getElementById("titlebar-maximize");
+const captionLabels={
+  en:{controls:"Window controls",minimize:"Minimize",maximize:"Maximize",restore:"Restore Down",close:"Close"},
+  pt:{controls:"Controles da janela",minimize:"Minimizar",maximize:"Maximizar",restore:"Restaurar",close:"Fechar"},
+  es:{controls:"Controles de ventana",minimize:"Minimizar",maximize:"Maximizar",restore:"Restaurar",close:"Cerrar"},
+};
+function applyCaptionLabels(isMaximized=false) {
+  const labels=captionLabels[document.documentElement.lang] || captionLabels.en;
+  document.querySelector(".winui-caption-buttons")?.setAttribute("aria-label",labels.controls);
+  const minimize=document.getElementById("titlebar-minimize");
+  const close=document.getElementById("titlebar-close");
+  const setLabel=(element,label)=>{
+    element?.setAttribute("aria-label",label);
+    if (element) element.title=label;
+  };
+  setLabel(minimize,labels.minimize);
+  setLabel(maximizeButton,isMaximized ? labels.restore : labels.maximize);
+  setLabel(close,labels.close);
+}
 async function updateCaptionMaximize() {
   if(!maximizeButton) return;
   try {
     const isMaximized=await appWindow.isMaximized();
     maximizeButton.querySelector(".winui-maximize-glyph")?.toggleAttribute("hidden",isMaximized);
     maximizeButton.querySelector(".winui-restore-glyph")?.toggleAttribute("hidden",!isMaximized);
-    const label=isMaximized ? "Restore Down" : "Maximize";
-    maximizeButton.setAttribute("aria-label",label);
-    maximizeButton.title=label;
-  } catch { /* Web fallback: static maximize glyph remains available. */ }
+    applyCaptionLabels(isMaximized);
+  } catch { /* Web fallback: static maximize glyph remains available. */ applyCaptionLabels(false); }
 }
 document.getElementById("titlebar-minimize")?.addEventListener("click",()=>appWindow.minimize());
 maximizeButton?.addEventListener("click",async ()=>{
@@ -190,6 +206,7 @@ maximizeButton?.addEventListener("click",async ()=>{
 document.getElementById("titlebar-close")?.addEventListener("click",()=>appWindow.close());
 appWindow.onResized(()=>{void updateCaptionMaximize();}).catch(()=>{});
 appWindow.onFocusChanged(({payload})=>{ if(payload){ refreshNativeAppearance(); void updateCaptionMaximize(); } }).catch(()=>{});
+window.addEventListener("s3cc-language-changed",()=>{ void updateCaptionMaximize(); });
 void updateCaptionMaximize();
 
 applyTheme(currentChoice(),{persist:false});

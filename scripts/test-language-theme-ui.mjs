@@ -89,9 +89,19 @@ assert.match(
   /body\.release-v1 #language-code,[\s\S]*?body\.release-v1 \.theme-button-label \{[\s\S]*?display:\s*inline-flex;[\s\S]*?height:\s*20px;[\s\S]*?line-height:\s*20px;/s,
   "Language code and Theme label must use explicit centered line boxes",
 );
+assert.match(
+  themeAudit,
+  /body\.release-v1 \.theme-button \{[\s\S]*?gap:\s*4px;[\s\S]*?padding-inline:\s*8px;/s,
+  "Theme icon and label must use the compact optical gap used by the language control",
+);
 
 assert.match(index, /id="language-code"/);
 assert.match(index, /data-i18n-aria-label="languageSelector"/);
+assert.match(index, /id="titlebar-minimize"[\s\S]*?data-i18n-title="windowMinimize"/);
+assert.match(index, /id="titlebar-maximize"[\s\S]*?data-i18n-title="windowMaximize"/);
+assert.match(index, /id="titlebar-close"[\s\S]*?data-i18n-title="windowClose"/);
+assert.doesNotMatch(app, /filterCategories:/, "Filter dropdown must not expose a visible category-heading translation");
+assert.doesNotMatch(app, /content-filter-menu-heading/, "Filter dropdown must not render the removed heading");
 for (const [key, value] of Object.entries(languageLabels)) {
   assert.match(index, new RegExp(`data-i18n="${key}"`));
   assert.match(index, new RegExp(`>${value}<`));
@@ -119,6 +129,8 @@ assert.match(app, /preferences\.language/);
 assert.match(theme, /const VALID_THEMES = new Set\(\["system","veiga-light","veiga-dark","mean-girls","ea-app","winui-light","winui-dark"\]\)/);
 assert.match(theme, /localStorage\.setItem\(THEME_KEY,choice\)/);
 assert.match(theme, /option\.dataset\.theme===choice/);
+assert.match(theme, /captionLabels=\{/);
+assert.match(theme, /window\.addEventListener\("s3cc-language-changed"/);
 assert.match(winui, /#language-code \{ white-space:nowrap; \}/);
 
 // The nine required language/theme combinations are data-driven: each language
