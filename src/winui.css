@@ -137,12 +137,12 @@ body.release-v1 {
 }
 
 .release-v1 .language-switcher {
-  gap:8px; margin-left:auto; color:var(--winui-text-secondary); font-size:14px;
+  gap:8px; margin-left:auto; color:var(--winui-text-secondary); font-size:12px;
 }
 .release-v1 .lang-toggle-btn,.theme-button {
   min-width:0; height:32px; padding:0 10px; border:1px solid var(--winui-control-stroke);
   border-bottom-color:var(--winui-control-stroke-strong); border-radius:var(--winui-control-radius);
-  background:var(--winui-control-fill); color:var(--winui-text-primary); font-size:14px; font-weight:600;
+  background:var(--winui-control-fill); color:var(--winui-text-primary); font-size:12px; font-weight:600;
 }
 .release-v1 .lang-toggle-btn:hover,.theme-button:hover { background:var(--winui-control-fill-hover); }
 .release-v1 .lang-toggle-btn {
@@ -153,7 +153,7 @@ body.release-v1 {
   border:1px solid var(--winui-control-stroke); border-radius:var(--winui-overlay-radius);
   background:var(--winui-popup); color:var(--winui-text-primary); box-shadow:0 12px 30px var(--winui-shadow);
 }
-.release-v1 .lang-menu-item { border-radius:var(--winui-control-radius); color:var(--winui-text-primary); font-weight:400; }
+.release-v1 .lang-menu-item { border-radius:var(--winui-control-radius); color:var(--winui-text-primary); font-weight:400; font-size:12px; }
 .release-v1 .lang-menu-item:hover { background:var(--winui-control-fill-hover); }
 
 .theme-control { position:relative; display:flex; align-items:center; }

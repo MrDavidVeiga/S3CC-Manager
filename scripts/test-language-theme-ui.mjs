@@ -65,12 +65,12 @@ assert.match(
 );
 assert.match(
   winui,
-  /\.release-v1 \.language-switcher\s*\{[^}]*font-size:14px;/s,
+  /\.release-v1 \.language-switcher\s*\{[^}]*font-size:12px;/s,
   "Language label must use the shared top-control text size",
 );
 assert.match(
   winui,
-  /\.release-v1 \.lang-toggle-btn,\.theme-button\s*\{[^}]*font-size:14px;/s,
+  /\.release-v1 \.lang-toggle-btn,\.theme-button\s*\{[^}]*font-size:12px;/s,
   "Language codes and theme text must use the shared top-control text size",
 );
 
