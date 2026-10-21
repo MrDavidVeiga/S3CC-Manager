@@ -4330,6 +4330,17 @@ button:disabled {
   white-space: nowrap;
 }
 
+.release-v1 #page-organizer .content-filter-menu-heading {
+  padding: 6px 10px 5px;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  user-select: none;
+}
+
 .release-v1 #page-organizer .content-filter-menu-item.active,
 .release-v1 #page-organizer .content-filter-menu-item:disabled {
   color: var(--text);

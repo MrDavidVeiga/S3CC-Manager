@@ -114,6 +114,7 @@ const I18N = {
     chooseToBegin: "Choose a Mods folder to begin.",
     search: "Search by Name or Instance",
     filter: "Filter",
+    filterCategories: "Filter categories",
     allStatuses: "All statuses",
     selectPackage: "Select a package to see its classification.",
     detectedFrom: "Detected from",
@@ -778,6 +779,7 @@ const I18N = {
     chooseToBegin: "Escolha uma pasta de Mods para começar.",
     search: "Buscar por Nome ou Instance",
     filter: "Filtro",
+    filterCategories: "Categorias do filtro",
     allStatuses: "Todos os estados",
     selectPackage: "Selecione um package para ver a classificação.",
     detectedFrom: "Detectado por",
@@ -1441,6 +1443,7 @@ const I18N = {
     chooseToBegin: "Elige una carpeta de Mods para comenzar.",
     search: "Buscar por Nombre o Instance",
     filter: "Filtro",
+    filterCategories: "Categorías del filtro",
     allStatuses: "Todos los estados",
     selectPackage: "Selecciona un package para ver su clasificación.",
     detectedFrom: "Detectado por",
@@ -3588,7 +3591,14 @@ function renderStatusFilter() {
   el.statusFilterToggleIcon.className =
     `fa-solid ${state.isStatusFilterOpen ? "fa-angle-up" : "fa-angle-down"}`;
   el.statusFilterMenu.classList.toggle("hidden", !state.isStatusFilterOpen);
+  el.statusFilterMenu.setAttribute("aria-label", t("filterCategories"));
   el.statusFilterMenu.innerHTML = "";
+
+  const heading = document.createElement("div");
+  heading.className = "content-filter-menu-heading";
+  heading.setAttribute("role", "presentation");
+  heading.textContent = t("filterCategories");
+  el.statusFilterMenu.appendChild(heading);
 
   for (const [value, label] of options) {
     const button = document.createElement("button");
