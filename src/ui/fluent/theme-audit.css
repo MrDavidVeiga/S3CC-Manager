@@ -299,6 +299,38 @@ body.release-v1 .theme-button-label {
   font-size: var(--topbar-label-font-size);
   line-height: var(--topbar-label-line-height);
 }
+
+/* The label and code must be centered by their own line boxes as well as by
+ * the button flex container. Without this, the browser baseline of an inline
+ * span makes PT and Tema appear a few pixels too high in the 32px controls. */
+body.release-v1 .lang-toggle-btn,
+body.release-v1 .theme-button {
+  height: 32px;
+  min-height: 32px;
+  padding-block: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 20px;
+}
+body.release-v1 #language-code,
+body.release-v1 .theme-button-label {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  line-height: 20px;
+  vertical-align: middle;
+}
+body.release-v1 .theme-button > svg {
+  display: block;
+  flex: 0 0 16px;
+}
+body.release-v1 .lang-toggle-btn > i {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
 body.release-v1 .theme-swatch {
   background: linear-gradient(135deg, var(--swatch-light, var(--accent)) 0 50%, var(--swatch-dark, var(--accent-dark-2)) 50% 100%);
 }
