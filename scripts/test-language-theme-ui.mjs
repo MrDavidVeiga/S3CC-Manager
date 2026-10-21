@@ -91,8 +91,18 @@ assert.match(
 );
 assert.match(
   themeAudit,
-  /body\.release-v1 \.theme-button \{[\s\S]*?width:\s*76px;[\s\S]*?min-width:\s*76px;[\s\S]*?gap:\s*8px;[\s\S]*?padding-inline:\s*0;[\s\S]*?text-align:\s*center;/s,
+  /body\.release-v1 \.theme-button \{[\s\S]*?width:\s*76px;[\s\S]*?min-width:\s*76px;[\s\S]*?gap:\s*6px;[\s\S]*?padding-inline:\s*0;[\s\S]*?text-align:\s*center;/s,
   "Theme icon and label must use the same centered spacing as the language control",
+);
+assert.match(
+  themeAudit,
+  /body\.release-v1 \.lang-toggle-btn \{[\s\S]*?gap:\s*6px;/s,
+  "Language code and Theme label must use the same icon spacing",
+);
+assert.match(
+  themeAudit,
+  /body\.release-v1 \.theme-button-label \{[\s\S]*?transform:\s*translateY\(-1px\);/s,
+  "Theme label must use the optical vertical correction",
 );
 
 assert.match(index, /id="language-code"/);

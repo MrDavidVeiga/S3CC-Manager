@@ -271,7 +271,6 @@ body.release-v1 .quarantine-copy-path {
 
 /* The theme control is an icon + localized label, not an icon-only hit target. */
 body.release-v1 .theme-button {
-  width: auto;
   width: 76px;
   min-width: 76px;
   display: inline-flex;
@@ -279,7 +278,7 @@ body.release-v1 .theme-button {
   justify-content: center;
   /* Match the language selector's icon/label spacing. The flex line box
    * keeps both the moon and the localized label on the same centerline. */
-  gap: 8px;
+  gap: 6px;
   padding-inline: 0;
   text-align: center;
 }
@@ -290,6 +289,7 @@ body.release-v1 .theme-button-label {
   padding: 0;
   height: 16px;
   line-height: 16px;
+  transform: translateY(-1px);
 }
 
 /* Beta 3 top-bar typography: the language label, active language code and
@@ -337,6 +337,9 @@ body.release-v1 .theme-button {
   align-items: center;
   justify-content: center;
   line-height: 20px;
+}
+body.release-v1 .lang-toggle-btn {
+  gap: 6px;
 }
 body.release-v1 #language-code,
 body.release-v1 .theme-button-label {
