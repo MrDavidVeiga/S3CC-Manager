@@ -1,7 +1,7 @@
 use crate::{
     cache,
     catalog::{classify_resource, CatalogClassification, TYPE_CASP, TYPE_OBJD},
-    dbpf::Package,
+    dbpf::{Package, ResourceEntry},
     fix_signatures::{self, FixSignatureIndex},
     i18n::AppLanguage,
     manifest::sha256_file,
@@ -1446,6 +1446,10 @@ fn phase3_directed_family_classification(
     catalog_classifications: &[CatalogClassification],
 ) -> Option<PackageFamilyClassification> {
     let internal_names = package_internal_identifiers(package, project_evidence);
+    if let Some(classification) = verified_eye_texture_replacement(&package.entries, types, language)
+    {
+        return Some(classification);
+    }
     if let Some(classification) =
         path_independent_directed_classification(types, &internal_names, language)
     {
@@ -1678,6 +1682,44 @@ fn phase3_directed_family_classification(
     }
 
     None
+}
+
+// This is a resource-identity rule, not a filename or source-folder exception.
+// The real package contains one IMG resource at the known game eye-texture TGI
+// below and no CASP/OBJD/script/mesh resources.  Keep the guard narrow so a
+// generic visual package is not promoted to an eye replacement accidentally.
+fn verified_eye_texture_replacement(
+    entries: &[ResourceEntry],
+    types: &BTreeSet<u32>,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    const EYE_TEXTURE_INSTANCE: u64 = 0xC2B5_6067_3F00_D806;
+
+    if entries.len() != 1
+        || types.len() != 1
+        || !types.contains(&TYPE_IMG)
+        || entries[0].type_id != TYPE_IMG
+        || entries[0].group != 0
+        || entries[0].instance != EYE_TEXTURE_INSTANCE
+    {
+        return None;
+    }
+
+    let (replacements, body, eyes) = match language {
+        AppLanguage::En => ("Replacements", "Body", "Eyes"),
+        AppLanguage::Pt => ("Substituições", "Corpo", "Olhos"),
+        AppLanguage::Es => ("Reemplazos", "Cuerpo", "Ojos"),
+    };
+
+    Some(PackageFamilyClassification {
+        main_category: replacements.into(),
+        sub_category: Some(eyes.into()),
+        folder_parts: vec![replacements.into(), body.into(), eyes.into()],
+        detected_from: vec!["IMG".into(), "EyeReplacementTgi".into()],
+        technical_reason: format!(
+            "Single IMG resource uses the verified eye-replacement TGI 0x{EYE_TEXTURE_INSTANCE:016X}; no CASP, OBJD, script, or mesh resource is present."
+        ),
+    })
 }
 
 fn catalog_contains_rabbit_holes(classification: &CatalogClassification) -> bool {
@@ -7308,6 +7350,62 @@ mod tests {
             Some(("Máscaras de Nariz", "nosemask"))
         );
         assert_eq!(makeup_semantic_folder_key(&["ordinary_blush".into()]), None);
+    }
+
+    #[test]
+    fn verified_eye_texture_tgi_resolves_to_body_eyes_without_filename_evidence() {
+        let entry = ResourceEntry {
+            type_id: TYPE_IMG,
+            group: 0,
+            instance: 0xC2B5_6067_3F00_D806,
+            chunk_offset: 0,
+            file_size: 1,
+            mem_size: 1,
+            compressed: 0,
+            unknown2: 0,
+            file_size_high_bit: false,
+        };
+        let types = BTreeSet::from([TYPE_IMG]);
+
+        let classification = verified_eye_texture_replacement(
+            &[entry.clone()],
+            &types,
+            AppLanguage::Pt,
+        )
+        .expect("verified eye texture TGI");
+        assert_eq!(
+            classification.folder_parts,
+            vec!["Substituições", "Corpo", "Olhos"]
+        );
+        assert!(classification
+            .detected_from
+            .contains(&"EyeReplacementTgi".to_string()));
+
+        assert_eq!(
+            verified_eye_texture_replacement(&[entry.clone()], &types, AppLanguage::En)
+                .unwrap()
+                .folder_parts,
+            vec!["Replacements", "Body", "Eyes"]
+        );
+        assert_eq!(
+            verified_eye_texture_replacement(&[entry], &types, AppLanguage::Es)
+                .unwrap()
+                .folder_parts,
+            vec!["Reemplazos", "Cuerpo", "Ojos"]
+        );
+
+        let unrelated = ResourceEntry {
+            type_id: TYPE_IMG,
+            group: 0,
+            instance: 0x1234,
+            chunk_offset: 0,
+            file_size: 1,
+            mem_size: 1,
+            compressed: 0,
+            unknown2: 0,
+            file_size_high_bit: false,
+        };
+        assert!(verified_eye_texture_replacement(&[unrelated], &types, AppLanguage::Pt).is_none());
     }
 
     #[test]
