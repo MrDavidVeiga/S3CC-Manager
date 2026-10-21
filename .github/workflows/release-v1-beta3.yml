@@ -1,0 +1,347 @@
+name: Release v1.0.0 Beta 3
+
+# v1.0.0 Beta 3 — Windows x64, Linux x64, macOS Intel and macOS Apple Silicon
+on:
+  push:
+    branches:
+      - main
+      - fix/canonical-category-folders-20261019
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the validated Beta 3 prerelease after all matrix builds pass"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: ${{ matrix.artifact_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-2022
+            target: ""
+            build_args: --no-bundle
+            binary_name: s3cc-organizer.exe
+            packaged_binary: "Veiga's S3CC Manager.exe"
+            artifact_name: S3CC-Manager-Windows-x64
+            release_slug: Windows_x64
+
+          - platform: ubuntu-22.04
+            target: ""
+            build_args: --no-bundle
+            binary_name: s3cc-organizer
+            packaged_binary: "Veiga's S3CC Manager"
+            artifact_name: S3CC-Manager-Linux-x64
+            release_slug: Linux_x64
+
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
+            build_args: --target x86_64-apple-darwin --no-bundle
+            binary_name: s3cc-organizer
+            packaged_binary: "Veiga's S3CC Manager"
+            artifact_name: S3CC-Manager-macOS-Intel
+            release_slug: macOS_Intel
+
+          - platform: macos-15
+            target: aarch64-apple-darwin
+            build_args: --target aarch64-apple-darwin --no-bundle
+            binary_name: s3cc-organizer
+            packaged_binary: "Veiga's S3CC Manager"
+            artifact_name: S3CC-Manager-macOS-Apple-Silicon
+            release_slug: macOS_Apple_Silicon
+
+    runs-on: ${{ matrix.platform }}
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            zip
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: Install Rust stable
+        if: matrix.target == ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust stable with target
+        if: matrix.target != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Restore application icon source
+        run: node -e "const fs=require('fs');fs.writeFileSync('src-tauri/icons/manager-icon.png',Buffer.from(fs.readFileSync('src-tauri/icons/manager-icon.b64','utf8').trim(),'base64'))"
+
+      - name: Generate application icons
+        run: npm run tauri icon src-tauri/icons/manager-icon.png
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check Rust
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Build portable binary
+        run: npm run tauri build -- ${{ matrix.build_args }}
+
+      - name: Locate Windows binary
+        if: matrix.platform == 'windows-2022'
+        id: locate_windows
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem -Path . -Filter "${{ matrix.binary_name }}" -Recurse -File |
+            Where-Object {
+              $_.FullName -match '\\release\\' -and
+              $_.FullName -notmatch '\\bundle\\'
+            } |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $file) {
+            Write-Host "Executable candidates:"
+            Get-ChildItem -Path . -Filter "*.exe" -Recurse -File | Select-Object FullName
+            throw "Manager executable not found."
+          }
+
+          "artifact_path=$file" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Locate Unix binary
+        if: matrix.platform != 'windows-2022'
+        id: locate_unix
+        shell: bash
+        run: |
+          set -euo pipefail
+          file_path="$(find . -type f -name "${{ matrix.binary_name }}" ! -path "*/bundle/*" | grep "/release/" | head -n 1 || true)"
+          if [ -z "$file_path" ]; then
+            echo "Binary candidates:"
+            find . -type f -path "*/release/*" | sort || true
+            exit 1
+          fi
+          echo "artifact_path=$file_path" >> "$GITHUB_OUTPUT"
+
+      - name: Package Windows portable release
+        if: matrix.platform == 'windows-2022'
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "release-stage/${{ matrix.artifact_name }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "${{ steps.locate_windows.outputs.artifact_path }}" (Join-Path $stage "${{ matrix.packaged_binary }}")
+          Copy-Item "README.md" (Join-Path $stage "README.md")
+          Copy-Item "docs/RELEASE-NOTES-v1.0.0-BETA3.md" (Join-Path $stage "RELEASE-NOTES.md")
+
+          $zip = "VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          "$hash  $zip" | Out-File -Encoding ascii "VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt"
+
+      - name: Package Unix portable release
+        if: matrix.platform != 'windows-2022'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="release-stage/${{ matrix.artifact_name }}"
+          mkdir -p "$stage"
+          cp "${{ steps.locate_unix.outputs.artifact_path }}" "$stage/${{ matrix.packaged_binary }}"
+          chmod +x "$stage/${{ matrix.packaged_binary }}"
+          cp README.md "$stage/README.md"
+          cp docs/RELEASE-NOTES-v1.0.0-BETA3.md "$stage/RELEASE-NOTES.md"
+
+          zip_name="VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}.zip"
+          (cd "$stage" && zip -r "../../$zip_name" .)
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$zip_name" > "VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt"
+          else
+            shasum -a 256 "$zip_name" > "VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt"
+          fi
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}.zip
+            VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-prerelease:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+    needs: build-release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout selected commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download all portable packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: VeigasS3CCManager_v1.0.0_Beta3_*
+          path: release-assets
+          merge-multiple: true
+      - name: Validate and publish Beta 3
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: v1.0.0-beta.3
+          RELEASE_NAME: Veiga's S3CC Manager v1.0.0 Beta 3
+          ASSET_DIR: release-assets
+          NOTES_FILE: docs/RELEASE-NOTES-v1.0.0-BETA3.md
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const tag = process.env.RELEASE_TAG;
+            const expected = [
+              'VeigasS3CCManager_v1.0.0_Beta3_Windows_x64.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_Windows_x64_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta3_Linux_x64.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_Linux_x64_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta3_macOS_Intel.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_macOS_Intel_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta3_macOS_AppleSilicon.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_macOS_AppleSilicon_SHA256.txt',
+            ];
+            const assetDir = path.resolve(process.env.ASSET_DIR);
+            const files = fs.readdirSync(assetDir).filter((name) => expected.includes(name)).sort();
+            if (files.length !== expected.length) {
+              core.setFailed('Expected 8 Beta 3 assets, found ' + files.length + ': ' + files.join(', '));
+              return;
+            }
+            for (const name of expected) {
+              const stat = fs.statSync(path.join(assetDir, name));
+              if (!stat.isFile() || stat.size === 0) {
+                core.setFailed('Invalid empty asset: ' + name);
+                return;
+              }
+            }
+
+            let ref = null;
+            try {
+              ref = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'tags/' + tag,
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (ref && ref.data.object.sha !== context.sha) {
+              core.setFailed('Existing ' + tag + ' points to ' + ref.data.object.sha + ', expected workflow commit ' + context.sha + '; refusing to overwrite.');
+              return;
+            }
+            if (!ref) {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'refs/tags/' + tag,
+                sha: context.sha,
+              });
+            }
+
+            let release = null;
+            try {
+              release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            const body = fs.readFileSync(path.resolve(process.env.NOTES_FILE), 'utf8');
+            if (!release) {
+              release = await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                target_commitish: context.sha,
+                name: process.env.RELEASE_NAME,
+                body,
+                prerelease: true,
+                draft: false,
+              });
+            } else {
+              if (release.data.target_commitish && release.data.target_commitish !== context.sha) {
+                core.setFailed('Existing release target is ' + release.data.target_commitish + ', expected ' + context.sha + '; refusing to overwrite.');
+                return;
+              }
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                name: process.env.RELEASE_NAME,
+                body,
+                prerelease: true,
+                draft: false,
+              });
+              release = await github.rest.repos.getRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+              });
+            }
+
+            for (const asset of release.data.assets) {
+              if (expected.includes(asset.name)) {
+                await github.rest.repos.deleteReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  asset_id: asset.id,
+                });
+              }
+            }
+
+            for (const name of expected) {
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                name,
+                data: fs.readFileSync(path.join(assetDir, name)),
+              });
+            }
+            core.notice('Published ' + tag + ' with 8 validated assets at commit ' + context.sha);
+
+
