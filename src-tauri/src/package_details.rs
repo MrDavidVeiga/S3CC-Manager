@@ -33,6 +33,7 @@ const TYPE_ITUN: u32 = 0x03B3_3DDF;
 const TYPE_STBL: u32 = 0x2205_57DA;
 const TYPE_VPXY: u32 = 0x7368_84F1;
 const TYPE_S3SA: u32 = 0x073F_AA07;
+const MAX_MESH_CACHE_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +125,17 @@ struct PreviewCacheEntry {
 
 fn preview_cache() -> &'static Mutex<HashMap<String, PreviewCacheEntry>> {
     static CACHE: OnceLock<Mutex<HashMap<String, PreviewCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone)]
+struct MeshCacheEntry {
+    file_sha256: String,
+    mesh: PackageMeshInfo,
+}
+
+fn mesh_cache() -> &'static Mutex<HashMap<String, MeshCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, MeshCacheEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -344,7 +356,31 @@ fn get_package_technical_details_core(
         })
         .collect::<Vec<_>>();
 
-    let mesh = analyze_package_meshes(&path);
+    let mesh_key = path.to_string_lossy().to_string();
+    let mesh = mesh_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&mesh_key).cloned())
+        .filter(|entry| entry.file_sha256.eq_ignore_ascii_case(&cached.file_sha256))
+        .map(|entry| entry.mesh)
+        .unwrap_or_else(|| {
+            let mesh = analyze_package_meshes(&path);
+            if let Ok(mut cache) = mesh_cache().lock() {
+                if cache.len() >= MAX_MESH_CACHE_ENTRIES {
+                    if let Some(oldest_key) = cache.keys().next().cloned() {
+                        cache.remove(&oldest_key);
+                    }
+                }
+                cache.insert(
+                    mesh_key,
+                    MeshCacheEntry {
+                        file_sha256: cached.file_sha256.clone(),
+                        mesh: mesh.clone(),
+                    },
+                );
+            }
+            mesh
+        });
 
     Ok(PackageTechnicalDetails {
         path: cached.path,

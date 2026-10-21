@@ -2,7 +2,7 @@ use crate::dbpf::Package;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashMap},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 pub const TYPE_GEOM: u32 = 0x015A_1849;
