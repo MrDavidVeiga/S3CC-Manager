@@ -285,7 +285,7 @@ fn load_persistent_scan(root: &Path, language: AppLanguage) -> Option<LatestScan
 // change.  The prior value allowed persistent scans created before the
 // CASP/OBJD-free override rules to be reused, leaving those packages shown as
 // Unknown until the user manually invalidated the cache.
-const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261020-override-evidence-roof-sheep-6";
+const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261020-override-evidence-roof-sheep-eyelash-7";
 
 fn context_file_signature(path: &Path) -> String {
     if !path.is_file() {
@@ -1465,6 +1465,10 @@ fn phase3_directed_family_classification(
     catalog_classifications: &[CatalogClassification],
 ) -> Option<PackageFamilyClassification> {
     let internal_names = package_internal_identifiers(package, project_evidence);
+    if let Some(classification) = verified_eyelash_texture_companion(&package.entries, types, language)
+    {
+        return Some(classification);
+    }
     if let Some(classification) = verified_eye_texture_replacement(&package.entries, types, language)
     {
         return Some(classification);
@@ -4447,6 +4451,64 @@ fn verified_eyelash_catalog_bundle(
         classifications.len(), path.join("\\")
     );
     Some(result)
+}
+
+// A small number of eyelash downloads contain only the IMG companions for a
+// known CASP eyelash asset. They have no CASP of their own, so the normal
+// catalogue path cannot classify them. The three exact instance prefixes below
+// are the verified internal TGI family shared by the affected packages and by
+// the recognised S-Club eyelash asset. Requiring all three clusters and an
+// IMG-only package prevents generic textures from being promoted by filename.
+fn verified_eyelash_texture_companion(
+    entries: &[ResourceEntry],
+    types: &BTreeSet<u32>,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    if types.len() != 1
+        || !types.contains(&TYPE_IMG)
+        || entries.len() != 21
+        || entries.iter().any(|entry| entry.type_id != TYPE_IMG)
+    {
+        return None;
+    }
+    let mut clusters = [0usize; 3];
+    for entry in entries {
+        let prefix = entry.instance & 0xFFFF_FFFF_FFFF_FF00;
+        match prefix {
+            0xD1E4_338D_1C34_B700 => clusters[0] += 1,
+            0xD1E4_348D_1C34_B900 => clusters[1] += 1,
+            0xD1E4_358D_1C34_BB00 => clusters[2] += 1,
+            _ => return None,
+        }
+    }
+    if clusters != [9, 10, 2] {
+        return None;
+    }
+    let eyelashes = match language {
+        AppLanguage::En => "Eyelashes",
+        AppLanguage::Pt => "Cílios",
+        AppLanguage::Es => "Pestañas",
+    };
+    Some(PackageFamilyClassification {
+        main_category: match language {
+            AppLanguage::En => "Makeup",
+            AppLanguage::Pt => "Maquiagem",
+            AppLanguage::Es => "Maquillaje",
+        }
+        .to_string(),
+        sub_category: Some(eyelashes.to_string()),
+        folder_parts: vec!["CAS".to_string(), match language {
+            AppLanguage::En => "Makeup",
+            AppLanguage::Pt => "Maquiagem",
+            AppLanguage::Es => "Maquillaje",
+        }
+        .to_string(), eyelashes.to_string()],
+        detected_from: vec![
+            "IMG".to_string(),
+            "EyelashTextureCompanionSignature".to_string(),
+        ],
+        technical_reason: "IMG-only package shares the verified internal eyelash texture TGI family with a CASP eyelash asset; classification does not rely on the filename or source folder.".to_string(),
+    })
 }
 
 #[derive(Debug, Default)]
@@ -7484,6 +7546,66 @@ mod tests {
             file_size_high_bit: false,
         };
         assert!(verified_eye_texture_replacement(&[unrelated], &types, AppLanguage::Pt).is_none());
+    }
+
+    #[test]
+    fn verified_img_only_eyelash_companion_uses_internal_tgi_clusters() {
+        let instances = [
+            0xD1E4_338D_1C34_B780,
+            0xD1E4_338D_1C34_B781,
+            0xD1E4_338D_1C34_B789,
+            0xD1E4_338D_1C34_B78A,
+            0xD1E4_338D_1C34_B78B,
+            0xD1E4_338D_1C34_B78C,
+            0xD1E4_338D_1C34_B78D,
+            0xD1E4_338D_1C34_B78E,
+            0xD1E4_338D_1C34_B78F,
+            0xD1E4_348D_1C34_B952,
+            0xD1E4_348D_1C34_B953,
+            0xD1E4_348D_1C34_B958,
+            0xD1E4_348D_1C34_B959,
+            0xD1E4_348D_1C34_B95A,
+            0xD1E4_348D_1C34_B95B,
+            0xD1E4_348D_1C34_B95C,
+            0xD1E4_348D_1C34_B95D,
+            0xD1E4_348D_1C34_B95E,
+            0xD1E4_348D_1C34_B95F,
+            0xD1E4_358D_1C34_BB2E,
+            0xD1E4_358D_1C34_BB2F,
+        ];
+        let entries = instances
+            .into_iter()
+            .map(|instance| ResourceEntry {
+                type_id: TYPE_IMG,
+                group: 0,
+                instance,
+                chunk_offset: 0,
+                file_size: 1,
+                mem_size: 1,
+                compressed: 0,
+                unknown2: 0,
+                file_size_high_bit: false,
+            })
+            .collect::<Vec<_>>();
+        let classification = verified_eyelash_texture_companion(
+            &entries,
+            &BTreeSet::from([TYPE_IMG]),
+            AppLanguage::Pt,
+        )
+        .expect("verified IMG-only eyelash companion");
+        assert_eq!(classification.folder_parts, vec!["CAS", "Maquiagem", "Cílios"]);
+        assert!(classification
+            .detected_from
+            .contains(&"EyelashTextureCompanionSignature".to_string()));
+
+        let mut unrelated = entries;
+        unrelated[0].instance = 0x1234;
+        assert!(verified_eyelash_texture_companion(
+            &unrelated,
+            &BTreeSet::from([TYPE_IMG]),
+            AppLanguage::Pt,
+        )
+        .is_none());
     }
 
     #[test]
