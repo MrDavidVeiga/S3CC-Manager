@@ -760,6 +760,30 @@ fn store_reference_family_classification(
     })
 }
 
+fn store_family_classification(
+    evidence: &ReferenceEvidence,
+) -> Option<PackageFamilyClassification> {
+    if let Some(classification) = store_reference_family_classification(evidence) {
+        return Some(classification);
+    }
+    if evidence.store_match_kind.as_deref() != Some("named_resource_overlap")
+        || evidence.store_confidence.as_deref() != Some("evidence")
+        || evidence.store_category_parts.is_empty()
+    {
+        return None;
+    }
+    let folder_parts = evidence.store_category_parts.clone();
+    Some(PackageFamilyClassification {
+        main_category: folder_parts.first()?.clone(),
+        sub_category: folder_parts.get(1).cloned(),
+        folder_parts,
+        detected_from: vec!["StoreCatalogNameAndResourceOverlap".to_string()],
+        technical_reason:
+            "The Store catalog name and shared resources identify the Store hierarchy; full package identity remains unconfirmed."
+                .to_string(),
+    })
+}
+
 fn store_evidence_can_resolve_status(status: &str) -> bool {
     matches!(status, "unknown" | "needs_review" | "mixed")
 }
@@ -4208,6 +4232,12 @@ fn localized_reference_message(language: AppLanguage, message: &str) -> String {
         (AppLanguage::Es, "Store identity matches multiple categories; no category was selected automatically.") => {
             "La identidad de la Store corresponde a varias categorías; no se seleccionó ninguna automáticamente.".to_string()
         }
+        (AppLanguage::Pt, "Store catalog name and shared resources identify one category; full package identity is not confirmed.") => {
+            "O nome no catálogo da Store e os recursos compartilhados identificam uma categoria; a identidade completa do package não foi confirmada.".to_string()
+        }
+        (AppLanguage::Es, "Store catalog name and shared resources identify one category; full package identity is not confirmed.") => {
+            "El nombre del catálogo de la Store y los recursos compartidos identifican una categoría; la identidad completa del package no está confirmada.".to_string()
+        }
         (AppLanguage::Pt, value) if value.starts_with("Official resources: ") => {
             localize_official_resources(language, value)
         }
@@ -5058,7 +5088,7 @@ fn scan_one_with_index(
     if store_evidence_can_resolve_status(&status) {
         if let Some(classification) = reference_evidence
             .as_ref()
-            .and_then(store_reference_family_classification)
+            .and_then(store_family_classification)
         {
             for source in &classification.detected_from {
                 detected_from.insert(source.clone());
@@ -6682,6 +6712,23 @@ mod tests {
         assert_eq!(classification.main_category, "Construção");
         assert_eq!(classification.sub_category.as_deref(), Some("Telhados"));
         assert_eq!(classification.folder_parts, vec!["Construção", "Telhados"]);
+    }
+
+    #[test]
+    fn named_store_overlap_projects_catalog_hierarchy_without_claiming_exact_identity() {
+        let evidence = ReferenceEvidence {
+            store_match_kind: Some("named_resource_overlap".to_string()),
+            store_confidence: Some("evidence".to_string()),
+            store_category_parts: vec!["Sets".to_string(), "Store Sets".to_string()],
+            ..ReferenceEvidence::default()
+        };
+        let classification = store_family_classification(&evidence).unwrap();
+        assert_eq!(
+            classification.detected_from,
+            vec!["StoreCatalogNameAndResourceOverlap"]
+        );
+        assert_eq!(classification.folder_parts, vec!["Sets", "Store Sets"]);
+        assert!(classification.technical_reason.contains("full package identity"));
     }
 
     #[test]

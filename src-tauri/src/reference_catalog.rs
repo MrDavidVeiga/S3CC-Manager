@@ -170,6 +170,7 @@ struct StoreQueryIndex {
     by_sha256: HashMap<String, Vec<usize>>,
     by_technical_signature: HashMap<String, Vec<usize>>,
     by_tgi: HashMap<String, Vec<usize>>,
+    by_name: HashMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -319,6 +320,11 @@ fn build_store_query_index(catalog: Option<&StoreCatalog>) -> StoreQueryIndex {
         if package.parse_error.is_some() || package.resources.is_empty() {
             continue;
         }
+        index
+            .by_name
+            .entry(normalized_store_package_name(&package.name))
+            .or_default()
+            .push(package_index);
         if !package.sha256.is_empty() && package.parse_error.is_none() {
             index
                 .by_sha256
@@ -342,6 +348,31 @@ fn build_store_query_index(catalog: Option<&StoreCatalog>) -> StoreQueryIndex {
         }
     }
     index
+}
+
+/// Normalize only the inactive/package suffixes.  The Store prefix (`[Set]`,
+/// `[Items]`, `[PC]`) and the catalog name remain part of the identity used by
+/// the name-plus-resource evidence path.
+fn normalized_store_package_name(value: &str) -> String {
+    let mut name = value.trim().to_ascii_lowercase();
+    for suffix in [
+        ".package.disabled",
+        ".package.duplicated",
+        ".package",
+    ] {
+        if name.ends_with(suffix) {
+            name.truncate(name.len() - suffix.len());
+            break;
+        }
+    }
+    name
+}
+
+fn is_store_bundle_name(value: &str) -> bool {
+    let name = normalized_store_package_name(value);
+    ["[set]", "[items]", "[pc]", "[premium]"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 fn build_official_query_index(catalog: Option<&OfficialCatalog>) -> OfficialQueryIndex {
@@ -1020,6 +1051,7 @@ fn package_resources(package: &Package) -> Result<Vec<ReferenceResource>> {
 fn compare_resources(
     resources: &[ReferenceResource],
     file_hash: Option<&str>,
+    package_name: Option<&str>,
     catalogs: &ReferenceCatalogSet,
 ) -> Option<ReferenceEvidence> {
     if resources.is_empty() {
@@ -1093,18 +1125,66 @@ fn compare_resources(
             }
             if let Some(shared) = shared_by_package.values().max().copied() {
                 if shared > 0 {
-                    result.store_match_kind = Some("partial_resource_overlap".to_string());
-                    // A shared TGI is useful diagnostic evidence, but it does
-                    // not establish Store package identity and must not put a
-                    // correctly classified package into the review state.
-                    // Only exact/technical identities can be confirmed by the
-                    // Store catalog.
-                    result.store_confidence = Some("evidence".to_string());
                     result.shared_tgi_count = shared;
-                    result.evidence.push(
-                        "Store overlap is partial; a shared TGI alone is not a package identity."
-                            .to_string(),
-                    );
+                    let named_candidates = package_name
+                        .filter(|name| is_store_bundle_name(name))
+                        .and_then(|name| {
+                            catalogs
+                                .store_index
+                                .by_name
+                                .get(&normalized_store_package_name(name))
+                        })
+                        .into_iter()
+                        .flatten()
+                        .filter(|index| shared_by_package.contains_key(index))
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let named_max_shared = named_candidates
+                        .iter()
+                        .filter_map(|index| shared_by_package.get(index).copied())
+                        .max()
+                        .unwrap_or_default();
+                    let named_candidates = named_candidates
+                        .into_iter()
+                        .filter(|index| {
+                            shared_by_package.get(index).copied() == Some(named_max_shared)
+                        })
+                        .collect::<Vec<_>>();
+                    let named_matches = named_candidates
+                        .iter()
+                        .filter_map(|index| store.packages.get(*index))
+                        .collect::<Vec<_>>();
+                    let named_categories = named_matches
+                        .iter()
+                        .map(|value| value.category_parts.clone())
+                        .collect::<BTreeSet<_>>();
+
+                    if !named_matches.is_empty() && named_categories.len() == 1 {
+                        result.store_match_kind =
+                            Some("named_resource_overlap".to_string());
+                        result.store_confidence = Some("evidence".to_string());
+                        result.store_reference_paths = named_matches
+                            .iter()
+                            .map(|value| value.relative_path.clone())
+                            .collect();
+                        result.store_category_parts =
+                            named_categories.into_iter().next().unwrap_or_default();
+                        result.evidence.push(
+                            "Store catalog name and shared resources identify one category; full package identity is not confirmed."
+                                .to_string(),
+                        );
+                    } else {
+                        result.store_match_kind =
+                            Some("partial_resource_overlap".to_string());
+                        result.store_confidence = Some("evidence".to_string());
+                        // A shared TGI is useful diagnostic evidence, but it
+                        // does not establish Store package identity or a
+                        // destination by itself.
+                        result.evidence.push(
+                            "Store overlap is partial; a shared TGI alone is not a package identity."
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -1170,7 +1250,8 @@ fn compare_resources(
 fn compare_package(package: &Package, catalogs: &ReferenceCatalogSet) -> Option<ReferenceEvidence> {
     let resources = package_resources(package).ok()?;
     let file_hash = sha256_path(&package.path).ok().map(|(hash, _)| hash);
-    compare_resources(&resources, file_hash.as_deref(), catalogs)
+    let package_name = package.path.file_name().and_then(|value| value.to_str());
+    compare_resources(&resources, file_hash.as_deref(), package_name, catalogs)
 }
 
 /// Compare a package against the reference catalogs using the shared DBPF
@@ -1194,7 +1275,10 @@ pub(crate) fn compare_cached_package(
             payload_size: resource.payload_size,
         })
         .collect::<Vec<_>>();
-    compare_resources(&resources, Some(&cached.file_sha256), catalogs)
+    let package_name = Path::new(&cached.path)
+        .file_name()
+        .and_then(|value| value.to_str());
+    compare_resources(&resources, Some(&cached.file_sha256), package_name, catalogs)
 }
 
 pub fn analyze_package(package: &Package) -> Option<ReferenceEvidence> {
@@ -1450,6 +1534,55 @@ mod tests {
         );
         assert_eq!(evidence.store_confidence.as_deref(), Some("evidence"));
         assert!(evidence.store_category_parts.is_empty());
+    }
+
+    #[test]
+    fn named_store_bundle_with_shared_resource_gets_catalog_category_evidence() {
+        let catalog_resources = vec![reference("10", "one"), reference("11", "two")];
+        let current = reference("10", "different");
+        let mut entry = store(
+            "Sets\\Store Sets\\[Set] Bohemian Garden (BB).package",
+            &["Sets", "Store Sets"],
+            catalog_resources,
+        );
+        entry.name = "[Set] Bohemian Garden (BB).package".to_string();
+        let catalog = StoreCatalog {
+            version: CATALOG_VERSION,
+            generated_at: String::new(),
+            source_label: STORE_LABEL.to_string(),
+            source_root: String::new(),
+            directories: vec![],
+            package_count: 1,
+            packages: vec![entry],
+            resource_count: 2,
+        };
+        let cached = cache::CachedPackage {
+            path: std::env::temp_dir()
+                .join("[Set] Bohemian Garden (BB).package")
+                .to_string_lossy()
+                .to_string(),
+            size: 1,
+            modified_ns: 0,
+            file_sha256: "not-the-store-file".to_string(),
+            quick_fingerprint: String::new(),
+            dbpf_major: Some(2),
+            dbpf_minor: Some(0),
+            resources: vec![cache::CachedResource {
+                type_id: current.type_id,
+                group: current.group,
+                instance: current.instance,
+                payload_sha256: current.payload_sha256,
+                payload_size: current.payload_size,
+                file_size: 1,
+                mem_size: 1,
+                compressed: 0,
+            }],
+            parse_error: None,
+        };
+        let evidence = compare_cached_package(&cached, &catalog_set(Some(catalog), None)).unwrap();
+        assert_eq!(evidence.store_match_kind.as_deref(), Some("named_resource_overlap"));
+        assert_eq!(evidence.store_confidence.as_deref(), Some("evidence"));
+        assert_eq!(evidence.store_category_parts, vec!["Sets", "Store Sets"]);
     }
 
     #[test]
