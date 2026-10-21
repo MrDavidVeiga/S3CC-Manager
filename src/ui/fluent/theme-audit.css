@@ -282,6 +282,23 @@ body.release-v1 .theme-button-label {
   white-space: nowrap;
   font-size: 12px;
 }
+
+/* Beta 3 top-bar typography: the language label, active language code and
+ * Theme label must remain optically identical across the Fluent layers. */
+body.release-v1 {
+  --topbar-label-font-size: 12px;
+  --topbar-label-line-height: 18px;
+}
+body.release-v1 .language-switcher,
+body.release-v1 .language-switcher > span,
+body.release-v1 .lang-toggle-btn,
+body.release-v1 #language-code,
+body.release-v1 .lang-menu-item,
+body.release-v1 .theme-button,
+body.release-v1 .theme-button-label {
+  font-size: var(--topbar-label-font-size);
+  line-height: var(--topbar-label-line-height);
+}
 body.release-v1 .theme-swatch {
   background: linear-gradient(135deg, var(--swatch-light, var(--accent)) 0 50%, var(--swatch-dark, var(--accent-dark-2)) 50% 100%);
 }
