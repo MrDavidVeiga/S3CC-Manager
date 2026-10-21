@@ -280,14 +280,14 @@ body.release-v1 .theme-button {
 }
 body.release-v1 .theme-button-label {
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 14px;
 }
 
 /* Beta 3 top-bar typography: the language label, active language code and
  * Theme label must remain optically identical across the Fluent layers. */
 body.release-v1 {
-  --topbar-label-font-size: 12px;
-  --topbar-label-line-height: 18px;
+  --topbar-label-font-size: 14px;
+  --topbar-label-line-height: 20px;
 }
 body.release-v1 .language-switcher,
 body.release-v1 .language-switcher > span,
