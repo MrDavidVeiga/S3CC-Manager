@@ -28,6 +28,18 @@ body.release-v1 .fluent-search-box > input.text-input:disabled {
   color: var(--fluent-text-disabled);
   -webkit-text-fill-color: var(--fluent-text-disabled);
 }
+/* Mean Girls keeps a light input surface while the legacy app-shell tokens
+   remain dark-scoped. Bind this SearchBox to the theme's real text palette. */
+html[data-theme-choice="mean-girls"] body.release-v1 .fluent-search-box > input.text-input,
+html[data-theme-choice="mean-girls"] body.release-v1 .fluent-search-box > input.text-input:hover,
+html[data-theme-choice="mean-girls"] body.release-v1 .fluent-search-box > input.text-input:focus {
+  color: #4D1332;
+  -webkit-text-fill-color: #4D1332;
+}
+html[data-theme-choice="mean-girls"] body.release-v1 .fluent-search-box > input.text-input::placeholder {
+  color: #7F4361;
+  opacity: 1;
+}
 body.release-v1 .fluent-search-box::before {
   content: "";
   position: absolute;
