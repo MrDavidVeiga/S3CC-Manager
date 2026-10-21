@@ -28,30 +28,31 @@ body.release-v1 .fluent-search-box > input.text-input:disabled {
   color: var(--fluent-text-disabled);
   -webkit-text-fill-color: var(--fluent-text-disabled);
 }
-/* EA App intentionally uses a white SearchBox surface inside its dark shell.
-   Keep the entered value and placeholder bound to that theme's real palette. */
+/* EA App SearchBox follows the filter control surface in every interactive
+   state.  Its text uses the same dark-mode white/tertiary pair as Veiga Dark. */
 html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input,
+html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input:disabled {
+  background: #2A2E3F;
+  color: #FFFFFF;
+  -webkit-text-fill-color: #FFFFFF;
+}
 html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input:hover,
 html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input:focus {
-  color: #282936;
-  -webkit-text-fill-color: #282936;
+  background: #343647;
+  color: #FFFFFF;
+  -webkit-text-fill-color: #FFFFFF;
 }
 html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input::placeholder {
-  color: #8B8D98;
+  color: rgba(255, 255, 255, .544);
   opacity: 1;
 }
-/* Keep the EA App SearchBox on its white surface in every state.  The shared
-   disabled opacity would darken that surface and make the value unreadable;
-   use the same readable field palette as normal, hover, and focus. */
+/* Do not let the shared disabled opacity change the filter-colored surface. */
 html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input:disabled {
   opacity: 1;
-  background: #FFFFFF;
-  color: #282936;
-  -webkit-text-fill-color: #282936;
-  border-color: #6E7080;
+  border-color: rgba(255, 255, 255, .13);
 }
 html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input:disabled::placeholder {
-  color: #8B8D98;
+  color: rgba(255, 255, 255, .544);
   opacity: 1;
 }
 body.release-v1 .fluent-search-box::before {
