@@ -276,10 +276,11 @@ body.release-v1 .theme-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* The moon glyph has transparent space in its 16px viewBox. A compact
-   * visual gap keeps the icon/text spacing equal to PT plus its chevron. */
-  gap: 4px;
+  /* Match the language selector's icon/label spacing. The flex line box
+   * keeps both the moon and the localized label on the same centerline. */
+  gap: 8px;
   padding-inline: 8px;
+  text-align: center;
 }
 body.release-v1 .theme-button-label {
   white-space: nowrap;

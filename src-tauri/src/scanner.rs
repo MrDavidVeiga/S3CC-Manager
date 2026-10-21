@@ -1601,6 +1601,11 @@ fn phase3_directed_family_classification(
         return Some(classification);
     }
     if let Some(classification) =
+        tss_asset_companion_classification(types, name, relative, language, &internal_names)
+    {
+        return Some(classification);
+    }
+    if let Some(classification) =
         legacy_source_evidence_classification(types, name, relative, language)
     {
         return Some(classification);
@@ -2304,6 +2309,54 @@ fn script_family_result(
         ],
         technical_reason: technical_reason.to_string(),
     }
+}
+
+// TSS asset/support packages are not necessarily S3SA anchors. They can
+// contain only the resource payload used by the primary interaction package,
+// which previously left names such as TSS_MorePregnancyInteractions_Assets
+// in review. Require both the explicit TSS asset identity and a real support
+// resource set; the filename alone is never sufficient.
+fn tss_asset_companion_classification(
+    types: &BTreeSet<u32>,
+    name: &str,
+    relative: &str,
+    language: AppLanguage,
+    internal_names: &[String],
+) -> Option<PackageFamilyClassification> {
+    let normalized = format!("{relative}/{name}").replace('\\', "/").to_ascii_lowercase();
+    let is_tss_asset = normalized.contains("tss_") && normalized.contains("assets");
+    let has_interaction_marker = normalized.contains("interaction")
+        || internal_names.iter().any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("interaction") || value.contains("pregnancy")
+        });
+    let has_support_resource = types.iter().any(|type_id| {
+        matches!(
+            *type_id,
+            TYPE_CLIP_LOCAL
+                | TYPE_XML_LOCAL
+                | TYPE_ITUN_LOCAL
+                | TYPE_STBL_LOCAL
+                | TYPE_NMAP_LOCAL
+                | TYPE_MANIFEST_LOCAL
+        )
+    });
+    if !is_tss_asset || !has_interaction_marker || !has_support_resource {
+        return None;
+    }
+
+    let scripts = localized_special_folder(language, "scripts");
+    let gameplay = localized_special_folder(language, "gameplay");
+    Some(PackageFamilyClassification {
+        main_category: scripts.to_string(),
+        sub_category: Some(gameplay.to_string()),
+        folder_parts: vec![scripts.to_string(), gameplay.to_string()],
+        detected_from: vec![
+            "TSSAssetCompanion".to_string(),
+            "TSSInteractionResourceSet".to_string(),
+        ],
+        technical_reason: "TSS asset package has an interaction-family identity and a verified support resource set; it stays with the related gameplay interaction packages instead of remaining in review.".to_string(),
+    })
 }
 
 fn legacy_source_evidence_classification(
@@ -7890,6 +7943,30 @@ mod tests {
         assert!(classification
             .detected_from
             .contains(&"CanonicalGameplaySource".to_string()));
+    }
+
+    #[test]
+    fn tss_interaction_assets_join_their_gameplay_family_with_resource_evidence() {
+        let classification = tss_asset_companion_classification(
+            &BTreeSet::from([TYPE_XML_LOCAL, TYPE_STBL_LOCAL]),
+            "TSS_MorePregnancyInteractions_Assets.package",
+            "#Sem Categoria",
+            AppLanguage::Pt,
+            &[],
+        )
+        .expect("TSS interaction asset companion");
+        assert_eq!(classification.folder_parts, vec!["Scripts", "Jogabilidade"]);
+        assert!(classification
+            .detected_from
+            .contains(&"TSSAssetCompanion".to_string()));
+        assert!(tss_asset_companion_classification(
+            &BTreeSet::new(),
+            "TSS_MorePregnancyInteractions_Assets.package",
+            "#Sem Categoria",
+            AppLanguage::Pt,
+            &[],
+        )
+        .is_none());
     }
 
     #[test]

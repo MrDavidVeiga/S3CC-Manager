@@ -91,8 +91,8 @@ assert.match(
 );
 assert.match(
   themeAudit,
-  /body\.release-v1 \.theme-button \{[\s\S]*?gap:\s*4px;[\s\S]*?padding-inline:\s*8px;/s,
-  "Theme icon and label must use the compact optical gap used by the language control",
+  /body\.release-v1 \.theme-button \{[\s\S]*?gap:\s*8px;[\s\S]*?padding-inline:\s*8px;[\s\S]*?text-align:\s*center;/s,
+  "Theme icon and label must use the same centered spacing as the language control",
 );
 
 assert.match(index, /id="language-code"/);
@@ -102,6 +102,8 @@ assert.match(index, /id="titlebar-maximize"[\s\S]*?data-i18n-title="windowMaximi
 assert.match(index, /id="titlebar-close"[\s\S]*?data-i18n-title="windowClose"/);
 assert.doesNotMatch(app, /filterCategories:/, "Filter dropdown must not expose a visible category-heading translation");
 assert.doesNotMatch(app, /content-filter-menu-heading/, "Filter dropdown must not render the removed heading");
+assert.match(app, /option\.hidden = isActive;/, "Active language must be hidden from its own dropdown");
+assert.match(app, /option\.classList\.toggle\("hidden", isActive\)/, "Active language must not remain visible in the flyout");
 for (const [key, value] of Object.entries(languageLabels)) {
   assert.match(index, new RegExp(`data-i18n="${key}"`));
   assert.match(index, new RegExp(`>${value}<`));
@@ -120,7 +122,7 @@ for (const [language, translations] of Object.entries(themeTranslations)) {
 }
 
 assert.match(app, /const languageLabels = \{/);
-assert.match(app, /option\.setAttribute\("aria-selected", String\(option\.dataset\.lang === state\.language\)\)/);
+assert.match(app, /option\.setAttribute\("aria-selected", String\(isActive\)\)/);
 assert.match(app, /data-i18n-aria-label/);
 assert.match(app, /data-i18n-title/);
 assert.match(app, /localStorage\.setItem\("s3cc-organizer-language", state\.language\)/);

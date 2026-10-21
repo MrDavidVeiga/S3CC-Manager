@@ -3539,7 +3539,14 @@ function renderLanguage() {
     el.languageCode.textContent = languageLabels[state.language] || languageLabels.en;
   }
   for (const option of el.languageMenuItems) {
-    option.setAttribute("aria-selected", String(option.dataset.lang === state.language));
+    const isActive = option.dataset.lang === state.language;
+    // The active code already appears in the selector button. Keeping it out
+    // of the flyout avoids presenting an action that would do nothing while
+    // retaining the option's localized label for the other languages.
+    option.hidden = isActive;
+    option.classList.toggle("hidden", isActive);
+    option.setAttribute("aria-hidden", String(isActive));
+    option.setAttribute("aria-selected", String(isActive));
   }
   el.languageButton?.setAttribute(
     "aria-expanded",
