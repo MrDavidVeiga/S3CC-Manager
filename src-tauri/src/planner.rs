@@ -937,9 +937,9 @@ fn is_mods_system_source(root: &Path, source: &Path) -> bool {
     )
 }
 
-// Older versions created their category trees beside Packages inside Mods.
-// Migrate only those recognizable legacy category roots. Never treat
-// Overrides, DCCache or unrelated custom folders as organizer-owned.
+// A source branch below Mods is legacy by location, not by its display name.
+// Creator names such as `Anthon` are user content and must be reconciled by
+// package evidence; only loading/system branches remain outside this scope.
 fn legacy_manager_source(root: &Path, source: &Path) -> bool {
     if !is_mods_root(root) {
         return false;
@@ -950,61 +950,19 @@ fn legacy_manager_source(root: &Path, source: &Path) -> bool {
     if relative.components().count() < 2 {
         return false;
     }
-    let Some(name) = relative
+    let Some(first) = relative
         .components()
         .next()
         .and_then(|component| match component {
-            Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+            Component::Normal(name) => Some(name.to_string_lossy().to_string()),
             _ => None,
         })
     else {
         return false;
     };
-    [
-        "cas",
-        "sliders",
-        "clothing",
-        "roupas",
-        "ropa",
-        "hair",
-        "cabelos",
-        "cabello",
-        "accessories",
-        "acessórios",
-        "accesorios",
-        "makeup",
-        "maquiagem",
-        "maquillaje",
-        "genetics",
-        "genética",
-        "genetica",
-        "pets",
-        "animais",
-        "mascotas",
-        "patterns",
-        "padrões",
-        "patrones",
-        "buy",
-        "compra",
-        "build",
-        "construção",
-        "construcción",
-        "objects",
-        "objetos",
-        "gameplay",
-        "jogabilidade",
-        "jugabilidad",
-        "scripts",
-        "store",
-        "nraas",
-        "localization",
-        "localização",
-        "localización",
-        "poses and animations",
-        "poses e animações",
-        "poses y animaciones",
-    ]
-    .contains(&name.as_str())
+    !first.eq_ignore_ascii_case("Packages")
+        && !first.eq_ignore_ascii_case("Overrides")
+        && !is_mods_system_source(root, source)
 }
 
 // When the user selected Mods rather than Mods/Packages, the organizer's
@@ -3246,29 +3204,24 @@ fn path_matches_item_source(path: &Path, item: &PlanItem) -> bool {
     same_path_case_insensitive(path, Path::new(&item.source_path))
 }
 
-fn is_stable_review_or_quarantine_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let value = component.as_os_str().to_string_lossy();
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "#sem categoria"
-                | "sem categoria"
-                | "#not categorized"
-                | "not categorized"
-                | "#sin categoría"
-                | "sin categoría"
-                | "#duplicados"
-                | "#duplicates"
-                | "previews de ccs"
-                | "cc previews"
-        )
+fn is_under_protected_directory(
+    root: &Path,
+    path: &Path,
+    protected_relative_directories: &[String],
+) -> bool {
+    let candidate = normalized_path_key(root, path);
+    protected_relative_directories.iter().any(|relative| {
+        let protected = normalized_path_key(root, Path::new(relative));
+        candidate == protected || candidate.starts_with(&format!("{protected}\\"))
     })
 }
 
 fn projected_remaining_legacy_files(
+    root: &Path,
     selected: &HashSet<PathBuf>,
     selected_roots: &[PathBuf],
     items: &[PlanItem],
+    protected_relative_directories: &[String],
 ) -> usize {
     let mut files = BTreeSet::<PathBuf>::new();
     for path in selected {
@@ -3311,7 +3264,11 @@ fn projected_remaining_legacy_files(
                         && !item.plan_status.starts_with("already_")
                         && !destination_is_same
                 }
-                None => !is_stable_review_or_quarantine_path(path),
+                None => !is_under_protected_directory(
+                    root,
+                    path,
+                    protected_relative_directories,
+                ),
             }
         })
         .count()
@@ -3366,7 +3323,7 @@ fn projected_empty_folders_to_clean(
         .filter(|folder| {
             if protected_relative_directories.iter().any(|relative| {
                 normalized_path_key(root, folder) == normalized_path_key(root, Path::new(relative))
-            }) || is_stable_review_or_quarantine_path(folder)
+            }) || is_under_protected_directory(root, folder, protected_relative_directories)
             {
                 return false;
             }
@@ -3451,7 +3408,7 @@ fn projected_legacy_folder_counts(
     for folder in candidates {
         if protected_relative_directories.iter().any(|relative| {
             normalized_path_key(root, &folder) == normalized_path_key(root, Path::new(relative))
-        }) || is_stable_review_or_quarantine_path(&folder)
+        }) || is_under_protected_directory(root, &folder, protected_relative_directories)
             || !folder.is_dir()
         {
             continue;
@@ -4988,8 +4945,13 @@ pub(crate) fn build_organization_plan_with_cfg_core(
     // Project the post-move state instead of counting unrelated empty folders
     // across the whole Packages tree. This keeps cleanup indicators aligned
     // with the focused branches the executor is actually allowed to visit.
-    stats.remaining_legacy_files =
-        projected_remaining_legacy_files(&selected, &selected_roots, &items);
+    stats.remaining_legacy_files = projected_remaining_legacy_files(
+        &root,
+        &selected,
+        &selected_roots,
+        &items,
+        &protected_empty_directories,
+    );
     stats.empty_folders_to_clean = projected_empty_folders_to_clean(
         &root,
         &selected_roots,
@@ -6266,7 +6228,7 @@ mod tests {
     }
 
     #[test]
-    fn identifies_only_known_legacy_manager_folders_for_migration() {
+    fn identifies_arbitrary_legacy_manager_folders_by_location() {
         let mods = Path::new("The Sims 3").join("Mods");
         assert!(legacy_manager_source(
             &mods,
@@ -6284,7 +6246,7 @@ mod tests {
             &mods,
             &mods.join("DCCache").join("a.package")
         ));
-        assert!(!legacy_manager_source(
+        assert!(legacy_manager_source(
             &mods,
             &mods.join("Random Folder").join("x.package")
         ));
@@ -7474,13 +7436,31 @@ mod tests {
         std::fs::write(legacy.join("pending.txt"), b"pending").unwrap();
 
         let stable_count =
-            projected_remaining_legacy_files(&HashSet::new(), &[stable.clone()], &[]);
+            projected_remaining_legacy_files(
+                &base,
+                &HashSet::new(),
+                &[stable.clone()],
+                &[],
+                &["#Sem Categoria".to_string()],
+            );
         let stable_alias_count =
-            projected_remaining_legacy_files(&HashSet::new(), &[stable_alias.clone()], &[]);
+            projected_remaining_legacy_files(
+                &base,
+                &HashSet::new(),
+                &[stable_alias.clone()],
+                &[],
+                &["#Sem Categoria".to_string()],
+            );
         let legacy_count =
-            projected_remaining_legacy_files(&HashSet::new(), &[legacy.clone()], &[]);
+            projected_remaining_legacy_files(
+                &base,
+                &HashSet::new(),
+                &[legacy.clone()],
+                &[],
+                &["#Sem Categoria".to_string()],
+            );
         assert_eq!(stable_count, 0);
-        assert_eq!(stable_alias_count, 0);
+        assert_eq!(stable_alias_count, 1);
         assert_eq!(legacy_count, 1);
         std::fs::remove_dir_all(base).unwrap();
     }

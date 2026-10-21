@@ -1,5 +1,5 @@
 use crate::{
-    category_identity::{category_identity, stable_empty_roots, ManagedCategory},
+    category_identity::stable_empty_roots,
     i18n::AppLanguage,
     manifest::{
         replace_manifest_atomic, sha256_file, write_manifest_atomic, RestoreEntry, RestoreManifest,
@@ -864,23 +864,11 @@ fn remaining_legacy_details_with_context(
             return true;
         }
 
-        // Review, preview, and quarantine buckets are Manager-owned even
-        // when an older language alias is still present. Their contents are
-        // not legacy source material for the residual report; empty aliases
-        // remain removable because cleanup protects only the active roots.
-        let Ok(relative) = path.strip_prefix(root) else {
-            return false;
-        };
-        let first = relative.components().find_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_string_lossy()),
-            _ => None,
-        });
-        matches!(
-            first.as_deref().and_then(category_identity),
-            Some(ManagedCategory::Uncategorized)
-                | Some(ManagedCategory::DuplicateQuarantine)
-                | Some(ManagedCategory::Previews)
-        )
+        // Only the exact active roots are protected above. Historical aliases
+        // such as `Sem Categoria` or `#Duplicates`, and similarly named
+        // folders nested below a creator directory, are legacy input and must
+        // be reconciled or reported rather than silently treated as canonical.
+        false
     };
     let item_by_source = plan_items
         .iter()
@@ -1837,12 +1825,47 @@ mod tests {
             &root,
             &[],
             &[],
-            &["Cabelos e Pêlos".to_string()],
+            &[
+                "Cabelos e Pêlos".to_string(),
+                "#Sem Categoria".to_string(),
+            ],
         );
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0].relative_path, "#4 Hair\\Female\\Adult\\unselected.package");
+        assert_eq!(details.len(), 2);
+        assert!(details.iter().any(|detail| {
+            detail.relative_path == "#4 Hair\\Female\\Adult\\unselected.package"
+        }));
+        assert!(details
+            .iter()
+            .any(|detail| detail.relative_path == "Sem Categoria\\alias.package"));
         assert_eq!(details[0].reason, "not_selected");
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_review_alias_is_not_canonicalized_by_folder_name() {
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-nested-review-alias-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let nested = root.join("Anthon").join("Sem Categoria");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("package.package"), b"legacy").unwrap();
+
+        let details = remaining_legacy_details_with_context(
+            &root,
+            &[],
+            &[],
+            &["#Sem Categoria".to_string()],
+        );
+
+        assert_eq!(details.len(), 1);
+        assert_eq!(
+            details[0].relative_path,
+            "Anthon\\Sem Categoria\\package.package"
+        );
+        assert_eq!(details[0].reason, "not_selected");
         fs::remove_dir_all(root).unwrap();
     }
 
