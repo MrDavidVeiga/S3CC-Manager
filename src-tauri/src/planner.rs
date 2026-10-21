@@ -4507,7 +4507,16 @@ pub(crate) fn build_organization_plan_with_cfg_core(
                 &source_hash,
                 &destination_parts,
             ) {
-                Ok(destination) => Some(destination),
+                Ok(mut destination) => {
+                    // Manual-model matches can come from legacy roots such as
+                    // `Cabelos` or `Sem Categoria`.  Apply the same active
+                    // taxonomy normalization used by the hash-assisted path;
+                    // otherwise a valid model match could strand a classified
+                    // package in the old physical hierarchy.
+                    destination.parts =
+                        canonicalize_managed_destination_parts(&destination.parts, language);
+                    Some(destination)
+                }
                 Err(reason) => {
                     let (_, fallback_parts) =
                         fallback_relative_path(&root, language, &item.relative_path, &source_hash)?;

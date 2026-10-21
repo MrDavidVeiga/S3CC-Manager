@@ -1,3 +1,4 @@
+use crate::category_identity::hair_family_root;
 use crate::i18n::AppLanguage;
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
@@ -752,14 +753,7 @@ fn casp_category(core: CaspCore) -> (&'static str, Option<&'static str>) {
 }
 
 fn body_hair_root(language: AppLanguage) -> &'static str {
-    match language {
-        // The Portuguese manual model has a shared hair/fur container, with
-        // Body Hair as the next physical level. English keeps the explicit
-        // Body Hair name requested by the localized taxonomy.
-        AppLanguage::En => "Body Hair",
-        AppLanguage::Pt => "Cabelos e Pêlos",
-        AppLanguage::Es => "Cabello y Pelo",
-    }
+    hair_family_root(language)
 }
 
 pub fn classify_casp(data: &[u8], language: AppLanguage) -> Option<CatalogClassification> {
@@ -772,7 +766,7 @@ pub fn classify_casp(data: &[u8], language: AppLanguage) -> Option<CatalogClassi
     let gender = casp_gender_label(core.age_species_gender, language);
     let species = casp_species_label(core.age_species_gender, core.clothing_type, language);
 
-    let mut folder_parts = if main_key == "Body Hair" {
+    let mut folder_parts = if matches!(main_key, "Hair" | "Body Hair") {
         vec![
             body_hair_root(language).to_string(),
             main_category.clone(),
@@ -1659,6 +1653,8 @@ mod tests {
             if clothing_type == 0x10 {
                 assert_eq!(item.main_category, "Cabelos");
                 assert_eq!(item.sub_category.as_deref(), Some("Pelos Faciais"));
+                assert_eq!(item.folder_parts[0], "Cabelos e Pêlos");
+                assert_eq!(item.folder_parts[1], "Cabelos");
             } else {
                 assert_eq!(item.main_category, "Pelos Corporais");
                 assert_eq!(item.sub_category, None);
@@ -1669,6 +1665,19 @@ mod tests {
             }
             assert!(item.folder_parts.iter().all(|part| !part.contains("Idade")));
             assert!(item.folder_parts.iter().all(|part| part != "Múltiplas Idades"));
+        }
+    }
+
+    #[test]
+    fn scalp_hair_is_nested_under_hair_and_fur_for_every_language() {
+        for (language, root, category) in [
+            (AppLanguage::Pt, "Cabelos e Pêlos", "Cabelos"),
+            (AppLanguage::En, "Body Hair", "Hair"),
+            (AppLanguage::Es, "Cabello y Pelo", "Cabello"),
+        ] {
+            let item = classify_casp(&minimal_casp(0x01, 0, 0x0000_2178, 0), language).unwrap();
+            assert_eq!(item.folder_parts.first().map(String::as_str), Some(root));
+            assert_eq!(item.folder_parts.get(1).map(String::as_str), Some(category));
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::{
-    category_identity::stable_empty_roots,
+    category_identity::{category_identity, stable_empty_roots, ManagedCategory},
     i18n::AppLanguage,
     manifest::{
         replace_manifest_atomic, sha256_file, write_manifest_atomic, RestoreEntry, RestoreManifest,
@@ -857,9 +857,30 @@ fn remaining_legacy_details_with_context(
         candidate == directory || candidate.starts_with(&format!("{directory}\\"))
     };
     let is_canonical_or_stable = |path: &Path| {
-        protected_relative_directories
+        if protected_relative_directories
             .iter()
             .any(|relative| is_under_relative_directory(path, relative))
+        {
+            return true;
+        }
+
+        // Review, preview, and quarantine buckets are Manager-owned even
+        // when an older language alias is still present. Their contents are
+        // not legacy source material for the residual report; empty aliases
+        // remain removable because cleanup protects only the active roots.
+        let Ok(relative) = path.strip_prefix(root) else {
+            return false;
+        };
+        let first = relative.components().find_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy()),
+            _ => None,
+        });
+        matches!(
+            first.as_deref().and_then(category_identity),
+            Some(ManagedCategory::Uncategorized)
+                | Some(ManagedCategory::DuplicateQuarantine)
+                | Some(ManagedCategory::Previews)
+        )
     };
     let item_by_source = plan_items
         .iter()
@@ -1972,6 +1993,36 @@ mod tests {
         assert!(removed >= 1);
         assert!(!alias.exists(), "historical alias was retained");
         assert!(canonical.is_dir(), "active canonical root was removed");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_legacy_hair_root_but_preserves_nested_canonical_family() {
+        let base = std::env::temp_dir().join(format!(
+            "s3cc-cleanup-hair-alias-{}-{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let packages = base.join("Packages");
+        let legacy = packages.join("Cabelos").join("Masculino").join("Criança");
+        let canonical = packages.join("Cabelos e Pêlos").join("Cabelos").join("Masculino");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&canonical).unwrap();
+
+        let (removed, _, warnings) =
+            cleanup_empty_directories_after_organization_with_protected(
+                &packages,
+                &[],
+                None,
+                &[
+                    "Cabelos e Pêlos".into(),
+                    "Cabelos e Pêlos\\Cabelos\\Masculino".into(),
+                ],
+            );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(removed >= 3);
+        assert!(!packages.join("Cabelos").exists());
+        assert!(canonical.is_dir());
         fs::remove_dir_all(base).unwrap();
     }
 

@@ -106,6 +106,24 @@ pub fn canonicalize_managed_root(value: &str, language: AppLanguage) -> Option<S
     category_identity(value).map(|category| canonical_folder(category, language).to_string())
 }
 
+/// Canonical physical root for the combined hair/fur family.  The old model
+/// exposed `Cabelos`/`Hair` as a top-level directory, while the active model
+/// keeps that category below one localized family root.  This is intentionally
+/// a dedicated identity, not a fuzzy rewrite of arbitrary creator folders.
+pub fn hair_family_root(language: AppLanguage) -> &'static str {
+    match language {
+        AppLanguage::En => "Body Hair",
+        AppLanguage::Pt => "Cabelos e Pêlos",
+        AppLanguage::Es => "Cabello y Pelo",
+    }
+}
+
+fn is_hair_category(value: &str, language: AppLanguage) -> bool {
+    let key = normalized_category_key(value);
+    matches!(key.as_str(), "hair" | "cabelos" | "cabello")
+        || key == normalized_category_key(language.hair())
+}
+
 /// Rewrites only the first semantic folder.  This is intentionally not fuzzy
 /// recursive matching: descendants are canonicalized by the technical
 /// classifier/manual model, while arbitrary user project folders stay intact.
@@ -118,6 +136,33 @@ pub fn canonicalize_managed_destination_parts(
         !part.eq_ignore_ascii_case("Packages") && !part.eq_ignore_ascii_case("Overrides")
     });
     if let Some(index) = first_semantic {
+        // CASP destinations historically started with `CAS\Cabelos` (or
+        // `Hair`/`Cabello`).  Keep the category and all age/gender details,
+        // but place the category below the one canonical hair/fur root.
+        let hair_after_cas = result
+            .get(index)
+            .is_some_and(|part| part.eq_ignore_ascii_case("CAS"))
+            && result
+                .get(index + 1)
+                .is_some_and(|part| is_hair_category(part, language));
+        let legacy_hair_root = result
+            .get(index)
+            .is_some_and(|part| is_hair_category(part, language));
+        if hair_after_cas || legacy_hair_root {
+            let category_index = if hair_after_cas { index + 1 } else { index };
+            let category = result[category_index].clone();
+            let mut rewritten = result[..index].to_vec();
+            rewritten.push(hair_family_root(language).to_string());
+            rewritten.push(
+                if normalized_category_key(&category) == normalized_category_key(language.hair()) {
+                    language.hair().to_string()
+                } else {
+                    category
+                },
+            );
+            rewritten.extend(result[(category_index + 1)..].iter().cloned());
+            return rewritten;
+        }
         if let Some(canonical) = canonicalize_managed_root(&result[index], language) {
             result[index] = canonical;
         }
@@ -193,6 +238,49 @@ mod tests {
                 AppLanguage::Pt,
             ),
             vec!["Packages", "Correções", "Author"],
+        );
+    }
+
+    #[test]
+    fn hair_categories_are_nested_under_the_localized_hair_family() {
+        assert_eq!(
+            canonicalize_managed_destination_parts(
+                &["CAS".into(), "Cabelos".into(), "Masculino".into()],
+                AppLanguage::Pt,
+            ),
+            vec!["Cabelos e Pêlos", "Cabelos", "Masculino"],
+        );
+        assert_eq!(
+            canonicalize_managed_destination_parts(
+                &["Hair".into(), "Female".into()],
+                AppLanguage::En,
+            ),
+            vec!["Body Hair", "Hair", "Female"],
+        );
+        assert_eq!(
+            canonicalize_managed_destination_parts(
+                &["Cabelos".into(), "Feminino".into()],
+                AppLanguage::Pt,
+            ),
+            vec!["Cabelos e Pêlos", "Cabelos", "Feminino"],
+        );
+    }
+
+    #[test]
+    fn uncategorized_alias_is_canonicalized_without_preserving_legacy_subtrees() {
+        assert_eq!(
+            canonicalize_managed_destination_parts(
+                &["Sem Categoria".into(), "#1 Face".into(), "a.package".into()],
+                AppLanguage::Pt,
+            ),
+            vec!["#Sem Categoria", "#1 Face", "a.package"],
+        );
+        assert_eq!(
+            canonicalize_managed_destination_parts(
+                &["#Not Categorized".into(), "a.package".into()],
+                AppLanguage::Pt,
+            ),
+            vec!["#Sem Categoria", "a.package"],
         );
     }
 }
