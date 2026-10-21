@@ -6608,10 +6608,9 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "s3cc-overrides-branch-fixture-{}-{nonce}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir()
+            .join(format!("s3cc-overrides-branch-fixture-{}-{nonce}", std::process::id()))
+            .join("Mods - Copia");
         std::fs::create_dir_all(root.join("Packages")).unwrap();
         std::fs::create_dir_all(root.join("Overrides")).unwrap();
         assert_eq!(
