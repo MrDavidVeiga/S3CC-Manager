@@ -9,6 +9,7 @@ const app = fs.readFileSync(path.join(repoRoot, "src", "app.js"), "utf8");
 const theme = fs.readFileSync(path.join(repoRoot, "src", "theme.js"), "utf8");
 const winui = fs.readFileSync(path.join(repoRoot, "src", "winui.css"), "utf8");
 const themeAudit = fs.readFileSync(path.join(repoRoot, "src", "ui", "fluent", "theme-audit.css"), "utf8");
+const styles = fs.readFileSync(path.join(repoRoot, "src", "style.css"), "utf8");
 
 const themeTranslations = {
   en: {
@@ -144,6 +145,11 @@ assert.match(theme, /option\.dataset\.theme===choice/);
 assert.match(theme, /captionLabels=\{/);
 assert.match(theme, /window\.addEventListener\("s3cc-language-changed"/);
 assert.match(winui, /#language-code \{ white-space:nowrap; \}/);
+assert.match(styles, /data-result-state="complete"[\s\S]*?fluent-state-success/s, "Successful result icons must use semantic green");
+assert.match(styles, /data-result-state="error"[\s\S]*?fluent-state-error/s, "Error result icons must use semantic red");
+assert.match(styles, /data-result-state="warnings"[\s\S]*?fluent-state-warning/s, "Warning result icons must use semantic amber");
+assert.match(app, /A mesh resource can be present but undecodable/);
+assert.match(app, /appendMeshWarnings\(mesh\.warnings\)/, "Mesh diagnostics must remain visible when parsing fails");
 
 // The nine required language/theme combinations are data-driven: each language
 // must render the same seven internal IDs without changing theme tokens.

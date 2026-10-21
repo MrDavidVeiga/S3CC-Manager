@@ -6996,11 +6996,33 @@ function renderTechnicalDetails(container, item) {
   meshTitle.textContent = t("meshInformation");
   meshSection.appendChild(meshTitle);
 
+  const appendMeshWarnings = (warnings) => {
+    if (!(warnings || []).length) return;
+    const warningBox = document.createElement("div");
+    warningBox.className = "warning-box mesh-warning-box";
+    const warningTitle = document.createElement("strong");
+    warningTitle.textContent = t("meshWarnings");
+    const list = document.createElement("ul");
+    for (const warning of warnings) {
+      const li = document.createElement("li");
+      li.textContent = warning;
+      list.appendChild(li);
+    }
+    warningBox.append(warningTitle, list);
+    meshSection.appendChild(warningBox);
+  };
+
   if (!mesh?.hasMeshes) {
-    const emptyMesh = document.createElement("div");
-    emptyMesh.className = "technical-details-state";
-    emptyMesh.textContent = t("meshNoData");
-    meshSection.appendChild(emptyMesh);
+    if ((mesh?.warnings || []).length) {
+      // A mesh resource can be present but undecodable. Do not hide the
+      // diagnostic behind the generic "no data" message.
+      appendMeshWarnings(mesh.warnings);
+    } else {
+      const emptyMesh = document.createElement("div");
+      emptyMesh.className = "technical-details-state";
+      emptyMesh.textContent = t("meshNoData");
+      meshSection.appendChild(emptyMesh);
+    }
   } else {
     const meshSummary = document.createElement("div");
     meshSummary.className = "technical-summary";
@@ -7073,20 +7095,7 @@ function renderTechnicalDetails(container, item) {
     }
     meshSection.appendChild(resourceList);
 
-    if ((mesh.warnings || []).length) {
-      const warningBox = document.createElement("div");
-      warningBox.className = "warning-box mesh-warning-box";
-      const warningTitle = document.createElement("strong");
-      warningTitle.textContent = t("meshWarnings");
-      const list = document.createElement("ul");
-      for (const warning of mesh.warnings) {
-        const li = document.createElement("li");
-        li.textContent = warning;
-        list.appendChild(li);
-      }
-      warningBox.append(warningTitle, list);
-      meshSection.appendChild(warningBox);
-    }
+    appendMeshWarnings(mesh.warnings);
   }
   container.appendChild(meshSection);
 
