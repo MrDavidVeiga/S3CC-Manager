@@ -281,7 +281,11 @@ fn load_persistent_scan(root: &Path, language: AppLanguage) -> Option<LatestScan
     latest_scan_is_current(&cached).then_some(cached)
 }
 
-const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261014-project-groups-3";
+// Bump this whenever classification evidence or destination projection rules
+// change.  The prior value allowed persistent scans created before the
+// CASP/OBJD-free override rules to be reused, leaving those packages shown as
+// Unknown until the user manually invalidated the cache.
+const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261020-override-evidence-4";
 
 fn context_file_signature(path: &Path) -> String {
     if !path.is_file() {
