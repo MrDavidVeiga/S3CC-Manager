@@ -150,7 +150,7 @@ assert.match(styles, /#operation-result-modal\[data-result-state="complete"\][\s
 assert.match(styles, /#operation-result-modal\[data-result-state="error"\][\s\S]*?fluent-state-error/s, "Error result icons must use semantic red");
 assert.match(styles, /#operation-result-modal\[data-result-state="warnings"\][\s\S]*?fluent-state-warning/s, "Warning result icons must use semantic amber");
 assert.match(fields, /data-theme-choice="ea-app"[\s\S]*?fluent-search-box > input\.text-input[\s\S]*?#282936/s, "EA App search text must use the real dark palette on its white field");
-assert.match(fields, /data-theme-choice="ea-app"[\s\S]*?fluent-search-box > input\.text-input:disabled[\s\S]*?opacity:\s*1[\s\S]*?background:\s*#2A2E3F[\s\S]*?#A0A2AE/s, "EA App disabled search text must use the dark control palette");
+assert.match(fields, /data-theme-choice="ea-app"[\s\S]*?fluent-search-box > input\.text-input:disabled[\s\S]*?opacity:\s*1[\s\S]*?background:\s*#FFFFFF[\s\S]*?#282936/s, "EA App disabled search text must retain the readable white-field palette");
 assert.match(fields, /fluent-search-box > input\.text-input[\s\S]*?color:\s*var\(--fluent-text-primary\)/s, "Search text must remain readable in its normal and hover states");
 assert.match(fields, /fluent-search-box > input\.text-input:disabled[\s\S]*?fluent-text-disabled[\s\S]*?-webkit-text-fill-color:\s*var\(--fluent-text-disabled\)/s, "Disabled search text must retain readable contrast");
 assert.match(app, /A mesh resource can be present but undecodable/);

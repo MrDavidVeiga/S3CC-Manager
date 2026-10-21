@@ -40,19 +40,18 @@ html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text
   color: #8B8D98;
   opacity: 1;
 }
-/* A disabled SearchBox inherits the shared .5 opacity rule.  That blends
-   EA App's white field with the dark shell and makes entered text unreadable.
-   Use the EA App disabled control palette explicitly, without changing the
-   enabled field or any other theme. */
+/* Keep the EA App SearchBox on its white surface in every state.  The shared
+   disabled opacity would darken that surface and make the value unreadable;
+   use the same readable field palette as normal, hover, and focus. */
 html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input:disabled {
   opacity: 1;
-  background: #2A2E3F;
-  color: #A0A2AE;
-  -webkit-text-fill-color: #A0A2AE;
-  border-color: rgba(255, 255, 255, .13);
+  background: #FFFFFF;
+  color: #282936;
+  -webkit-text-fill-color: #282936;
+  border-color: #6E7080;
 }
 html[data-theme-choice="ea-app"] body.release-v1 .fluent-search-box > input.text-input:disabled::placeholder {
-  color: #A0A2AE;
+  color: #8B8D98;
   opacity: 1;
 }
 body.release-v1 .fluent-search-box::before {
