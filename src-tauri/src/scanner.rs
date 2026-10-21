@@ -285,7 +285,7 @@ fn load_persistent_scan(root: &Path, language: AppLanguage) -> Option<LatestScan
 // change.  The prior value allowed persistent scans created before the
 // CASP/OBJD-free override rules to be reused, leaving those packages shown as
 // Unknown until the user manually invalidated the cache.
-const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261020-override-evidence-4";
+const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261020-override-evidence-roof-signature-5";
 
 fn context_file_signature(path: &Path) -> String {
     if !path.is_file() {
@@ -2233,6 +2233,18 @@ fn legacy_source_evidence_classification(
         && (types.contains(&TYPE_IMG)
             || types.contains(&0x7368_84F1)
             || types.contains(&0x0166_1233));
+    // Some roof swatches use a colour/theme name instead of "roof" in the
+    // filename (for example Tammy Trauma's BeachAqua/BeachBlue variants).
+    // The complete material/mesh/texture signature is stronger evidence than
+    // that lexical marker and is shared by the already-recognised Roof_*
+    // packages. Keep the signature deliberately narrow so a generic IMG set
+    // is not promoted to construction content.
+    let has_roof_resource_signature = has_visual_build_set
+        && types.contains(&0x2E75_C764)
+        && types.contains(&0x2E75_C765)
+        && types.contains(&0x2E75_C766)
+        && types.contains(&0xD382_BF57)
+        && types.contains(&0xF1ED_BD86);
     let has_body_mesh = types.contains(&0x015A_1849) || types.contains(&0x015A_1849);
     let has_visual = types.contains(&TYPE_IMG)
         || has_body_mesh
@@ -2297,15 +2309,27 @@ fn legacy_source_evidence_classification(
             vec!["AnatomicalResourceSet".to_string(), "LegacyBodySource".to_string()],
             "Anatomical bone resource type and the explicit genital family source identify Genetics content.",
         )
-    } else if (normalized.contains("roof")
+    } else if has_roof_resource_signature
+        || ((normalized.contains("roof")
         || normalized.contains("ceilingbeam")
         || normalized.contains("fence"))
-        && has_visual_build_set
+            && has_visual_build_set)
     {
         (
             vec!["Construção".to_string()],
-            vec!["BuildResourceSet".to_string(), "RelatedBuildName".to_string()],
-            "Roof/beam/fence visual resource set is a construction family even when its legacy source folder is Sem Categoria.",
+            vec![
+                "BuildResourceSet".to_string(),
+                if has_roof_resource_signature {
+                    "RoofResourceSignature".to_string()
+                } else {
+                    "RelatedBuildName".to_string()
+                },
+            ],
+            if has_roof_resource_signature {
+                "The complete roof material/mesh/texture resource signature identifies construction content, including colour-named swatches that do not contain a roof token in the filename."
+            } else {
+                "Roof/beam/fence visual resource set is a construction family even when its legacy source folder is Sem Categoria."
+            },
         )
     } else if normalized.contains("/build/")
         && types.contains(&TYPE_IMG)
@@ -7467,6 +7491,45 @@ mod tests {
             &mesh_only,
             "cmar_fpreg_BottomNude.package",
             r"Roupas\Feminino\Parte de Baixo",
+            AppLanguage::Pt,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn colour_named_roof_swatches_use_the_internal_roof_signature() {
+        let types = BTreeSet::from([
+            0x0166_038C,
+            0x0166_1233,
+            0x01D0_E75D,
+            0x01D1_0F34,
+            0x03B4_C61D,
+            0x2E75_C764,
+            0x2E75_C765,
+            0x2E75_C766,
+            0xD382_BF57,
+            0xF1ED_BD86,
+            TYPE_IMG,
+            0x2205_57DA,
+            0x7368_84F1,
+        ]);
+        let classification = legacy_source_evidence_classification(
+            &types,
+            "tammy_trauma_BeachAqua.package",
+            r"Construção\Telhados",
+            AppLanguage::Pt,
+        )
+        .expect("colour-named roof swatch should be construction content");
+        assert_eq!(classification.folder_parts, vec!["Construção"]);
+        assert!(classification
+            .detected_from
+            .contains(&"RoofResourceSignature".to_string()));
+
+        let incomplete = BTreeSet::from([TYPE_IMG, 0x03B4_C61D, 0x0166_1233]);
+        assert!(legacy_source_evidence_classification(
+            &incomplete,
+            "generic_BeachAqua.package",
+            r"Sem Categoria",
             AppLanguage::Pt,
         )
         .is_none());
