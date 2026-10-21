@@ -16,6 +16,17 @@ body.release-v1 .fluent-search-box > input.text-input {
   padding-inline-start: 34px;
   padding-inline-end: 32px;
   text-overflow: ellipsis;
+  color: var(--fluent-text-primary);
+}
+/* The hover fill is theme-dependent, but entered search text must remain
+   readable in every theme and while a scan temporarily disables the field. */
+body.release-v1 .fluent-search-box > input.text-input:hover,
+body.release-v1 .fluent-search-box > input.text-input:focus {
+  color: var(--fluent-text-primary);
+}
+body.release-v1 .fluent-search-box > input.text-input:disabled {
+  color: var(--fluent-text-disabled);
+  -webkit-text-fill-color: var(--fluent-text-disabled);
 }
 body.release-v1 .fluent-search-box::before {
   content: "";

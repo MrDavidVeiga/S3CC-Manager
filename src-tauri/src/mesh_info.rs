@@ -141,7 +141,7 @@ fn geom_at(data: &[u8], mut cursor: usize) -> Result<(u64, u64), String> {
     Ok((num_vertices, face_points / 3))
 }
 
-fn parse_geom(data: &[u8]) -> Result<(u64, u64), String> {
+fn parse_geom_payload(data: &[u8]) -> Result<(u64, u64), String> {
     if data.len() < 36 || data.get(..4) != Some(&b"GEOM"[..]) {
         return Err("Resource does not start with a GEOM tag.".into());
     }
@@ -185,6 +185,27 @@ fn parse_geom(data: &[u8]) -> Result<(u64, u64), String> {
         "Could not locate GEOM counts after embedded material: {}",
         errors.join(" | ")
     ))
+}
+
+fn parse_geom(data: &[u8]) -> Result<(u64, u64), String> {
+    if data.get(..4) == Some(&b"GEOM"[..]) {
+        return parse_geom_payload(data);
+    }
+
+    // CAS resources produced by the game commonly contain a validated
+    // 44-byte resource envelope before the GEOM payload. The envelope stores
+    // both its own size and the payload size; use those fields instead of
+    // accepting an arbitrary embedded ASCII marker.
+    const ENVELOPE_SIZE: usize = 44;
+    if data.len() >= ENVELOPE_SIZE + 4
+        && read_u32(data, 36) == Some(ENVELOPE_SIZE as u32)
+        && read_u32(data, 40) == Some((data.len() - ENVELOPE_SIZE) as u32)
+        && data.get(ENVELOPE_SIZE..ENVELOPE_SIZE + 4) == Some(&b"GEOM"[..])
+    {
+        return parse_geom_payload(&data[ENVELOPE_SIZE..]);
+    }
+
+    Err("Resource does not contain a supported GEOM envelope.".into())
 }
 
 fn primitive_name(value: u32) -> &'static str {
@@ -574,6 +595,37 @@ mod tests {
         u32le(&mut data, 6); // two triangles
         data.extend_from_slice(&[0u8; 12]);
         assert_eq!(parse_geom(&data).unwrap(), (4, 2));
+    }
+
+    #[test]
+    fn wrapped_cas_geom_uses_validated_resource_envelope() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"GEOM");
+        u32le(&mut payload, 5);
+        u32le(&mut payload, 0);
+        u32le(&mut payload, 0);
+        u32le(&mut payload, 0);
+        u32le(&mut payload, 0);
+        u32le(&mut payload, 0);
+        u32le(&mut payload, 4);
+        u32le(&mut payload, 1);
+        u32le(&mut payload, 1);
+        u32le(&mut payload, 1);
+        payload.push(12);
+        payload.extend_from_slice(&vec![0u8; 4 * 12]);
+        u32le(&mut payload, 1);
+        payload.push(2);
+        u32le(&mut payload, 6);
+        payload.extend_from_slice(&[0u8; 12]);
+
+        let mut data = vec![0u8; 44];
+        data[36..40].copy_from_slice(&(44u32).to_le_bytes());
+        data[40..44].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        data.extend_from_slice(&payload);
+        assert_eq!(parse_geom(&data).unwrap(), (4, 2));
+
+        data[40..44].copy_from_slice(&((payload.len() as u32) - 1).to_le_bytes());
+        assert!(parse_geom(&data).is_err());
     }
 
     #[test]

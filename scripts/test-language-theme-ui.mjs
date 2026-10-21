@@ -9,6 +9,7 @@ const app = fs.readFileSync(path.join(repoRoot, "src", "app.js"), "utf8");
 const theme = fs.readFileSync(path.join(repoRoot, "src", "theme.js"), "utf8");
 const winui = fs.readFileSync(path.join(repoRoot, "src", "winui.css"), "utf8");
 const themeAudit = fs.readFileSync(path.join(repoRoot, "src", "ui", "fluent", "theme-audit.css"), "utf8");
+const fields = fs.readFileSync(path.join(repoRoot, "src", "ui", "fluent", "fields.css"), "utf8");
 const styles = fs.readFileSync(path.join(repoRoot, "src", "style.css"), "utf8");
 
 const themeTranslations = {
@@ -148,6 +149,8 @@ assert.match(winui, /#language-code \{ white-space:nowrap; \}/);
 assert.match(styles, /data-result-state="complete"[\s\S]*?fluent-state-success/s, "Successful result icons must use semantic green");
 assert.match(styles, /data-result-state="error"[\s\S]*?fluent-state-error/s, "Error result icons must use semantic red");
 assert.match(styles, /data-result-state="warnings"[\s\S]*?fluent-state-warning/s, "Warning result icons must use semantic amber");
+assert.match(fields, /fluent-search-box > input\.text-input[\s\S]*?color:\s*var\(--fluent-text-primary\)/s, "Search text must remain readable in its normal and hover states");
+assert.match(fields, /fluent-search-box > input\.text-input:disabled[\s\S]*?fluent-text-disabled[\s\S]*?-webkit-text-fill-color:\s*var\(--fluent-text-disabled\)/s, "Disabled search text must retain readable contrast");
 assert.match(app, /A mesh resource can be present but undecodable/);
 assert.match(app, /appendMeshWarnings\(mesh\.warnings\)/, "Mesh diagnostics must remain visible when parsing fails");
 
