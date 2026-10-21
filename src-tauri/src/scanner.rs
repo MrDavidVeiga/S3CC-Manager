@@ -325,12 +325,31 @@ fn move_path_key(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-fn remember_latest_scan(result: &ScanResult, language: AppLanguage) -> PresentationSnapshotTiming {
+fn remember_latest_scan(
+    result: &ScanResult,
+    language: AppLanguage,
+    known_signatures: Option<&HashMap<String, (u64, u128, String)>>,
+) -> PresentationSnapshotTiming {
     let root = stable_path(Path::new(&result.root));
     let signatures_started = Instant::now();
-    let file_signatures = analysis_file_signatures(
-        result.items.iter().map(|item| PathBuf::from(&item.path)).collect(),
-    );
+    let expected_paths = result
+        .items
+        .iter()
+        .map(|item| stable_path(Path::new(&item.path)).to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let file_signatures = known_signatures
+        .filter(|signatures| expected_paths.iter().all(|path| signatures.contains_key(path)))
+        .map(|signatures| {
+            expected_paths
+                .iter()
+                .filter_map(|path| signatures.get(path).map(|value| (path.clone(), value.clone())))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_else(|| {
+            analysis_file_signatures(
+                result.items.iter().map(|item| PathBuf::from(&item.path)).collect(),
+            )
+        });
     let signatures_ms = signatures_started.elapsed().as_millis();
     let context_started = Instant::now();
     let classification_context = classification_context_fingerprint(&root, language);
@@ -4427,6 +4446,7 @@ impl ScanTiming {
 struct ScanAccumulation {
     item_slots: Vec<Option<ScanPackageItem>>,
     cache_entries: HashMap<String, cache::CachedPackage>,
+    file_signatures: HashMap<String, (u64, u128, String)>,
     slider_instances: HashSet<u64>,
     timing: ScanTiming,
     profile_packages: Vec<ScanPackageProfileEntry>,
@@ -4449,6 +4469,7 @@ fn scan_one(
         timing,
         None,
         None,
+        None,
     )
 }
 
@@ -4461,6 +4482,7 @@ fn scan_one_with_index(
     timing: &mut ScanTiming,
     reference_catalogs: Option<&reference_catalog::ReferenceCatalogSet>,
     shared_index: Option<&mut cache::FingerprintCache>,
+    prevalidated_cached: Option<cache::CachedPackage>,
 ) -> ScanPackageItem {
     let relative = path
         .strip_prefix(root)
@@ -4540,7 +4562,10 @@ fn scan_one_with_index(
     let mut profile_resource_decode_us = 0u128;
     let mut profile_project_payload_analysis_us = 0u128;
     let shared_index_error = if let Some(shared_index) = shared_index {
-        match cache::current_cached_entry(path, shared_index) {
+        let cached_result = prevalidated_cached
+            .map(|cached| Ok(Some(cached)))
+            .unwrap_or_else(|| cache::current_cached_entry(path, shared_index));
+        match cached_result {
             Ok(Some(cached)) => {
                 shared_cached = Some(cached);
                 None
@@ -5355,6 +5380,7 @@ fn scan_packages_core_with_progress(
             .collect::<HashMap<_, _>>()
     });
     let mut reused_packages = 0usize;
+    let mut known_file_signatures = HashMap::<String, (u64, u128, String)>::new();
     let mut profile_packages = Vec::<ScanPackageProfileEntry>::new();
     let classification_started = Instant::now();
     let mut item_slots = vec![None; package_paths.len()];
@@ -5367,6 +5393,11 @@ fn scan_packages_core_with_progress(
         }
 
         let stable = stable_path(path);
+        let current_signature = previous_items.as_ref().and_then(|_items| {
+            let signature = cache::analysis_file_fingerprint(path).ok()?;
+            known_file_signatures.insert(stable.to_string_lossy().to_string(), signature.clone());
+            Some(signature)
+        });
         let reused = previous_items
             .as_ref()
             .and_then(|items| items.get(&stable).copied())
@@ -5387,11 +5418,7 @@ fn scan_packages_core_with_progress(
                         scan.file_signatures
                             .get(&stable.to_string_lossy().to_string())
                     })
-                    .is_some_and(|signature| {
-                        cache::analysis_file_fingerprint(path)
-                            .ok()
-                            .is_some_and(|current| current == *signature)
-                    })
+                    .is_some_and(|signature| current_signature.as_ref().is_some_and(|current| current == signature))
             });
 
         if let Some(item) = reused {
@@ -5433,6 +5460,7 @@ fn scan_packages_core_with_progress(
     let accumulation = Mutex::new(ScanAccumulation {
         item_slots,
         cache_entries: HashMap::new(),
+        file_signatures: known_file_signatures,
         slider_instances: HashSet::new(),
         timing: ScanTiming::default(),
         profile_packages: Vec::new(),
@@ -5466,11 +5494,17 @@ fn scan_packages_core_with_progress(
                             break;
                         }
                     }
-                    if build_fingerprint_index {
-                        if let Ok(Some(cached)) = cache::current_cached_entry(path, persistent_cache) {
-                            local_cache.entries.insert(cached.path.clone(), cached);
+                    let prevalidated_cached = if build_fingerprint_index {
+                        match cache::current_cached_entry(path, persistent_cache) {
+                            Ok(Some(cached)) => {
+                                local_cache.entries.insert(cached.path.clone(), cached.clone());
+                                Some(cached)
+                            }
+                            _ => None,
                         }
-                    }
+                    } else {
+                        None
+                    };
                     active_workers.fetch_add(1, Ordering::Relaxed);
                     let started = Instant::now();
                     let mut local_timing = ScanTiming::default();
@@ -5483,6 +5517,7 @@ fn scan_packages_core_with_progress(
                         &mut local_timing,
                         Some(reference_catalogs),
                         build_fingerprint_index.then_some(&mut local_cache),
+                        prevalidated_cached,
                     );
                     if std::env::var_os("S3CC_PROFILE_PACKAGE_LOG").is_some() {
                         eprintln!(
@@ -5504,6 +5539,12 @@ fn scan_packages_core_with_progress(
                         output.item_slots[*index] = Some(item);
                         output.timing.add(local_timing);
                         output.slider_instances.extend(local_slider_instances.drain());
+                        for cached in local_cache.entries.values() {
+                            output.file_signatures.insert(
+                                cached.path.clone(),
+                                (cached.size, cached.modified_ns, cached.quick_fingerprint.clone()),
+                            );
+                        }
                         output.cache_entries.extend(std::mem::take(&mut local_cache.entries));
                         if profile_enabled {
                             output.profile_packages.push(ScanPackageProfileEntry {
@@ -5557,6 +5598,7 @@ fn scan_packages_core_with_progress(
     }
     item_slots = accumulation.item_slots;
     let slider_instances = accumulation.slider_instances;
+    known_file_signatures = accumulation.file_signatures;
     timing.add(accumulation.timing);
     if build_fingerprint_index {
         for (key, entry) in accumulation.cache_entries {
@@ -5725,7 +5767,7 @@ fn scan_packages_core_with_progress(
         reused_packages,
     };
     let snapshot_started = Instant::now();
-    let snapshot_timing = remember_latest_scan(&result, language);
+    let snapshot_timing = remember_latest_scan(&result, language, Some(&known_file_signatures));
     if profile_enabled {
         eprintln!(
             "scanner_profile_presentation_snapshot_ms={} signatures_ms={} context_ms={} persistence_ms={}",
@@ -5782,6 +5824,7 @@ pub fn scan_selected_package_paths(
             &mut timing,
             None,
             Some(&mut shared_index),
+            None,
         ));
     }
     let _ = cache::save_cache(root, &shared_index);
@@ -7053,7 +7096,7 @@ mod tests {
             .expect("first scan");
         assert!(!first.cache_hit);
         assert_eq!(first.stats.package_reads, 2);
-        remember_latest_scan(&first, AppLanguage::Pt);
+        remember_latest_scan(&first, AppLanguage::Pt, None);
 
         let second = scan_packages_core(root.to_string_lossy().to_string(), AppLanguage::Pt, None)
             .expect("cached scan");
