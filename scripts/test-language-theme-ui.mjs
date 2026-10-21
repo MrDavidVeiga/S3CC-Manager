@@ -149,7 +149,7 @@ assert.match(winui, /#language-code \{ white-space:nowrap; \}/);
 assert.match(styles, /#operation-result-modal\[data-result-state="complete"\][\s\S]*?fluent-state-success/s, "Successful result icons must use semantic green");
 assert.match(styles, /#operation-result-modal\[data-result-state="error"\][\s\S]*?fluent-state-error/s, "Error result icons must use semantic red");
 assert.match(styles, /#operation-result-modal\[data-result-state="warnings"\][\s\S]*?fluent-state-warning/s, "Warning result icons must use semantic amber");
-assert.match(fields, /data-theme-choice="mean-girls"[\s\S]*?fluent-search-box > input\.text-input[\s\S]*?#4D1332/s, "Mean Girls search text must use the real dark pink palette");
+assert.match(fields, /data-theme-choice="ea-app"[\s\S]*?fluent-search-box > input\.text-input[\s\S]*?#282936/s, "EA App search text must use the real dark palette on its white field");
 assert.match(fields, /fluent-search-box > input\.text-input[\s\S]*?color:\s*var\(--fluent-text-primary\)/s, "Search text must remain readable in its normal and hover states");
 assert.match(fields, /fluent-search-box > input\.text-input:disabled[\s\S]*?fluent-text-disabled[\s\S]*?-webkit-text-fill-color:\s*var\(--fluent-text-disabled\)/s, "Disabled search text must retain readable contrast");
 assert.match(app, /A mesh resource can be present but undecodable/);
