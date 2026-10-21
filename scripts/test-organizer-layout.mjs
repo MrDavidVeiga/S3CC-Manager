@@ -19,6 +19,10 @@ assert.match(css, /\.manager-list-footer-actions\s*\{[\s\S]*?grid-template-colum
 assert.match(fluent, /#page-organizer \.manager-list-footer-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
 assert.match(css, /\.release-v1 #page-organizer \.manager-list-card[\s\S]*?display:\s*flex;\s*flex-direction:\s*column/);
 assert.match(css, /\.release-v1 #page-organizer \.manager-list-card \.package-list[\s\S]*?overflow-y:\s*auto/);
+assert.match(css, /\.release-v1 #page-organizer \.content-filter-current\s*\{[\s\S]*?display:\s*block;[\s\S]*?flex:\s*1\s+1\s+auto;[\s\S]*?min-width:\s*0;[\s\S]*?color:\s*var\(--text\)/,
+  "the closed Organizer filter must reserve visible space for the active label");
+assert.match(app, /el\.statusFilterCurrent\.textContent\s*=\s*`\$\{active\[1\]\} \(\$\{counts\[active\[0\]\] \?\? 0\}\)`/,
+  "the closed Organizer filter must display the active localized label and count");
 assert.doesNotMatch(css, /@media\s*\(max-width:\s*760px\)\s*\{[\s\S]*?\.manager-list-footer-actions\s*,/);
 assert.match(html, /id="plan-partial-notice" class="planner-partial-notice hidden"/);
 assert.match(html, /id="plan-cfg-row" class="planner-section planner-cfg-section"/);

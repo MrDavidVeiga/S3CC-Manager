@@ -4312,6 +4312,11 @@ button:disabled {
 }
 
 .release-v1 #page-organizer .content-filter-current {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
