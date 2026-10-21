@@ -34,6 +34,20 @@ body.release-v1 :is(
   border-width: 1px;
   border-radius: var(--fluent-radius-control);
 }
+
+/* Keep top-bar controls and language-menu labels on the same vertical
+ * centerline as the regular Fluent buttons. Native buttons otherwise keep
+ * their text baseline alignment even when their horizontal alignment looks
+ * correct. Theme options use their dedicated grid geometry in winui.css. */
+body.release-v1 :is(.mode-btn, .lang-toggle-btn, .theme-button, .lang-menu-item) {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+}
+body.release-v1 :is(.mode-btn, .lang-toggle-btn, .theme-button) {
+  justify-content: center;
+}
+
 body.release-v1 :is(.primary-btn,.secondary-btn,.danger-btn,.compact-btn) > :is(i,svg) {
   flex: 0 0 auto;
 }
