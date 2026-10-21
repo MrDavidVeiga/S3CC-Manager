@@ -2339,6 +2339,7 @@ fn tss_asset_companion_classification(
                 | TYPE_STBL_LOCAL
                 | TYPE_NMAP_LOCAL
                 | TYPE_MANIFEST_LOCAL
+                | TYPE_OBJD
         )
     });
     if !is_tss_asset || !has_interaction_marker || !has_support_resource {
@@ -7948,7 +7949,7 @@ mod tests {
     #[test]
     fn tss_interaction_assets_join_their_gameplay_family_with_resource_evidence() {
         let classification = tss_asset_companion_classification(
-            &BTreeSet::from([TYPE_XML_LOCAL, TYPE_STBL_LOCAL]),
+            &BTreeSet::from([TYPE_OBJD]),
             "TSS_MorePregnancyInteractions_Assets.package",
             "#Sem Categoria",
             AppLanguage::Pt,
