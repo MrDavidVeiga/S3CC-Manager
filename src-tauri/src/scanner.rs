@@ -285,7 +285,7 @@ fn load_persistent_scan(root: &Path, language: AppLanguage) -> Option<LatestScan
 // change.  The prior value allowed persistent scans created before the
 // CASP/OBJD-free override rules to be reused, leaving those packages shown as
 // Unknown until the user manually invalidated the cache.
-const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261021-store-bundle-evidence-8";
+const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261021-store-bundle-evidence-cas-default-9";
 
 fn context_file_signature(path: &Path) -> String {
     if !path.is_file() {
@@ -737,6 +737,60 @@ fn reference_or_override_family_classification(
         } else {
             "Package is in the explicit Overrides loading branch. It is recorded as a protected generic replacement; no semantic subtype is inferred from the source path or filename.".to_string()
         },
+    })
+}
+
+// Some CAS replacement packages expose an OBJD/VPXY/IMG bundle instead of a
+// parseable CASP record.  A name such as "CAS Default" is useful evidence,
+// but it is not sufficient by itself: require changed official resources and
+// an internal CAS identifier before projecting the package to the generic CAS
+// replacement folder.  Do not infer a narrower body/face/eye subtype here.
+fn cas_default_replacement_classification(
+    types: &BTreeSet<u32>,
+    name: &str,
+    project_evidence: &ProjectTechnicalEvidence,
+    reference_evidence: Option<&ReferenceEvidence>,
+    language: AppLanguage,
+) -> Option<PackageFamilyClassification> {
+    let normalized_name = name
+        .replace(['_', '-', '.'], " ")
+        .to_ascii_lowercase();
+    let has_cas_default_name = normalized_name.contains("cas")
+        && normalized_name.contains("default");
+    let official_replacement = reference_evidence.is_some_and(|evidence| {
+        evidence.changed_resource_count > 0
+            && matches!(
+                evidence.official_overlap_kind.as_deref(),
+                Some("replacement_candidate") | Some("mixed_official_and_new")
+            )
+    });
+    let has_visual_bundle = types.contains(&TYPE_OBJD)
+        && (types.contains(&TYPE_IMG) || types.contains(&0x7368_84F1));
+    let has_internal_cas_evidence = project_evidence.identifiers.iter().any(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower.contains("cas") || lower.contains("sim")
+    });
+
+    if !has_cas_default_name
+        || !official_replacement
+        || !has_visual_bundle
+        || !has_internal_cas_evidence
+        || project_evidence.has_s3sa
+    {
+        return None;
+    }
+
+    let replacements = localized_special_folder(language, "replacements").to_string();
+    Some(PackageFamilyClassification {
+        main_category: replacements.clone(),
+        sub_category: Some("CAS".to_string()),
+        folder_parts: vec![replacements, "CAS".to_string()],
+        detected_from: vec![
+            "CASDefaultName".to_string(),
+            "CASInternalEvidence".to_string(),
+            "OfficialReplacementEvidence".to_string(),
+        ],
+        technical_reason: "CAS Default package with internal CAS evidence and changed official resources identifies a generic CAS replacement; no narrower body, face, or eye subtype is inferred without stronger evidence.".to_string(),
     })
 }
 
@@ -4836,6 +4890,15 @@ fn scan_one_with_index(
             has_fbln.then(|| fbln_slider_classification(&package, &fbln_metadata, &name, language))
         })
         .or_else(|| {
+            cas_default_replacement_classification(
+                &type_ids,
+                &name,
+                &project_evidence,
+                reference_evidence.as_ref(),
+                language,
+            )
+        })
+        .or_else(|| {
             fix_signatures::learned_fix_classification(
                 &package,
                 fix_index,
@@ -6640,6 +6703,48 @@ mod tests {
             .detected_from
             .contains(&"OfficialReplacementEvidence".to_string()));
         assert!(!classification.technical_reason.contains("filename"));
+    }
+
+    #[test]
+    fn cas_default_replacement_uses_official_and_internal_evidence() {
+        let evidence = ReferenceEvidence {
+            official_overlap_kind: Some("mixed_official_and_new".to_string()),
+            changed_resource_count: 11,
+            ..ReferenceEvidence::default()
+        };
+        let project = ProjectTechnicalEvidence {
+            identifiers: vec!["CAS-SIM".to_string(), "CASRoom".to_string()],
+            ..ProjectTechnicalEvidence::default()
+        };
+        let classification = cas_default_replacement_classification(
+            &BTreeSet::from([TYPE_OBJD, TYPE_IMG, 0x7368_84F1]),
+            "Agnelid_CAS Default_Sliver eucaliptus.package",
+            &project,
+            Some(&evidence),
+            AppLanguage::Pt,
+        )
+        .expect("CAS Default replacement should be classified");
+
+        assert_eq!(classification.folder_parts, vec!["Substituições", "CAS"]);
+        assert!(classification
+            .detected_from
+            .contains(&"OfficialReplacementEvidence".to_string()));
+    }
+
+    #[test]
+    fn cas_default_name_alone_does_not_classify_a_package() {
+        let project = ProjectTechnicalEvidence {
+            identifiers: vec!["CAS-SIM".to_string()],
+            ..ProjectTechnicalEvidence::default()
+        };
+        assert!(cas_default_replacement_classification(
+            &BTreeSet::from([TYPE_OBJD, TYPE_IMG, 0x7368_84F1]),
+            "Agnelid_CAS Default_Sliver eucaliptus.package",
+            &project,
+            None,
+            AppLanguage::Pt,
+        )
+        .is_none());
     }
 
     #[test]
