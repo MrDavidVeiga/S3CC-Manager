@@ -300,6 +300,21 @@ body.release-v1 .theme-button-label {
   line-height: var(--topbar-label-line-height);
 }
 
+/* Keep the top-bar labels on the same optical centerline as their icons.
+ * Explicit flex line boxes are required here because native button text and
+ * inline spans otherwise use different baselines in the themed WebView. */
+body.release-v1 .language-switcher > span,
+body.release-v1 #language-code,
+body.release-v1 .theme-button-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  font-size: 14px;
+  line-height: 20px;
+  vertical-align: middle;
+}
+
 /* The label and code must be centered by their own line boxes as well as by
  * the button flex container. Without this, the browser baseline of an inline
  * span makes PT and Tema appear a few pixels too high in the 32px controls. */
@@ -312,12 +327,14 @@ body.release-v1 .theme-button {
   box-sizing: border-box;
   align-items: center;
   justify-content: center;
-  line-height: 0;
+  line-height: 20px;
 }
 body.release-v1 #language-code,
 body.release-v1 .theme-button-label {
-  display: block;
-  height: auto;
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
   line-height: 20px;
   vertical-align: middle;
 }

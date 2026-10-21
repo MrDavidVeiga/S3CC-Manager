@@ -81,12 +81,12 @@ assert.match(
 );
 assert.match(
   themeAudit,
-  /body\.release-v1 \.lang-toggle-btn,[\s\S]*?body\.release-v1 \.theme-button \{[\s\S]*?align-items:\s*center;[\s\S]*?line-height:\s*0;/s,
+  /body\.release-v1 \.lang-toggle-btn,[\s\S]*?body\.release-v1 \.theme-button \{[\s\S]*?align-items:\s*center;[\s\S]*?line-height:\s*20px;/s,
   "Language and Theme controls must center their text and icons on one flex baseline",
 );
 assert.match(
   themeAudit,
-  /body\.release-v1 #language-code,[\s\S]*?body\.release-v1 \.theme-button-label \{[\s\S]*?display:\s*block;[\s\S]*?line-height:\s*20px;/s,
+  /body\.release-v1 #language-code,[\s\S]*?body\.release-v1 \.theme-button-label \{[\s\S]*?display:\s*inline-flex;[\s\S]*?height:\s*20px;[\s\S]*?line-height:\s*20px;/s,
   "Language code and Theme label must use explicit centered line boxes",
 );
 
