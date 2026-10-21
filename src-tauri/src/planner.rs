@@ -2491,7 +2491,7 @@ fn is_selected_content_keeper_for_scan(
         .map(|(path, _)| path.clone())
         .collect::<BTreeSet<_>>();
     for relative in peer_relative_paths {
-        let path = root.join(relative);
+        let path = root.join(path_from_relative_key(relative));
         if path.is_file() {
             candidate_paths.insert(path);
         }
@@ -2548,7 +2548,7 @@ fn selected_content_keeper_relative_path(
         .map(|(path, _)| path.clone())
         .collect::<BTreeSet<_>>();
     for relative in peer_relative_paths {
-        let path = root.join(relative);
+        let path = root.join(path_from_relative_key(relative));
         if path.is_file() {
             candidate_paths.insert(path);
         }
