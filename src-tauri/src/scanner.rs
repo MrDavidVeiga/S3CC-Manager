@@ -285,7 +285,7 @@ fn load_persistent_scan(root: &Path, language: AppLanguage) -> Option<LatestScan
 // change.  The prior value allowed persistent scans created before the
 // CASP/OBJD-free override rules to be reused, leaving those packages shown as
 // Unknown until the user manually invalidated the cache.
-const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261020-override-evidence-roof-signature-5";
+const CLASSIFICATION_RULES_VERSION: &str = "scanner-classification-v20261020-override-evidence-roof-sheep-6";
 
 fn context_file_signature(path: &Path) -> String {
     if !path.is_file() {
@@ -2279,11 +2279,22 @@ fn legacy_source_evidence_classification(
             vec!["LegacyCASSource".to_string(), "VisualResourceSet".to_string()],
             "Legacy CAS script source branch plus visual/UI resources identifies a CAS replacement.",
         )
-    } else if normalized.contains("#8 scripts/gameplay/") && types.contains(&0xD304_4521) {
+    } else if (normalized.contains("#8 scripts/gameplay/")
+        || normalized.starts_with("scripts/gameplay/")
+        || normalized.contains("/scripts/gameplay/"))
+        && types.contains(&0xD304_4521)
+    {
         (
             vec![scripts.to_string(), gameplay.to_string()],
-            vec!["LegacyGameplaySource".to_string(), "GameplayResourceSet".to_string()],
-            "Approved Gameplay family source branch plus the interaction resource type keeps this component with Scripts.",
+            vec![
+                if normalized.contains("#8 scripts/gameplay/") {
+                    "LegacyGameplaySource".to_string()
+                } else {
+                    "CanonicalGameplaySource".to_string()
+                },
+                "GameplayResourceSet".to_string(),
+            ],
+            "Gameplay source branch plus the interaction resource type keeps this component with Scripts.",
         )
     } else if normalized.contains("#7 objects/") && types.contains(&TYPE_OBJD) {
         (
@@ -7533,6 +7544,21 @@ mod tests {
             AppLanguage::Pt,
         )
         .is_none());
+    }
+
+    #[test]
+    fn canonical_gameplay_interaction_components_stay_with_scripts() {
+        let classification = legacy_source_evidence_classification(
+            &BTreeSet::from([0xD304_4521]),
+            "HitchingPostReplacementToEnableSheepEating.package",
+            r"Scripts\Gameplay\Functional Living Sheep",
+            AppLanguage::Pt,
+        )
+        .expect("canonical gameplay interaction component");
+        assert_eq!(classification.folder_parts, vec!["Scripts", "Jogabilidade"]);
+        assert!(classification
+            .detected_from
+            .contains(&"CanonicalGameplaySource".to_string()));
     }
 
     #[test]
