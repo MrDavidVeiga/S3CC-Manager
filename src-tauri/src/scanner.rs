@@ -760,6 +760,10 @@ fn store_reference_family_classification(
     })
 }
 
+fn store_evidence_can_resolve_status(status: &str) -> bool {
+    matches!(status, "unknown" | "needs_review" | "mixed")
+}
+
 fn internal_signature(
     package: &Package,
     resource_types: &[u32],
@@ -5051,7 +5055,7 @@ fn scan_one_with_index(
     // Store classification is authoritative only for a complete, unambiguous
     // package/resource-set match.  Resolve it before the public category is
     // projected so category, destination and status always remain coherent.
-    if status == "unknown" || status == "needs_review" {
+    if store_evidence_can_resolve_status(&status) {
         if let Some(classification) = reference_evidence
             .as_ref()
             .and_then(store_reference_family_classification)
@@ -6704,6 +6708,15 @@ mod tests {
             },
             "A sobreposição com a Store é parcial. Um TGI compartilhado, isoladamente, não comprova que os packages sejam idênticos."
         ));
+    }
+
+    #[test]
+    fn confirmed_store_evidence_can_resolve_mixed_status() {
+        assert!(store_evidence_can_resolve_status("unknown"));
+        assert!(store_evidence_can_resolve_status("needs_review"));
+        assert!(store_evidence_can_resolve_status("mixed"));
+        assert!(!store_evidence_can_resolve_status("classified"));
+        assert!(!store_evidence_can_resolve_status("sim_export_merged"));
     }
 
     #[test]
