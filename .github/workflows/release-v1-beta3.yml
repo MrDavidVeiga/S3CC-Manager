@@ -1,6 +1,7 @@
 name: Release v1.0.0 Beta 3
 
-# v1.0.0 Beta 3 — Windows x64, Linux x64, macOS Intel and macOS Apple Silicon
+# v1.0.0 Beta 3 — eight targets: Windows x64/x86/ARM64, Linux x64/x86/ARM64,
+# macOS Intel and macOS Apple Silicon.
 on:
   push:
     branches:
@@ -15,46 +16,113 @@ on:
         type: boolean
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
+  cancel-superseded-runs:
+    name: Cancel superseded Beta 3 runs
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel older runs for this branch
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'release-v1-beta3.yml',
+              branch: context.ref.replace('refs/heads/', ''),
+              status: 'in_progress',
+              per_page: 100,
+            });
+            for (const run of runs) {
+              if (run.id !== context.runId) {
+                core.notice(`Cancelling superseded run ${run.id}`);
+                await github.rest.actions.cancelWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id,
+                });
+              }
+            }
+
   build-release:
     name: ${{ matrix.artifact_name }}
+    needs: cancel-superseded-runs
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: windows-2022
-            target: ""
+            target: x86_64-pc-windows-msvc
             build_args: --no-bundle
             binary_name: s3cc-organizer.exe
             packaged_binary: "Veiga's S3CC Manager.exe"
             artifact_name: S3CC-Manager-Windows-x64
             release_slug: Windows_x64
 
+          - platform: windows-2022
+            target: i686-pc-windows-msvc
+            build_args: --no-bundle
+            binary_name: s3cc-organizer.exe
+            packaged_binary: "Veiga's S3CC Manager.exe"
+            artifact_name: S3CC-Manager-Windows-x86
+            release_slug: Windows_x86
+
+          - platform: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            build_args: --no-bundle
+            binary_name: s3cc-organizer.exe
+            packaged_binary: "Veiga's S3CC Manager.exe"
+            artifact_name: S3CC-Manager-Windows-ARM64
+            release_slug: Windows_ARM64
+
           - platform: ubuntu-22.04
-            target: ""
+            target: x86_64-unknown-linux-gnu
             build_args: --no-bundle
             binary_name: s3cc-organizer
             packaged_binary: "Veiga's S3CC Manager"
             artifact_name: S3CC-Manager-Linux-x64
             release_slug: Linux_x64
 
+          - platform: ubuntu-22.04
+            target: i686-unknown-linux-gnu
+            build_args: --no-bundle
+            binary_name: s3cc-organizer
+            packaged_binary: "Veiga's S3CC Manager"
+            artifact_name: S3CC-Manager-Linux-x86
+            release_slug: Linux_x86
+            linux_x86: true
+
+          - platform: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            build_args: --no-bundle
+            binary_name: s3cc-organizer
+            packaged_binary: "Veiga's S3CC Manager"
+            artifact_name: S3CC-Manager-Linux-ARM64
+            release_slug: Linux_ARM64
+
           - platform: macos-15-intel
             target: x86_64-apple-darwin
-            build_args: --target x86_64-apple-darwin --no-bundle
+            build_args: --bundles app
             binary_name: s3cc-organizer
             packaged_binary: "Veiga's S3CC Manager"
             artifact_name: S3CC-Manager-macOS-Intel
             release_slug: macOS_Intel
+            macos: true
 
           - platform: macos-15
             target: aarch64-apple-darwin
-            build_args: --target aarch64-apple-darwin --no-bundle
+            build_args: --bundles app
             binary_name: s3cc-organizer
             packaged_binary: "Veiga's S3CC Manager"
             artifact_name: S3CC-Manager-macOS-Apple-Silicon
             release_slug: macOS_Apple_Silicon
+            macos: true
 
     runs-on: ${{ matrix.platform }}
 
@@ -66,7 +134,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -86,12 +154,7 @@ jobs:
         with:
           node-version: lts/*
 
-      - name: Install Rust stable
-        if: matrix.target == ''
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install Rust stable with target
-        if: matrix.target != ''
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -100,6 +163,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
+          key: ${{ matrix.release_slug }}
 
       - name: Install frontend dependencies
         run: npm install
@@ -113,15 +177,20 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Check Rust
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+      - name: Check Rust target
+        if: matrix.linux_x86 != true
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
       - name: Run Rust tests
         id: rust_tests
         shell: bash
         run: |
           set -o pipefail
-          cargo test --manifest-path src-tauri/Cargo.toml --lib 2>&1 | tee rust-test.log
+          if [ "${{ matrix.linux_x86 }}" = "true" ]; then
+            echo "Rust tests are run on the native Linux x64 host; Linux x86 is validated by its native target build."
+            exit 0
+          fi
+          cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1 2>&1 | tee rust-test.log
 
       - name: Upload Rust test diagnostics
         if: failure() && steps.rust_tests.outcome == 'failure'
@@ -132,11 +201,35 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Build portable binary
-        run: npm run tauri build -- ${{ matrix.build_args }}
+      - name: Build native Linux x86 binary in Debian i386 container
+        if: matrix.linux_x86 == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/386 -v "$PWD:/workspace" -w /workspace i386/debian:bookworm bash -lc '
+            set -euo pipefail
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              ca-certificates curl git file build-essential pkg-config libssl-dev \
+              libgtk-3-dev libwebkit2gtk-4.1-dev \
+              libayatana-appindicator3-dev librsvg2-dev libxdo-dev zip
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-host i686-unknown-linux-gnu
+            . "$HOME/.cargo/env"
+            rustup target add i686-unknown-linux-gnu
+            cargo check --manifest-path src-tauri/Cargo.toml --target i686-unknown-linux-gnu
+            cargo build --manifest-path src-tauri/Cargo.toml --release --target i686-unknown-linux-gnu --bin s3cc-organizer
+            bin=src-tauri/target/i686-unknown-linux-gnu/release/s3cc-organizer
+            test -s "$bin"
+            file "$bin"
+            file -b "$bin" | grep -q "ELF 32-bit"
+          '
+
+      - name: Build target binary or macOS application
+        if: matrix.linux_x86 != true
+        run: npm run tauri build -- --target ${{ matrix.target }} ${{ matrix.build_args }}
 
       - name: Locate Windows binary
-        if: matrix.platform == 'windows-2022'
+        if: matrix.platform == 'windows-2022' || matrix.platform == 'windows-11-arm'
         id: locate_windows
         shell: pwsh
         run: |
@@ -156,7 +249,7 @@ jobs:
           "artifact_path=$file" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Locate Unix binary
-        if: matrix.platform != 'windows-2022'
+        if: matrix.platform != 'windows-2022' && matrix.platform != 'windows-11-arm' && matrix.linux_x86 != true && matrix.macos != true
         id: locate_unix
         shell: bash
         run: |
@@ -170,7 +263,7 @@ jobs:
           echo "artifact_path=$file_path" >> "$GITHUB_OUTPUT"
 
       - name: Package Windows portable release
-        if: matrix.platform == 'windows-2022'
+        if: matrix.platform == 'windows-2022' || matrix.platform == 'windows-11-arm'
         shell: pwsh
         run: |
           $stage = Join-Path $PWD "release-stage/${{ matrix.artifact_name }}"
@@ -184,8 +277,41 @@ jobs:
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
           "$hash  $zip" | Out-File -Encoding ascii "VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt"
 
+      - name: Package Linux x86 portable release
+        if: matrix.linux_x86 == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="src-tauri/target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
+          test -s "$binary"
+          stage="release-stage/${{ matrix.artifact_name }}"
+          mkdir -p "$stage"
+          cp "$binary" "$stage/${{ matrix.packaged_binary }}"
+          chmod +x "$stage/${{ matrix.packaged_binary }}"
+          cp README.md "$stage/README.md"
+          cp docs/RELEASE-NOTES-v1.0.0-BETA3.md "$stage/RELEASE-NOTES.md"
+          zip_name="VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}.zip"
+          (cd "$stage" && zip -q -r "../../$zip_name" .)
+          sha256sum "$zip_name" > "VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt"
+
+      - name: Package macOS application release
+        if: matrix.macos == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find "src-tauri/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -d "$app"
+          stage="release-stage/${{ matrix.artifact_name }}"
+          mkdir -p "$stage"
+          ditto "$app" "$stage/$(basename "$app")"
+          cp README.md "$stage/README.md"
+          cp docs/RELEASE-NOTES-v1.0.0-BETA3.md "$stage/RELEASE-NOTES.md"
+          zip_name="VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$stage" "$zip_name"
+          shasum -a 256 "$zip_name" > "VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt"
+
       - name: Package Unix portable release
-        if: matrix.platform != 'windows-2022'
+        if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -euo pipefail
@@ -208,7 +334,7 @@ jobs:
       - name: Upload portable package
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact_name }}
+          name: S3CC-Manager-Beta3-${{ matrix.release_slug }}
           path: |
             VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}.zip
             VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt
@@ -218,7 +344,7 @@ jobs:
   publish-prerelease:
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.publish == true) ||
-      (github.event_name == 'push' && github.event.head_commit.message == 'Release v1.0.0 Beta 3')
+      (github.event_name == 'push' && github.event.head_commit.message == 'Release v1.0.0 Beta 3 (8 targets)')
     needs: build-release
     runs-on: ubuntu-22.04
     permissions:
@@ -231,7 +357,7 @@ jobs:
       - name: Download all portable packages
         uses: actions/download-artifact@v4
         with:
-          pattern: VeigasS3CCManager_v1.0.0_Beta3_*
+          pattern: S3CC-Manager-Beta3-*
           path: release-assets
           merge-multiple: true
       - name: Validate and publish Beta 3
@@ -251,17 +377,25 @@ jobs:
             const expected = [
               'VeigasS3CCManager_v1.0.0_Beta3_Windows_x64.zip',
               'VeigasS3CCManager_v1.0.0_Beta3_Windows_x64_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta3_Windows_x86.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_Windows_x86_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta3_Windows_ARM64.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_Windows_ARM64_SHA256.txt',
               'VeigasS3CCManager_v1.0.0_Beta3_Linux_x64.zip',
               'VeigasS3CCManager_v1.0.0_Beta3_Linux_x64_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta3_Linux_x86.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_Linux_x86_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta3_Linux_ARM64.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_Linux_ARM64_SHA256.txt',
               'VeigasS3CCManager_v1.0.0_Beta3_macOS_Intel.zip',
               'VeigasS3CCManager_v1.0.0_Beta3_macOS_Intel_SHA256.txt',
-              'VeigasS3CCManager_v1.0.0_Beta3_macOS_AppleSilicon.zip',
-              'VeigasS3CCManager_v1.0.0_Beta3_macOS_AppleSilicon_SHA256.txt',
+              'VeigasS3CCManager_v1.0.0_Beta3_macOS_Apple_Silicon.zip',
+              'VeigasS3CCManager_v1.0.0_Beta3_macOS_Apple_Silicon_SHA256.txt',
             ];
             const assetDir = path.resolve(process.env.ASSET_DIR);
             const files = fs.readdirSync(assetDir).filter((name) => expected.includes(name)).sort();
             if (files.length !== expected.length) {
-              core.setFailed('Expected 8 Beta 3 assets, found ' + files.length + ': ' + files.join(', '));
+              core.setFailed('Expected 16 Beta 3 assets for eight targets, found ' + files.length + ': ' + files.join(', '));
               return;
             }
             for (const name of expected) {
@@ -369,6 +503,6 @@ jobs:
                 data: fs.readFileSync(path.join(assetDir, name)),
               });
             }
-            core.notice('Published ' + tag + ' with 8 validated assets at commit ' + context.sha);
+            core.notice('Published ' + tag + ' with 16 validated assets for eight targets at commit ' + context.sha);
 
 
