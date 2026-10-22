@@ -216,7 +216,9 @@ jobs:
           retention-days: 30
 
   publish-prerelease:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.publish == true) ||
+      (github.event_name == 'push' && github.event.head_commit.message == 'Release v1.0.0 Beta 3')
     needs: build-release
     runs-on: ubuntu-22.04
     permissions:
@@ -243,6 +245,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
+            const crypto = require('crypto');
             const path = require('path');
             const tag = process.env.RELEASE_TAG;
             const expected = [
@@ -265,6 +268,17 @@ jobs:
               const stat = fs.statSync(path.join(assetDir, name));
               if (!stat.isFile() || stat.size === 0) {
                 core.setFailed('Invalid empty asset: ' + name);
+                return;
+              }
+            }
+            for (const name of expected.filter((file) => file.endsWith('.zip'))) {
+              const checksumName = name.replace('.zip', '_SHA256.txt');
+              const digest = crypto.createHash('sha256')
+                .update(fs.readFileSync(path.join(assetDir, name)))
+                .digest('hex');
+              const checksum = fs.readFileSync(path.join(assetDir, checksumName), 'utf8').trim().split(/\s+/)[0].toLowerCase();
+              if (checksum !== digest) {
+                core.setFailed('Checksum mismatch for ' + name + ': expected ' + digest + ', found ' + checksum);
                 return;
               }
             }
