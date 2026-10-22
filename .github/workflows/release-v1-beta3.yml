@@ -311,7 +311,7 @@ jobs:
           shasum -a 256 "$zip_name" > "VeigasS3CCManager_v1.0.0_Beta3_${{ matrix.release_slug }}_SHA256.txt"
 
       - name: Package Unix portable release
-        if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
+        if: (matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm') && matrix.linux_x86 != true
         shell: bash
         run: |
           set -euo pipefail
