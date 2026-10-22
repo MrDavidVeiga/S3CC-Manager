@@ -1,5 +1,14 @@
 # Veiga's S3CC Manager — Changelog
 
+## WinUI 3 — padronização de geometria e controles (2026-10-22)
+
+- Aplicada a camada compartilhada `src/winui3-strict.css` por último, seguindo a [geometria Microsoft Windows 11](https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/geometry): **4 px** em controles/listas, **8 px** em overlays/dialogs, **0 px** em faces encaixadas.
+- Revisadas sidebar, outer/content pane, listas, preview, botões, campos de busca, ComboBox, Theme/Idioma, menus, modais, mensagens, barra de progresso e scrollbars.
+- Unificados tokens, tipografia/densidade e tratamento de estados hover/focus/pressed, mantendo as cores de cada tema, atalhos e funções de cada programa.
+- Incluídos `src/winui3-strict.test.mjs`, `.github/workflows/winui3-strict-ui.yml` e `WINUI3_PARITY.md`.
+- **Status:** aplicação e checagem estática; aprovação visual integral depende de inspeção em execução/Windows, DPI, acessibilidade, responsividade e testes de funções. Não representa migração para WinUI 3 nativo nem correção de bugs funcionais.
+
+
 ## v1.0.0 Beta 2 (em comparação com a Beta 1)
 
 ### Adicionado
