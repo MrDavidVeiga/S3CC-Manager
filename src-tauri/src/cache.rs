@@ -38,7 +38,7 @@ fn sha256_file_health(path: &Path) -> Result<(String, u64), String> {
     let size = file.metadata()
         .map_err(|error| format!("Could not stat {}: {error}", path.display()))?.len();
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; BLOCK.min((size as usize).max(1))];
+    let mut buffer = vec![0u8; size.min(BLOCK as u64).max(1) as usize];
     loop {
         ensure_analysis_not_cancelled(Some("health"))?;
         let count = file.read(&mut buffer)
@@ -1026,6 +1026,12 @@ fn get_or_build_with_validation(
         }
     }
 
+    if cancellation_kind == Some("health") {
+        operation::set_message("health", Some(format!(
+            "Reading {} in 4 MiB blocks",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        )));
+    }
     let hash_started = Instant::now();
     let (file_sha256, _) = if cancellation_kind == Some("health") {
         sha256_file_health(path)?
@@ -1082,6 +1088,14 @@ fn get_or_build_with_validation(
             let mut parse_error = None;
             for (entry_index, entry) in package.entries.iter().enumerate() {
                 ensure_analysis_not_cancelled(cancellation_kind)?;
+                if cancellation_kind == Some("health") && (entry_index % 256 == 0) {
+                    operation::set_message("health", Some(format!(
+                        "Validating resource {}/{} in {}",
+                        entry_index + 1,
+                        package.entries.len(),
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )));
+                }
                 if entry_index % 1000 == 0 && package.entries.len() >= 1000 {
                     eprintln!(
                         "reference cache: {} resource {}/{}",
