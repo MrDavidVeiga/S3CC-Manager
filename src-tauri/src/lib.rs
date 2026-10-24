@@ -9,6 +9,7 @@ pub mod conflicts;
 pub mod dbpf;
 pub mod dependencies;
 pub mod duplicates;
+pub mod embedded_duplicates;
 pub mod executor;
 pub mod fix_signatures;
 pub mod health;
@@ -84,6 +85,7 @@ pub fn run() {
             cc_catalog::import_missing_cc_links,
             cc_catalog::export_catalog_issues,
             duplicates::analyze_duplicates,
+            embedded_duplicates::analyze_embedded_duplicates,
             conflicts::analyze_conflicts,
             operation::get_operation_status,
             operation::cancel_operation,

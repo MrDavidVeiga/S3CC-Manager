@@ -200,6 +200,17 @@ const I18N = {
     cancelAnalysis: "Cancel",
     cancelling: "Cancelling…",
     cancelled: "Analysis cancelled",
+    analyzeEmbeddedDuplicates: "Find Internal Duplicates",
+    embeddedDuplicatesTitle: "Verified Internal Duplicates",
+    embeddedDuplicatesExplanation: "Complete CC sources matched by TGI and resource hashes. Diagnostics only: no package is modified.",
+    embeddedDuplicatesNone: "No complete embedded CC duplicates were confirmed.",
+    embeddedDuplicatesFound: "Confirmed internal duplicates",
+    embeddedDuplicatesResources: "matching resources",
+    embeddedDuplicatesMergedPair: "Merged × Merged",
+    embeddedDuplicatesIndividualPair: "Package without manifest × Merged",
+    embeddedDuplicatesReviewOnly: "Review only",
+    embeddedDuplicatesManifestCount: "validated merge manifests",
+    embeddedDuplicatesWarnings: "Analysis warnings",
     technicalDetails: "Show Technical Details",
     hideTechnicalDetails: "Hide Technical Details",
     previewLoading: "Loading thumbnail…",
@@ -869,6 +880,17 @@ const I18N = {
     cancelAnalysis: "Cancelar",
     cancelling: "Cancelando…",
     cancelled: "Análise cancelada",
+    analyzeEmbeddedDuplicates: "Encontrar Duplicatas Internas",
+    embeddedDuplicatesTitle: "Duplicatas Internas Confirmadas",
+    embeddedDuplicatesExplanation: "Conteúdos completos identificados por TGI e hash dos recursos. Somente diagnóstico: nenhum package será modificado.",
+    embeddedDuplicatesNone: "Nenhuma duplicata interna completa foi confirmada.",
+    embeddedDuplicatesFound: "Duplicatas internas confirmadas",
+    embeddedDuplicatesResources: "recursos coincidentes",
+    embeddedDuplicatesMergedPair: "Mesclado × Mesclado",
+    embeddedDuplicatesIndividualPair: "Package sem manifesto × Mesclado",
+    embeddedDuplicatesReviewOnly: "Apenas revisar",
+    embeddedDuplicatesManifestCount: "manifestos de mesclagem validados",
+    embeddedDuplicatesWarnings: "Avisos da análise",
     technicalDetails: "Mostrar Detalhes Técnicos",
     hideTechnicalDetails: "Ocultar Detalhes Técnicos",
     previewLoading: "Carregando thumbnail…",
@@ -1537,6 +1559,17 @@ const I18N = {
     cancelAnalysis: "Cancelar",
     cancelling: "Cancelando…",
     cancelled: "Análisis cancelado",
+    analyzeEmbeddedDuplicates: "Buscar Duplicados Internos",
+    embeddedDuplicatesTitle: "Duplicados Internos Confirmados",
+    embeddedDuplicatesExplanation: "Contenido completo identificado por TGI y hash de recursos. Solo diagnóstico: ningún package será modificado.",
+    embeddedDuplicatesNone: "No se confirmaron duplicados internos completos.",
+    embeddedDuplicatesFound: "Duplicados internos confirmados",
+    embeddedDuplicatesResources: "recursos coincidentes",
+    embeddedDuplicatesMergedPair: "Fusionado × Fusionado",
+    embeddedDuplicatesIndividualPair: "Package sin manifiesto × Fusionado",
+    embeddedDuplicatesReviewOnly: "Solo revisar",
+    embeddedDuplicatesManifestCount: "manifiestos de fusión validados",
+    embeddedDuplicatesWarnings: "Avisos del análisis",
     technicalDetails: "Mostrar Detalles Técnicos",
     hideTechnicalDetails: "Ocultar Detalles Técnicos",
     previewLoading: "Cargando thumbnail…",
@@ -2067,6 +2100,10 @@ const state = {
   restoreError: "",
   restoreNotice: "",
   duplicatesAnalysis: null,
+  embeddedDuplicatesReport: null,
+  embeddedDuplicatesBusy: false,
+  embeddedDuplicatesError: "",
+  embeddedDuplicatesSourceFolder: "",
   unifiedStats: null,
   duplicatesBusy: false,
   duplicatesError: "",
@@ -2406,6 +2443,10 @@ const el = {
   operationResultWarnings: document.querySelector("#operation-result-warnings"),
   operationResultOk: document.querySelector("#operation-result-ok"),
   analyzeDuplicatesBtn: document.querySelector("#analyze-duplicates-btn"),
+  embeddedDuplicatesRun: document.querySelector("#duplicates-embedded-run"),
+  embeddedDuplicatesResults: document.querySelector("#duplicates-embedded-results"),
+  embeddedDuplicatesStatus: document.querySelector("#duplicates-embedded-status"),
+  embeddedDuplicatesList: document.querySelector("#duplicates-embedded-list"),
   duplicatesState: document.querySelector("#duplicates-state"),
   duplicatesSearch: document.querySelector("#duplicates-search"),
   duplicatesFilter: document.querySelector("#duplicates-filter"),
@@ -5014,6 +5055,101 @@ function renderDuplicateBatchControls() {
   }
 }
 
+function renderEmbeddedDuplicates() {
+  const panel = el.embeddedDuplicatesResults;
+  if (!panel) return;
+  const validFolder = state.embeddedDuplicatesSourceFolder === state.folder;
+  const report = validFolder ? state.embeddedDuplicatesReport : null;
+  const busy = validFolder && state.embeddedDuplicatesBusy;
+  const error = validFolder ? state.embeddedDuplicatesError : "";
+  panel.classList.toggle("hidden", !report && !busy && !error);
+  el.embeddedDuplicatesRun.disabled = !state.folder || state.embeddedDuplicatesBusy ||
+    analysisReadsBusy() || state.toolsBusy || state.quarantineBusy || state.executing ||
+    state.restoreBusy || state.planning || state.structureBusy;
+  if (!report && !busy && !error) return;
+  el.embeddedDuplicatesList.replaceChildren();
+  const status = el.embeddedDuplicatesStatus;
+  if (busy) {
+    status.textContent = t("scanning");
+    status.className = "scan-state busy";
+    return;
+  }
+  if (error) {
+    status.textContent = error;
+    status.className = "scan-state error";
+    return;
+  }
+  const findings = report.findings || [];
+  status.textContent = `${t("embeddedDuplicatesFound")}: ${findings.length} · ${t("packages")}: ${report.scannedPackages} · ${t("embeddedDuplicatesManifestCount")}: ${report.validManifests}`;
+  status.className = "scan-state success";
+  if (!findings.length) {
+    const note = document.createElement("p");
+    note.textContent = t("embeddedDuplicatesNone");
+    el.embeddedDuplicatesList.appendChild(note);
+  }
+  for (const finding of findings.slice(0, 250)) {
+    const article = document.createElement("article");
+    article.className = "embedded-duplicate-finding";
+    const title = document.createElement("strong");
+    title.textContent = finding.sourceName;
+    const summary = document.createElement("p");
+    summary.textContent = `${t(finding.kind === "merged_vs_merged" ? "embeddedDuplicatesMergedPair" : "embeddedDuplicatesIndividualPair")} · ${finding.resourceCount} ${t("embeddedDuplicatesResources")} · ${t("embeddedDuplicatesReviewOnly")}`;
+    article.append(title, summary);
+    for (const path of [finding.leftPath, finding.rightPath]) {
+      const row = document.createElement("div");
+      row.className = "embedded-duplicate-path";
+      const file = document.createElement("code");
+      file.textContent = path;
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "secondary-btn";
+      open.textContent = t("openLocation");
+      open.addEventListener("click", () => void revealSafe(path));
+      row.append(file, open);
+      article.appendChild(row);
+    }
+    el.embeddedDuplicatesList.appendChild(article);
+  }
+  if ((report.warnings || []).length) {
+    const warnings = document.createElement("details");
+    const title = document.createElement("summary");
+    title.textContent = `${t("embeddedDuplicatesWarnings")}: ${report.warnings.length}`;
+    warnings.appendChild(title);
+    for (const message of report.warnings.slice(0, 50)) {
+      const p = document.createElement("p");
+      p.textContent = message;
+      warnings.appendChild(p);
+    }
+    el.embeddedDuplicatesList.appendChild(warnings);
+  }
+}
+
+async function analyzeEmbeddedDuplicates() {
+  if (!state.folder || analysisReadsBusy() || state.toolsBusy || state.quarantineBusy ||
+      state.executing || state.restoreBusy || state.planning || state.structureBusy) return;
+  const folder = state.folder;
+  state.embeddedDuplicatesSourceFolder = folder;
+  state.embeddedDuplicatesReport = null;
+  state.embeddedDuplicatesError = "";
+  state.embeddedDuplicatesBusy = true;
+  state.toolsBusy = true;
+  beginToolsOperation("embedded_duplicates");
+  render();
+  try {
+    const result = await invoke("analyze_embedded_duplicates", { folder });
+    if (state.folder === folder) state.embeddedDuplicatesReport = result;
+  } catch (error) {
+    if (state.folder === folder && !String(error).includes("__S3CC_OPERATION_CANCELLED__")) {
+      state.embeddedDuplicatesError = String(error);
+    }
+  } finally {
+    state.embeddedDuplicatesBusy = false;
+    state.toolsBusy = false;
+    state.toolsOperation = null;
+    render();
+  }
+}
+
 function renderDuplicates() {
   if (!el.analyzeDuplicatesBtn) return;
   if (el.duplicatesSort) {
@@ -5023,6 +5159,7 @@ function renderDuplicates() {
     el.duplicatesSort.value = state.duplicatesSort;
   }
   renderDuplicateBatchControls();
+  renderEmbeddedDuplicates();
   el.analyzeDuplicatesBtn.querySelector("[data-i18n]")?.replaceChildren(
     document.createTextNode(t(state.duplicatesAnalysis ? "reanalyzeDuplicates" : "analyzeDuplicates"))
   );
@@ -11107,6 +11244,7 @@ el.planModal.addEventListener("click", (event) => {
 });
 
 el.analyzeDuplicatesBtn.addEventListener("click", analyzeDuplicates);
+el.embeddedDuplicatesRun?.addEventListener("click", analyzeEmbeddedDuplicates);
 el.analyzeConflictsBtn.addEventListener("click", analyzeConflicts);
 const applyConflictSearch = debounce((value) => {
   state.conflictsSearch = value;

@@ -299,6 +299,12 @@
             <div id="duplicates-results" class="duplicates-results hidden">
               <div id="duplicates-list" class="duplicates-list" aria-live="polite"></div>
             </div>
+            <section id="duplicates-embedded-results" class="embedded-duplicates-panel hidden" aria-live="polite">
+              <h3 data-i18n="embeddedDuplicatesTitle">Internal Duplicates</h3>
+              <p data-i18n="embeddedDuplicatesExplanation">Verified complete CC content in merged packages. Review only: no resources are removed.</p>
+              <div id="duplicates-embedded-status" class="scan-state"></div>
+              <div id="duplicates-embedded-list" class="embedded-duplicates-list"></div>
+            </section>
             <div class="analysis-list-footer" data-report-panel="duplicates">
               <span class="analysis-audit-status" data-audit-status="duplicates" aria-live="polite"></span>
               <div class="analysis-action-bar duplicates-action-bar" role="toolbar" aria-label="Duplicate actions">
@@ -320,6 +326,7 @@
                     </div>
                     <div class="analysis-menu-section">
                       <span class="analysis-menu-heading" data-i18n="toolsSection">Tools</span>
+                      <button id="duplicates-embedded-run" class="secondary-btn" type="button" role="menuitem" data-i18n="analyzeEmbeddedDuplicates" disabled>Analyze Internal Duplicates</button>
                       <button class="secondary-btn" type="button" role="menuitem" data-export-audit="duplicates" data-i18n="exportAuditReport">Export Report</button>
                       <button class="secondary-btn hidden" type="button" role="menuitem" data-open-report-folder="duplicates" data-i18n="openReportFolder">Open Reports</button>
                     </div>

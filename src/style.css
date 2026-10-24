@@ -5595,3 +5595,31 @@ body:not(.utility-page) .right-panel {
 @media (max-width: 580px) {
   .health-review-controls > button { flex: 1 1 135px; }
 }
+
+/* Beta 3 read-only internal-duplicate evidence. Keep layout aligned with
+   existing WinUI cards; never imply that full merged packages can be deleted. */
+.embedded-duplicates-panel {
+  flex: 0 1 auto;
+  max-height: min(38vh, 330px);
+  overflow: hidden;
+  margin-top: 12px;
+  border: 1px solid var(--winui-control-stroke, var(--border));
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface);
+  min-width: 0;
+}
+.embedded-duplicates-panel > h3 { margin: 0 0 6px; font-size: .9rem; }
+.embedded-duplicates-panel > p { margin: 0 0 12px; color: var(--muted); font-size: .78rem; }
+.embedded-duplicates-list { display: grid; gap: 9px; max-height: min(28vh, 240px); overflow-y: auto; }
+.embedded-duplicate-finding {
+  border: 1px solid var(--winui-control-stroke, var(--border));
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--winui-card-fill-alt, rgba(255,255,255,.04));
+  min-width: 0;
+}
+.embedded-duplicate-finding > strong { display: block; font-size: .84rem; }
+.embedded-duplicate-finding > p { color: var(--muted); margin: 4px 0 8px; font-size: .75rem; }
+.embedded-duplicate-path { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.embedded-duplicate-path code { font-size: .73rem; overflow-wrap: anywhere; min-width: 0; flex: 1; }
