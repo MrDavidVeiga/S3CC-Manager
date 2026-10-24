@@ -214,7 +214,10 @@ fn copy_bytes(out: &mut Vec<u8>, offset: usize, mut len: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_blocks, copy_bytes, uncompress_stream, uncompress_stream_with_digest};
+    use super::{
+        copy_blocks, copy_bytes, uncompress_stream, uncompress_stream_with_digest,
+        uncompress_stream_with_digest_cancellable,
+    };
     use sha2::{Digest, Sha256};
 
     #[test]
@@ -254,5 +257,13 @@ mod tests {
         assert_eq!(decoded_with_digest, payload);
         let expected: [u8; 32] = Sha256::digest(payload).into();
         assert_eq!(digest, expected);
+        let (streamed, streamed_digest) =
+            uncompress_stream_with_digest_cancellable(&compressed, compressed.len(), payload.len(), || false).unwrap();
+        assert_eq!(streamed, payload);
+        assert_eq!(streamed_digest, digest);
+        let error = uncompress_stream_with_digest_cancellable(
+            &compressed, compressed.len(), payload.len(), || true
+        ).unwrap_err();
+        assert!(error.to_string().contains(crate::operation::CANCELLED_ERROR));
     }
 }
