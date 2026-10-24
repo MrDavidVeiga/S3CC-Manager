@@ -8396,11 +8396,12 @@ async function addCustomRule() {
 
 async function analyzeHealth() {
   if (!state.folder || toolsOperationLocked()) return;
-  state.toolsBusy = true; state.toolsError = ""; beginToolsOperation("health");
+  state.toolsBusy = true; state.toolsError = ""; state.toolsNotice = ""; beginToolsOperation("health");
   renderTools();
   try {
     state.healthReport = await invoke("analyze_mods_health", { folder: state.folder });
     state.healthSelected.clear();
+    state.toolsNotice = t("executionComplete");
     showOperationResult({
       title: t("health"),
       summary: t("executionComplete"),
