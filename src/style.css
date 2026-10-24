@@ -4702,6 +4702,13 @@ button:disabled {
   contain: layout paint;
 }
 
+/* The browser owns scrollbar position while virtualized results are rebuilt.
+   Prevent scroll anchoring from competing with a dragged thumb. */
+.duplicates-list,
+.conflicts-list {
+  overflow-anchor: none;
+}
+
 .package-row,
 .duplicate-row,
 .conflict-row {
