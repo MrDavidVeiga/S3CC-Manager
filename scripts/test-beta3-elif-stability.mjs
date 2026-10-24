@@ -99,7 +99,7 @@ assert.doesNotMatch(app.slice(start, end), /requestAnimationFrame\([^]*?scrollTo
 assert.match(css, /\.duplicates-list,\s*\.conflicts-list\s*\{\s*overflow-anchor:\s*none;/);
 
 // Health cancellation and real phase progress, including directory scans.
-assert.match(health, /operation::set_total\("health", total_files\.saturating_add\(4\)\)/);
+assert.match(health, /operation::set_total\("health", file_entries\.len\(\)\.saturating_add\(4\)\)/);
 assert.match(health, /operation::update\("health", 0, None, "discovering"\)/);
 assert.match(health, /operation::update\("health", processed_files\.saturating_add\(3\), None, "finalizing"\)/);
 assert((health.match(/operation::is_cancelled\("health"\)/g) || []).length >= 8);
