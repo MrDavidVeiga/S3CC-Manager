@@ -1388,6 +1388,39 @@ mod tests {
     }
 
     #[test]
+    fn health_unchanged_guard_prevents_cache_of_mutating_source() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-health-source-guard-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("working.package");
+        write_empty_dbpf(&path, 1);
+        let (size, modified_ns) = metadata_signature(&path).unwrap();
+        assert!(ensure_health_source_unchanged(&path, size, modified_ns, Some("health")).is_ok());
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap()
+            .write_all(b"simulated update in progress").unwrap();
+        assert!(ensure_health_source_unchanged(&path, size, modified_ns, Some("health"))
+            .unwrap_err().contains("changed while Health was reading"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn health_streaming_file_hash_equals_strict_hash_for_multiple_blocks() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-health-block-hash-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("large.package");
+        std::fs::write(&path, vec![0x7Fu8; 4 * 1024 * 1024 + 131]).unwrap();
+        let actual = sha256_file_health(&path).unwrap();
+        let expected = sha256_file(&path).unwrap();
+        assert_eq!(actual, expected);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn planner_identity_cache_reuses_hash_without_decoding_dbpf_resources() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
