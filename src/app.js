@@ -2634,6 +2634,71 @@ function formatMs(value) {
   return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
 }
 
+let activeAnalysisExplorerMenu = null;
+
+function closeAnalysisExplorerMenu() {
+  activeAnalysisExplorerMenu?.remove();
+  activeAnalysisExplorerMenu = null;
+}
+
+// A context menu is rendered once at a time, independent of the virtualized
+// result rows; it remains keyboard accessible and never modifies a package.
+function openAnalysisExplorerMenu(event, members) {
+  const paths = [...new Map((members || []).filter(member => member?.path)
+    .map(member => [member.path.toLowerCase(), member])).values()];
+  if (!paths.length) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeAnalysisExplorerMenu();
+  const menu = document.createElement("div");
+  menu.className = "analysis-explorer-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", t("openLocation"));
+  // Enormous exact-duplicate groups must not create thousands of menu nodes.
+  const visible = paths.slice(0, 15);
+  for (const member of visible) {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "analysis-explorer-context-action";
+    action.setAttribute("role", "menuitem");
+    action.textContent = paths.length === 1 ? t("openLocation")
+      : `${t("openLocation")}: ${member.name || member.relativePath || member.path}`;
+    action.title = member.path;
+    action.addEventListener("click", () => {
+      closeAnalysisExplorerMenu();
+      void revealSafe(member.path);
+    });
+    menu.appendChild(action);
+  }
+  if (paths.length > visible.length) {
+    const hint = document.createElement("span");
+    hint.className = "analysis-explorer-context-hint";
+    hint.textContent = `${paths.length - visible.length} ${t("packages")} · ${t("expandDetails")}`;
+    menu.appendChild(hint);
+  }
+  document.body.appendChild(menu);
+  activeAnalysisExplorerMenu = menu;
+  const rect = menu.getBoundingClientRect();
+  const maxX = Math.max(8, window.innerWidth - rect.width - 8);
+  const maxY = Math.max(8, window.innerHeight - rect.height - 8);
+  menu.style.left = `${Math.max(8, Math.min(event.clientX, maxX))}px`;
+  menu.style.top = `${Math.max(8, Math.min(event.clientY, maxY))}px`;
+  menu.querySelector("button")?.focus();
+}
+
+document.addEventListener("pointerdown", (event) => {
+  if (activeAnalysisExplorerMenu && !activeAnalysisExplorerMenu.contains(event.target)) {
+    closeAnalysisExplorerMenu();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && activeAnalysisExplorerMenu) {
+    event.preventDefault();
+    closeAnalysisExplorerMenu();
+  }
+});
+window.addEventListener("scroll", closeAnalysisExplorerMenu, true);
+
 async function revealSafe(path) {
   if (!path) return;
   try {
@@ -4716,6 +4781,7 @@ function appendDuplicateExpandableDetails(container, finding) {
   for (const member of members) {
     const card = document.createElement("article");
     card.className = "analysis-comparison-card";
+    card.addEventListener("contextmenu", (event) => openAnalysisExplorerMenu(event, [member]));
     if (quarantineEligible) {
       const chooser = document.createElement("label");
       chooser.className = "quarantine-member-select";
@@ -4766,6 +4832,11 @@ function createDuplicateFindingRow(finding) {
   const article = document.createElement("article");
   article.className = "analysis-expandable-item duplicate-expandable-item";
   article.dataset.duplicateId = finding.id;
+  article.addEventListener("contextmenu", (event) => {
+    const members = finding.findingType === "group"
+      ? finding.members || [] : [finding.left, finding.right].filter(Boolean);
+    openAnalysisExplorerMenu(event, members);
+  });
   article.classList.toggle("selected", state.duplicateReviewSelected.has(finding.id));
   article.classList.toggle("expanded", state.duplicateExpandedId === finding.id);
 
@@ -6040,6 +6111,7 @@ function appendConflictExpandableDetails(container, finding) {
   for (const member of [finding.left, finding.right].filter(Boolean)) {
     const card = document.createElement("article");
     card.className = "analysis-comparison-card conflict-comparison-card";
+    card.addEventListener("contextmenu", (event) => openAnalysisExplorerMenu(event, [member]));
     const preview = state.packagePreviews[member.path];
     const visual = document.createElement("div");
     visual.className = "duplicate-member-visual";
@@ -6104,6 +6176,9 @@ function createConflictFindingRow(finding) {
   const sessionMark = effectiveConflictMark(finding);
   article.className = "analysis-expandable-item conflict-expandable-item";
   article.dataset.conflictId = finding.id;
+  article.addEventListener("contextmenu", (event) => {
+    openAnalysisExplorerMenu(event, [finding.left, finding.right].filter(Boolean));
+  });
   article.classList.toggle("selected", state.conflictReviewSelected.has(finding.id));
   article.classList.toggle("expanded", state.conflictExpandedId === finding.id);
   if (sessionMark) article.dataset.sessionMark = sessionMark;
