@@ -5599,6 +5599,9 @@ body:not(.utility-page) .right-panel {
 /* Beta 3 read-only internal-duplicate evidence. Keep layout aligned with
    existing WinUI cards; never imply that full merged packages can be deleted. */
 .embedded-duplicates-panel {
+  flex: 0 1 auto;
+  max-height: min(38vh, 330px);
+  overflow: hidden;
   margin-top: 12px;
   border: 1px solid var(--winui-control-stroke, var(--border));
   border-radius: 8px;
@@ -5608,7 +5611,7 @@ body:not(.utility-page) .right-panel {
 }
 .embedded-duplicates-panel > h3 { margin: 0 0 6px; font-size: .9rem; }
 .embedded-duplicates-panel > p { margin: 0 0 12px; color: var(--muted); font-size: .78rem; }
-.embedded-duplicates-list { display: grid; gap: 9px; max-height: 420px; overflow-y: auto; }
+.embedded-duplicates-list { display: grid; gap: 9px; max-height: min(28vh, 240px); overflow-y: auto; }
 .embedded-duplicate-finding {
   border: 1px solid var(--winui-control-stroke, var(--border));
   border-radius: 8px;
