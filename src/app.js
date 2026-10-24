@@ -6073,6 +6073,15 @@ function appendConflictExpandableDetails(container, finding) {
   loadOrder.className = "analysis-expandable-metrics";
   loadOrder.textContent = `${conflictPriorityLabel(finding)} · ${loadOrderExplanation(finding)} · ${t("differentPayloadCount")}: ${finding.differentPayloadCount || 0} · ${t("conflictNewestHint")}`;
   container.appendChild(loadOrder);
+  // The detailed modal already shows the Resource.cfg winner. Surface the
+  // same evidence inline so a tester can tell which package wins without
+  // opening another dialog. Never infer a winner for tied/unmatched rules.
+  if (finding.loadOrderStatus === "resolved_by_priority" && finding.higherPriorityPath) {
+    const precedence = document.createElement("p");
+    precedence.className = "analysis-priority-winner";
+    precedence.textContent = `${t("likelyHigherPriority")}: ${finding.higherPriorityPath}`;
+    container.appendChild(precedence);
+  }
   const actions = document.createElement("div");
   actions.className = "analysis-inline-actions";
   for (const [label, mark] of [[t("markIntentional"), "intentional"], [t("ignoreSession"), "ignored"], [t("clearMark"), null]]) {
