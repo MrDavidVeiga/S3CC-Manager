@@ -92,6 +92,23 @@ assert.equal(view.extraHeight, 0);
 assert(!container.children.some((row) => row.expanded), "Details must really collapse");
 assert.equal(container.scrollTop, 800 * 64);
 
+// Stress boundary rows and viewport transitions: the virtualized DOM must
+// retain the same total scroll geometry as a fully rendered 10,000-row list.
+// 55px collapsed row + 9px gap = 64px stride; outer padding = 16px.
+for (const index of [0, 1, 9, 10, 100, 999, 5000, 9999]) {
+  expandedId = `finding-${index}`;
+  container.scrollTop = index * 64;
+  renderExpandableAnalysisRows(container, view, findings, expandedId, buildRow, "duplicateId", true);
+  const height = container.children.reduce((sum, child) =>
+    sum + (child.spacer ? child.height : child.expanded ? 455 : 55), 0
+  ) + Math.max(0, container.children.length - 1) * 9 + 16;
+  assert.equal(height, findings.length * 64 + 7 + view.extraHeight,
+    "Virtualized scrollbar geometry must stay identical to the full list");
+  assert(container.children.length < 50, "Expanding at any index must retain bounded DOM size");
+}
+expandedId = "";
+renderExpandableAnalysisRows(container, view, findings, expandedId, buildRow, "duplicateId");
+
 // The identical helper is used by both independent pages.
 assert.match(app, /function renderDuplicateVirtualRows[^]*?renderExpandableAnalysisRows\(/);
 assert.match(app, /function renderConflictVirtualRows[^]*?renderExpandableAnalysisRows\(/);
