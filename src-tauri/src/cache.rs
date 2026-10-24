@@ -970,6 +970,22 @@ fn decode_resource_fingerprints(
     ))
 }
 
+fn ensure_health_source_unchanged(
+    path: &Path,
+    size: u64,
+    modified_ns: u128,
+    cancellation_kind: Option<&str>,
+) -> Result<(), String> {
+    ensure_analysis_not_cancelled(cancellation_kind)?;
+    if cancellation_kind == Some("health") && metadata_signature(path)? != (size, modified_ns) {
+        return Err(format!(
+            "Package changed while Health was reading it; retry analysis: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn get_or_build_with_validation(
     path: &Path,
     cache: &mut FingerprintCache,
@@ -990,6 +1006,7 @@ fn get_or_build_with_validation(
                 let hash_ms = hash_started.elapsed().as_millis();
                 let hash_us = hash_started.elapsed().as_micros();
                 if existing.file_sha256.eq_ignore_ascii_case(&file_sha256) {
+                    ensure_health_source_unchanged(path, size, modified_ns, cancellation_kind)?;
                     return Ok((
                         existing.clone(),
                         CacheBuildMetrics {
@@ -1009,6 +1026,7 @@ fn get_or_build_with_validation(
                 let quick_fingerprint_ms = quick_started.elapsed().as_millis();
                 let quick_fingerprint_us = quick_started.elapsed().as_micros();
                 if existing.quick_fingerprint == fingerprint {
+                    ensure_health_source_unchanged(path, size, modified_ns, cancellation_kind)?;
                     return Ok((
                         existing.clone(),
                         CacheBuildMetrics {
@@ -1048,6 +1066,7 @@ fn get_or_build_with_validation(
         {
             let mut refreshed = existing.clone();
             refreshed.quick_fingerprint = quick_fingerprint(path, size)?;
+            ensure_health_source_unchanged(path, size, modified_ns, cancellation_kind)?;
             cache.entries.insert(key, refreshed.clone());
             return Ok((
                 refreshed,
@@ -1162,7 +1181,7 @@ fn get_or_build_with_validation(
     let resource_decode_ms = decode_started.elapsed().as_millis();
     let resource_decode_us = decode_started.elapsed().as_micros();
 
-    ensure_analysis_not_cancelled(cancellation_kind)?;
+    ensure_health_source_unchanged(path, size, modified_ns, cancellation_kind)?;
     cache.entries.insert(key, built.clone());
     Ok((
         built,
