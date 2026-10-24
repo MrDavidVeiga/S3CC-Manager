@@ -485,6 +485,19 @@ impl Package {
                 Ok((hasher.finalize().into(), entry.mem_size as usize))
             }
             0xFFFF => {
+                // The compressed resource is still decoded from a single QFS
+                // buffer. A malformed DBPF may claim a tiny decoded resource
+                // and a multi-gigabyte compressed payload. Reject that before
+                // allocating the input; an ordinary Sims 3 resource should
+                // never need more than this single-resource safety bound.
+                const MAX_HEALTH_COMPRESSED_BYTES: u32 = 128 * 1024 * 1024;
+                if entry.file_size > MAX_HEALTH_COMPRESSED_BYTES {
+                    bail!(
+                        "resource {} declares unsupported compressed size {} bytes",
+                        entry.key_string(),
+                        entry.file_size
+                    );
+                }
                 let raw = self.raw_data(entry)?;
                 if crate::operation::is_cancelled("health") {
                     bail!("{}", crate::operation::CANCELLED_ERROR);
@@ -601,6 +614,29 @@ mod tests {
             .digest;
         assert_eq!(cached_after, Some(digest));
 
+        drop(package);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn health_rejects_absurd_qfs_resource_before_large_allocation() {
+        let path = std::env::temp_dir().join(format!(
+            "s3cc-oversized-qfs-{}.package", std::process::id()
+        ));
+        std::fs::write(&path, b"1234").unwrap();
+        let entry = ResourceEntry {
+            type_id: 0x0166_038C, group: 0, instance: 99,
+            chunk_offset: 0, file_size: 129 * 1024 * 1024,
+            mem_size: 4, compressed: 0xFFFF, unknown2: 0,
+            file_size_high_bit: false,
+        };
+        let package = Package {
+            path: path.clone(), major: 2, minor: 0, entries: vec![entry.clone()],
+            payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_file: Arc::new(File::open(&path).unwrap()),
+        };
+        let error = package.health_resource_digest(&entry).unwrap_err().to_string();
+        assert!(error.contains("unsupported compressed size"));
         drop(package);
         std::fs::remove_file(path).unwrap();
     }
