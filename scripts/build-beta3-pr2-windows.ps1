@@ -32,18 +32,28 @@ try {
     Set-Location $root
     New-Item -ItemType Directory -Force -Path $out | Out-Null
     "PR2 Windows x64 test build log" | Set-Content -LiteralPath $log
-    foreach ($tool in @("git.exe", "node.exe", "npm.cmd", "cargo.exe", "rustup.exe")) {
+    foreach ($tool in @("node.exe", "npm.cmd", "cargo.exe", "rustup.exe")) {
         if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-            throw ("Missing " + $tool + ". Install Git, Node.js LTS and Rust MSVC tools first.")
+            throw ("Missing " + $tool + ". Install Node.js LTS and Rust MSVC tools first.")
         }
     }
     if (-not [Environment]::Is64BitOperatingSystem) { throw "Windows x64 required." }
-    $branch = (& git branch --show-current).Trim()
-    if ($LASTEXITCODE -ne 0 -or $branch -ne "fix/beta3-elif-stability-20261024") {
-        throw ("Wrong branch: " + $branch + ". Select fix/beta3-elif-stability-20261024.")
+    $commit = "source-zip"
+    # Accept both a git checkout and the branch's GitHub Download ZIP source.
+    # Refuse a checkout of a different branch so we do not mislabel its EXE.
+    if (Test-Path -LiteralPath (Join-Path $root ".git")) {
+        if (-not (Get-Command "git.exe" -ErrorAction SilentlyContinue)) {
+            throw "Git checkout detected but git.exe is unavailable."
+        }
+        $branch = (& git branch --show-current).Trim()
+        if ($LASTEXITCODE -ne 0 -or $branch -ne "fix/beta3-elif-stability-20261024") {
+            throw ("Wrong branch: " + $branch + ". Select fix/beta3-elif-stability-20261024.")
+        }
+        $commit = (& git rev-parse --short=12 HEAD).Trim()
+        if ($LASTEXITCODE -ne 0) { throw "Cannot determine Git commit." }
+    } else {
+        Write-Host "[PR2] No .git folder: building downloaded source ZIP, assuming it is the PR2 branch." -ForegroundColor Yellow
     }
-    $commit = (& git rev-parse --short=12 HEAD).Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Cannot determine Git commit." }
     Step "Install npm dependencies" "npm.cmd" @("install")
     $b64Path = Join-Path $root "src-tauri/icons/manager-icon.b64"
     $pngPath = Join-Path $root "src-tauri/icons/manager-icon.png"
