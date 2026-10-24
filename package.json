@@ -21,6 +21,7 @@
     "test:planning-duplicate-loading": "node scripts/test-planning-duplicate-loading.mjs",
     "test:loading-overlay-state": "node scripts/test-loading-overlay-state.mjs",
     "test:expandable-analysis-ui": "node scripts/test-expandable-analysis-ui.mjs",
+    "test:embedded-duplicates-beta3": "node scripts/test-embedded-duplicates-beta3.mjs",
     "test:final-ui-selection": "node scripts/test-final-ui-selection.mjs",
     "test:beta2-interface-final": "node scripts/test-beta2-interface-final.mjs",
     "test:unified-analysis": "node scripts/test-unified-analysis.mjs",
