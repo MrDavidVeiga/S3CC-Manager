@@ -2635,10 +2635,15 @@ function formatMs(value) {
 }
 
 let activeAnalysisExplorerMenu = null;
+let activeAnalysisExplorerTrigger = null;
 
-function closeAnalysisExplorerMenu() {
+function closeAnalysisExplorerMenu(restoreFocus = false) {
   activeAnalysisExplorerMenu?.remove();
   activeAnalysisExplorerMenu = null;
+  if (restoreFocus && activeAnalysisExplorerTrigger?.isConnected) {
+    activeAnalysisExplorerTrigger.focus({ preventScroll: true });
+  }
+  activeAnalysisExplorerTrigger = null;
 }
 
 // A context menu is rendered once at a time, independent of the virtualized
@@ -2678,12 +2683,19 @@ function openAnalysisExplorerMenu(event, members) {
   }
   document.body.appendChild(menu);
   activeAnalysisExplorerMenu = menu;
+  activeAnalysisExplorerTrigger = event.currentTarget;
   const rect = menu.getBoundingClientRect();
   const maxX = Math.max(8, window.innerWidth - rect.width - 8);
   const maxY = Math.max(8, window.innerHeight - rect.height - 8);
-  menu.style.left = `${Math.max(8, Math.min(event.clientX, maxX))}px`;
-  menu.style.top = `${Math.max(8, Math.min(event.clientY, maxY))}px`;
-  menu.querySelector("button")?.focus();
+  // Keyboard context-menu events (Shift+F10/Menu key) can carry x=y=0.
+  // Anchor them to the focused finding instead of the top-left of the screen.
+  const origin = (event.clientX === 0 && event.clientY === 0)
+    ? event.currentTarget?.getBoundingClientRect?.() : null;
+  const x = origin ? origin.left + 12 : event.clientX;
+  const y = origin ? origin.bottom : event.clientY;
+  menu.style.left = `${Math.max(8, Math.min(x, maxX))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
+  menu.querySelector("button")?.focus({ preventScroll: true });
 }
 
 document.addEventListener("pointerdown", (event) => {
@@ -2694,7 +2706,15 @@ document.addEventListener("pointerdown", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && activeAnalysisExplorerMenu) {
     event.preventDefault();
-    closeAnalysisExplorerMenu();
+    closeAnalysisExplorerMenu(true);
+  } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && activeAnalysisExplorerMenu) {
+    const items = [...activeAnalysisExplorerMenu.querySelectorAll('[role="menuitem"]')];
+    if (!items.length) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement);
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    const next = current < 0 ? 0 : (current + delta + items.length) % items.length;
+    items[next].focus({ preventScroll: true });
   }
 });
 window.addEventListener("scroll", (event) => {
