@@ -25,7 +25,8 @@
     "test:final-ui-selection": "node scripts/test-final-ui-selection.mjs",
     "test:beta2-interface-final": "node scripts/test-beta2-interface-final.mjs",
     "test:unified-analysis": "node scripts/test-unified-analysis.mjs",
-    "test:audit-reference-evidence": "node scripts/test-audit-reference-evidence.mjs"
+    "test:audit-reference-evidence": "node scripts/test-audit-reference-evidence.mjs",
+    "test:elif-health-explorer": "node scripts/test-elif-health-explorer.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
