@@ -1,0 +1,97 @@
+name: Beta 3 PR2 - Portable Windows x64 Test Build
+
+on:
+  push:
+    branches:
+      - fix/beta3-elif-stability-20261024
+    paths:
+      - ".github/workflows/beta3-pr2-windows-portable.yml"
+      - "src/**"
+      - "src-tauri/**"
+      - "index.html"
+      - "package.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    name: Windows x64 portable EXE
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Checkout PR2 source
+        uses: actions/checkout@v5
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Install Rust MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+      - name: Install frontend dependencies
+        run: npm install
+      - name: Restore base icon
+        shell: pwsh
+        run: |
+          $raw = (Get-Content -LiteralPath 'src-tauri/icons/manager-icon.b64' -Raw).Trim()
+          [System.IO.File]::WriteAllBytes('src-tauri/icons/manager-icon.png', [Convert]::FromBase64String($raw))
+      - name: Generate Tauri icons
+        run: npm run tauri icon src-tauri/icons/manager-icon.png
+      - name: Build real portable executable
+        id: build
+        shell: pwsh
+        run: |
+          npm run tauri build -- --target x86_64-pc-windows-msvc --no-bundle 2>&1 | Tee-Object -FilePath pr2-build.log
+          if ($LASTEXITCODE -ne 0) { throw "Windows executable compilation failed; see pr2-build.log" }
+      - name: Package Windows x64 test EXE
+        if: steps.build.outcome == 'success'
+        shell: pwsh
+        run: |
+          $file = 'src-tauri/target/x86_64-pc-windows-msvc/release/s3cc-organizer.exe'
+          if (!(Test-Path -LiteralPath $file)) {
+            $file = 'src-tauri/target/release/s3cc-organizer.exe'
+          }
+          if (!(Test-Path -LiteralPath $file)) { throw 'EXE not found after successful Tauri build' }
+          New-Item -ItemType Directory -Force -Path pr2-test | Out-Null
+          Copy-Item -LiteralPath $file -Destination "pr2-test/Veiga's S3CC Manager - PR2 Beta3.exe"
+          @"
+          Veiga's S3CC Manager - Beta 3, PR #2 Windows x64 TEST BUILD
+          Source commit: ${{ github.sha }}
+          Not an official release. For testing only.
+          Use a BACKUP / COPY of your Sims 3 Mods folder.
+          Test Duplicates scroll/expand/collapse, Conflicts expand/collapse,
+          Health progress and Cancel. Report problems for correction.
+          "@ | Set-Content -LiteralPath pr2-test/LEIA-ME-TESTE.txt -Encoding UTF8
+          Compress-Archive -Path 'pr2-test/*' -DestinationPath 'S3CC-Manager-Beta3-PR2-Windows-x64.zip' -Force
+          $sha = (Get-FileHash -LiteralPath 'S3CC-Manager-Beta3-PR2-Windows-x64.zip' -Algorithm SHA256).Hash
+          "$sha  S3CC-Manager-Beta3-PR2-Windows-x64.zip" | Set-Content -LiteralPath SHA256.txt -Encoding ASCII
+      - name: Upload EXE and ZIP for testing
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: S3CC-Manager-Beta3-PR2-Windows-x64
+          path: |
+            pr2-test/*.exe
+            pr2-test/*.txt
+            S3CC-Manager-Beta3-PR2-Windows-x64.zip
+            SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build log even if compilation fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: S3CC-Manager-Beta3-PR2-Build-Diagnostics
+          path: |
+            pr2-build.log
+          if-no-files-found: ignore
+          retention-days: 14
