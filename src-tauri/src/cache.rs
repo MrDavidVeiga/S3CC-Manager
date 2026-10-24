@@ -1296,6 +1296,7 @@ pub fn clear_cache(folder: String) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn write_empty_dbpf(path: &Path, minor: u32) {
         let mut bytes = vec![0u8; 96];
