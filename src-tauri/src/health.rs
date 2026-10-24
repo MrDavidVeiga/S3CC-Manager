@@ -1,5 +1,5 @@
 use crate::{
-    cache::{get_or_build_analysis_with_metrics, load_cache, retain_existing, save_cache},
+    cache::{get_or_build_health_with_metrics, load_cache, retain_existing, save_cache},
     operation,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     structure_manager::{append_log, ManualOperationRecord},
@@ -290,7 +290,7 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
         stats.packages+=1;
         package_paths.push(e.path().to_path_buf());
 
-        match get_or_build_analysis_with_metrics(e.path(),&mut cache) {
+        match get_or_build_health_with_metrics(e.path(),&mut cache) {
             Ok((cached,metrics))=>{
                 if metrics.cache_hit {stats.cache_hits+=1;} else {stats.cache_misses+=1;}
                 if let Some(error)=cached.parse_error {
@@ -325,6 +325,9 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
                 }
             }
             Err(error)=>{
+                if error == operation::CANCELLED_ERROR {
+                    return Err(error);
+                }
                 stats.scan_errors+=1;
                 findings.push(finding("scan_error","warning",&relative,error));
             }
