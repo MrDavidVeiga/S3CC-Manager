@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 pub fn uncompress_stream(input: &[u8], file_size: usize, mem_size: usize) -> Result<Vec<u8>> {
-    uncompress_stream_inner(input, file_size, mem_size, None)
+    let mut never_cancel = || false;
+    uncompress_stream_inner(input, file_size, mem_size, None, &mut never_cancel)
 }
 
 /// Decompress and hash the exact decompressed payload in one pass. The
@@ -15,7 +16,22 @@ pub fn uncompress_stream_with_digest(
     mem_size: usize,
 ) -> Result<(Vec<u8>, [u8; 32])> {
     let mut digest = Sha256::new();
-    let output = uncompress_stream_inner(input, file_size, mem_size, Some(&mut digest))?;
+    let mut never_cancel = || false;
+    let output = uncompress_stream_inner(input, file_size, mem_size, Some(&mut digest), &mut never_cancel)?;
+    Ok((output, digest.finalize().into()))
+}
+
+/// Same decoded data and SHA-256 as the normal decoder, but Health can cancel
+/// even inside a very large compressed resource, rather than waiting until the
+/// whole resource has finished decoding.
+pub fn uncompress_stream_with_digest_cancellable<F: FnMut() -> bool>(
+    input: &[u8],
+    file_size: usize,
+    mem_size: usize,
+    mut cancelled: F,
+) -> Result<(Vec<u8>, [u8; 32])> {
+    let mut digest = Sha256::new();
+    let output = uncompress_stream_inner(input, file_size, mem_size, Some(&mut digest), &mut cancelled)?;
     Ok((output, digest.finalize().into()))
 }
 
@@ -24,6 +40,7 @@ fn uncompress_stream_inner(
     file_size: usize,
     mem_size: usize,
     mut digest: Option<&mut Sha256>,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Vec<u8>> {
     if input.len() < file_size {
         bail!("input shorter than declared file_size");
@@ -55,8 +72,16 @@ fn uncompress_stream_inner(
     }
 
     let mut out = Vec::with_capacity(mem_size);
+    let mut chunks = 0usize;
     while !input.is_empty() {
+        if chunks % 256 == 0 && cancelled() {
+            bail!("{}", crate::operation::CANCELLED_ERROR);
+        }
         dechunk(&mut input, &mut out, digest.as_deref_mut()).context("dechunk failed")?;
+        chunks += 1;
+    }
+    if cancelled() {
+        bail!("{}", crate::operation::CANCELLED_ERROR);
     }
     if out.len() != mem_size {
         bail!(
