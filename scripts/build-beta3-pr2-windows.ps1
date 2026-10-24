@@ -12,9 +12,20 @@ function Step {
     param([string]$Name, [string]$Program, [string[]]$ArgsList)
     Write-Host ("[PR2] " + $Name) -ForegroundColor Cyan
     Add-Content -LiteralPath $log -Value ("==== " + $Name + " ====")
-    & $Program @ArgsList 2>&1 | Tee-Object -FilePath $log -Append | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw ("Failed: " + $Name + " (exit " + $LASTEXITCODE + "). Log: " + $log)
+    # Windows PowerShell 5.1 can promote harmless compiler stderr output to a
+    # terminating NativeCommandError when ErrorActionPreference is Stop.
+    # Capture the native process exit code explicitly instead.
+    $priorAction = $ErrorActionPreference
+    $exitCode = 0
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Program @ArgsList 2>&1 | Tee-Object -FilePath $log -Append | Out-Host
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $priorAction
+    }
+    if ($exitCode -ne 0) {
+        throw ("Failed: " + $Name + " (exit " + $exitCode + "). Log: " + $log)
     }
 }
 try {
