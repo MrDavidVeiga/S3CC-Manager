@@ -1,7 +1,7 @@
 use crate::compression;
 use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
@@ -436,6 +436,70 @@ impl Package {
                 );
         }
         Ok((data, digest))
+    }
+
+    /// Health-only, read-only fingerprint. Uncompressed DBPF resources are
+    /// hashed in bounded 4 MiB positioned reads; compressed QFS resources
+    /// are decoded one at a time with cooperative cancellation. The bytes
+    /// and SHA-256 remain identical to data_with_digest(), but no resource
+    /// payload is retained in Package's scanner cache.
+    pub fn health_resource_digest(
+        &self,
+        entry: &ResourceEntry,
+    ) -> Result<([u8; 32], usize)> {
+        if entry.mem_size > MAX_RESOURCE_MEMORY {
+            bail!(
+                "resource {} declares unsupported decompressed size {} bytes",
+                entry.key_string(),
+                entry.mem_size
+            );
+        }
+        if crate::operation::is_cancelled("health") {
+            bail!("{}", crate::operation::CANCELLED_ERROR);
+        }
+        match entry.compressed {
+            0x0000 => {
+                if entry.file_size != entry.mem_size {
+                    bail!(
+                        "resource {} is marked uncompressed but disk size {} != memory size {}",
+                        entry.key_string(),
+                        entry.file_size,
+                        entry.mem_size
+                    );
+                }
+                const BLOCK: usize = 4 * 1024 * 1024;
+                let mut buffer = vec![0u8; BLOCK.min((entry.file_size as usize).max(1))];
+                let mut hasher = Sha256::new();
+                let mut remaining = entry.file_size as usize;
+                let mut offset = entry.chunk_offset as u64;
+                while remaining > 0 {
+                    if crate::operation::is_cancelled("health") {
+                        bail!("{}", crate::operation::CANCELLED_ERROR);
+                    }
+                    let count = remaining.min(buffer.len());
+                    read_exact_at(&self.data_file, offset, &mut buffer[..count])?;
+                    hasher.update(&buffer[..count]);
+                    offset += count as u64;
+                    remaining -= count;
+                }
+                Ok((hasher.finalize().into(), entry.mem_size as usize))
+            }
+            0xFFFF => {
+                let raw = self.raw_data(entry)?;
+                if crate::operation::is_cancelled("health") {
+                    bail!("{}", crate::operation::CANCELLED_ERROR);
+                }
+                let (decoded, digest) = compression::uncompress_stream_with_digest_cancellable(
+                    &raw, entry.file_size as usize, entry.mem_size as usize,
+                    || crate::operation::is_cancelled("health")
+                )?;
+                Ok((digest, decoded.len()))
+            }
+            other => bail!(
+                "resource {} uses unsupported compression flag 0x{other:04X}",
+                entry.key_string()
+            ),
+        }
     }
 }
 
