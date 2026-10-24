@@ -604,4 +604,33 @@ mod tests {
         drop(package);
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn health_streams_a_multi_block_payload_with_exact_sha256_and_no_payload_cache() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "s3cc-health-four-mib-{}-{unique}.package", std::process::id()
+        ));
+        let data = vec![0xACu8; 4 * 1024 * 1024 + 29];
+        std::fs::write(&path, &data).unwrap();
+        let entry = ResourceEntry {
+            type_id: 0x0166_038C, group: 0, instance: 53, chunk_offset: 0,
+            file_size: data.len() as u32, mem_size: data.len() as u32,
+            compressed: 0, unknown2: 0, file_size_high_bit: false,
+        };
+        let package = Package {
+            path: path.clone(), major: 2, minor: 0, entries: vec![entry.clone()],
+            payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_file: Arc::new(File::open(&path).unwrap()),
+        };
+        let (digest, size) = package.health_resource_digest(&entry).unwrap();
+        let expected: [u8; 32] = Sha256::digest(&data).into();
+        assert_eq!(digest, expected);
+        assert_eq!(size, data.len());
+        assert!(package.payload_cache.lock().unwrap().is_empty(),
+            "Health must not retain full resource bytes in scanner cache");
+        drop(package);
+        std::fs::remove_file(path).unwrap();
+    }
 }
