@@ -314,8 +314,8 @@ mod tests {
     #[test] fn reject_missing_ownership() {
         let bad = SAMPLE.replace("resourceCount=\"2\"", "resourceCount=\"3\"");
         assert!(parse_merge_manifest(&bad).is_err());
-        let bad = SAMPLE.replace("key=\"0x034AEECB-0x18000000-0x0000000000000003\" />",
-            "key=\"0x034AEECB-0x18000000-0x0000000000000999\" />");
+        let bad = SAMPLE.replacen("key=\"0x034AEECB-0x18000000-0x0000000000000003\"",
+            "key=\"0x034AEECB-0x18000000-0x0000000000000999\"", 1);
         assert!(parse_merge_manifest(&bad).is_err());
     }
     #[test] fn exact_content_fingerprints_ignore_source_names() {
