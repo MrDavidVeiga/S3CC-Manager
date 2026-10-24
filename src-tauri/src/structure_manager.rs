@@ -643,6 +643,17 @@ pub fn undo_last_manual_operation(folder: String) -> Result<StructureActionResul
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::{Mutex, OnceLock};
+
+    // run_mutating_sync deliberately rejects concurrent operations with the
+    // same kind, even when the scopes are different. These two integration
+    // tests are independent and must not race one another in cargo's default
+    // parallel test harness.
+    fn mutation_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn temp_root() -> PathBuf {
         let nonce = SystemTime::now()
@@ -678,6 +689,7 @@ mod tests {
 
     #[test]
     fn create_move_and_rename_workflow() {
+        let _serial = mutation_test_lock();
         let root = temp_root();
         let root_text = root.to_string_lossy().to_string();
 
@@ -724,6 +736,7 @@ mod tests {
 
     #[test]
     fn move_refuses_existing_destination() {
+        let _serial = mutation_test_lock();
         let root = temp_root();
         let root_text = root.to_string_lossy().to_string();
         fs::create_dir_all(root.join("Target")).unwrap();

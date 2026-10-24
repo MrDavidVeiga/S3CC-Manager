@@ -1,4 +1,4 @@
-use crate::{dbpf::Package, manifest::sha256_file};
+use crate::{dbpf::Package, manifest::sha256_file, operation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,6 +19,35 @@ const IDENTITY_CACHE_VERSION: u32 = 1;
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
+
+fn ensure_analysis_not_cancelled(kind: Option<&str>) -> Result<(), String> {
+    if kind.is_some_and(operation::is_cancelled) {
+        return Err(operation::CANCELLED_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// Stream file identity on the cold Health path, checking cancellation after
+/// each 4 MiB block. Other users retain their original full-integrity path.
+fn sha256_file_health(path: &Path) -> Result<(String, u64), String> {
+    const BLOCK: usize = 4 * 1024 * 1024;
+    let mut file = File::open(path)
+        .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let size = file.metadata()
+        .map_err(|error| format!("Could not stat {}: {error}", path.display()))?.len();
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; size.min(BLOCK as u64).max(1) as usize];
+    loop {
+        ensure_analysis_not_cancelled(Some("health"))?;
+        let count = file.read(&mut buffer)
+            .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+        if count == 0 { break; }
+        hasher.update(&buffer[..count]);
+    }
+    ensure_analysis_not_cancelled(Some("health"))?;
+    Ok((format!("{:X}", hasher.finalize()), size))
 }
 
 fn cache_write_lock() -> &'static Mutex<()> {
@@ -681,7 +710,7 @@ pub fn get_or_build_with_metrics(
     path: &Path,
     cache: &mut FingerprintCache,
 ) -> Result<(CachedPackage, CacheBuildMetrics), String> {
-    get_or_build_with_validation(path, cache, true)
+    get_or_build_with_validation(path, cache, true, None)
 }
 
 /// Read-only UI/health consumers can use a bounded content probe. It avoids
@@ -692,7 +721,17 @@ pub fn get_or_build_analysis_with_metrics(
     path: &Path,
     cache: &mut FingerprintCache,
 ) -> Result<(CachedPackage, CacheBuildMetrics), String> {
-    get_or_build_with_validation(path, cache, false)
+    get_or_build_with_validation(path, cache, false, None)
+}
+
+/// Health preserves the full resource integrity analysis and its shared cache,
+/// but reads uncompressed resource payloads in bounded blocks and can cancel
+/// during file hashing and QFS decompression.
+pub fn get_or_build_health_with_metrics(
+    path: &Path,
+    cache: &mut FingerprintCache,
+) -> Result<(CachedPackage, CacheBuildMetrics), String> {
+    get_or_build_with_validation(path, cache, false, Some("health"))
 }
 
 /// Stores a complete package resource index while the caller already owns a
@@ -931,11 +970,29 @@ fn decode_resource_fingerprints(
     ))
 }
 
+fn ensure_health_source_unchanged(
+    path: &Path,
+    size: u64,
+    modified_ns: u128,
+    cancellation_kind: Option<&str>,
+) -> Result<(), String> {
+    ensure_analysis_not_cancelled(cancellation_kind)?;
+    if cancellation_kind == Some("health") && metadata_signature(path)? != (size, modified_ns) {
+        return Err(format!(
+            "Package changed while Health was reading it; retry analysis: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn get_or_build_with_validation(
     path: &Path,
     cache: &mut FingerprintCache,
     require_integrity: bool,
+    cancellation_kind: Option<&str>,
 ) -> Result<(CachedPackage, CacheBuildMetrics), String> {
+    ensure_analysis_not_cancelled(cancellation_kind)?;
     let total_started = Instant::now();
     let key = canonical_key(path)?;
     let (size, modified_ns) = metadata_signature(path)?;
@@ -949,6 +1006,7 @@ fn get_or_build_with_validation(
                 let hash_ms = hash_started.elapsed().as_millis();
                 let hash_us = hash_started.elapsed().as_micros();
                 if existing.file_sha256.eq_ignore_ascii_case(&file_sha256) {
+                    ensure_health_source_unchanged(path, size, modified_ns, cancellation_kind)?;
                     return Ok((
                         existing.clone(),
                         CacheBuildMetrics {
@@ -968,6 +1026,7 @@ fn get_or_build_with_validation(
                 let quick_fingerprint_ms = quick_started.elapsed().as_millis();
                 let quick_fingerprint_us = quick_started.elapsed().as_micros();
                 if existing.quick_fingerprint == fingerprint {
+                    ensure_health_source_unchanged(path, size, modified_ns, cancellation_kind)?;
                     return Ok((
                         existing.clone(),
                         CacheBuildMetrics {
@@ -985,9 +1044,19 @@ fn get_or_build_with_validation(
         }
     }
 
+    if cancellation_kind == Some("health") {
+        operation::set_message("health", Some(format!(
+            "Reading {} in 4 MiB blocks",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        )));
+    }
     let hash_started = Instant::now();
-    let (file_sha256, _) =
-        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let (file_sha256, _) = if cancellation_kind == Some("health") {
+        sha256_file_health(path)?
+    } else {
+        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?
+    };
+    ensure_analysis_not_cancelled(cancellation_kind)?;
     let hash_ms = hash_started.elapsed().as_millis();
     let hash_us = hash_started.elapsed().as_micros();
     if let Some(existing) = cache.entries.get(&key) {
@@ -997,6 +1066,7 @@ fn get_or_build_with_validation(
         {
             let mut refreshed = existing.clone();
             refreshed.quick_fingerprint = quick_fingerprint(path, size)?;
+            ensure_health_source_unchanged(path, size, modified_ns, cancellation_kind)?;
             cache.entries.insert(key, refreshed.clone());
             return Ok((
                 refreshed,
@@ -1036,6 +1106,15 @@ fn get_or_build_with_validation(
             let mut resources = Vec::with_capacity(package.entries.len());
             let mut parse_error = None;
             for (entry_index, entry) in package.entries.iter().enumerate() {
+                ensure_analysis_not_cancelled(cancellation_kind)?;
+                if cancellation_kind == Some("health") && (entry_index % 256 == 0) {
+                    operation::set_message("health", Some(format!(
+                        "Validating resource {}/{} in {}",
+                        entry_index + 1,
+                        package.entries.len(),
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )));
+                }
                 if entry_index % 1000 == 0 && package.entries.len() >= 1000 {
                     eprintln!(
                         "reference cache: {} resource {}/{}",
@@ -1044,24 +1123,36 @@ fn get_or_build_with_validation(
                         package.entries.len()
                     );
                 }
-                let result = package.data_with_digest(entry);
+                // Health needs the same decoded payload SHA-256, but does not
+                // need to retain whole IMG/GEOM/TONE resources in memory.
+                // Use the one-resource streaming path instead of scanner cache.
+                let result = if cancellation_kind == Some("health") {
+                    package.health_resource_digest(entry).map(|(digest, size)| (size, digest))
+                } else {
+                    package.data_with_digest(entry).map(|(data, digest)| (data.len(), digest))
+                };
                 match result {
-                    Ok((data, payload_digest)) => resources.push(CachedResource {
+                    Ok((payload_size, payload_digest)) => resources.push(CachedResource {
                         type_id: entry.type_id,
                         group: entry.group,
                         instance: entry.instance,
                         payload_sha256: digest_hex(&payload_digest),
-                        payload_size: data.len(),
+                        payload_size,
                         file_size: entry.file_size,
                         mem_size: entry.mem_size,
                         compressed: entry.compressed,
                     }),
                     Err(error) => {
+                        if cancellation_kind == Some("health")
+                            && error.to_string().contains(operation::CANCELLED_ERROR) {
+                            return Err(operation::CANCELLED_ERROR.to_string());
+                        }
                         parse_error = Some(format!("{}: {error}", entry.key_string()));
                         break;
                     }
                 }
             }
+            ensure_analysis_not_cancelled(cancellation_kind)?;
 
             CachedPackage {
                 path: key.clone(),
@@ -1090,6 +1181,7 @@ fn get_or_build_with_validation(
     let resource_decode_ms = decode_started.elapsed().as_millis();
     let resource_decode_us = decode_started.elapsed().as_micros();
 
+    ensure_health_source_unchanged(path, size, modified_ns, cancellation_kind)?;
     cache.entries.insert(key, built.clone());
     Ok((
         built,
@@ -1204,6 +1296,7 @@ pub fn clear_cache(folder: String) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn write_empty_dbpf(path: &Path, minor: u32) {
         let mut bytes = vec![0u8; 96];
@@ -1292,6 +1385,39 @@ mod tests {
             "analysis_cache_changed hash_ms={} hash_us={} quick_fingerprint_ms={} quick_fingerprint_us={} total_ms={} total_us={}",
             second.hash_ms, second.hash_us, second.quick_fingerprint_ms, second.quick_fingerprint_us, second.total_ms, second.total_us
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn health_unchanged_guard_prevents_cache_of_mutating_source() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-health-source-guard-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("working.package");
+        write_empty_dbpf(&path, 1);
+        let (size, modified_ns) = metadata_signature(&path).unwrap();
+        assert!(ensure_health_source_unchanged(&path, size, modified_ns, Some("health")).is_ok());
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap()
+            .write_all(b"simulated update in progress").unwrap();
+        assert!(ensure_health_source_unchanged(&path, size, modified_ns, Some("health"))
+            .unwrap_err().contains("changed while Health was reading"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn health_streaming_file_hash_equals_strict_hash_for_multiple_blocks() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-health-block-hash-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("large.package");
+        std::fs::write(&path, vec![0x7Fu8; 4 * 1024 * 1024 + 131]).unwrap();
+        let actual = sha256_file_health(&path).unwrap();
+        let expected = sha256_file(&path).unwrap();
+        assert_eq!(actual, expected);
         std::fs::remove_dir_all(root).unwrap();
     }
 

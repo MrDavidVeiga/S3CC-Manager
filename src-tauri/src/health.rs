@@ -1,5 +1,5 @@
 use crate::{
-    cache::{get_or_build_analysis_with_metrics, load_cache, retain_existing, save_cache},
+    cache::{get_or_build_health_with_metrics, load_cache, retain_existing, save_cache},
     operation,
     resource_cfg::{find_resource_cfg, package_priority, parse_resource_cfg, ResourceCfgInfo},
     structure_manager::{append_log, ManualOperationRecord},
@@ -88,15 +88,23 @@ fn is_package(path:&Path)->bool{
 fn rel(root:&Path,path:&Path)->String{
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('/',"\\")
 }
-fn empty_dirs(root:&Path)->Vec<String>{
+// Reuse directory paths collected during the first WalkDir pass. A second
+// recursive walk was needlessly re-enumerating the same large Mods tree.
+// Check the real filesystem for emptiness so unreadable/incomplete branches
+// are never incorrectly classified as removable.
+fn empty_dirs(root:&Path, directories:&[PathBuf])->Result<Vec<String>,String>{
     let mut out=Vec::new();
-    for e in walkdir::WalkDir::new(root).follow_links(false).min_depth(1).into_iter().filter_map(Result::ok){
-        if operation::is_cancelled("health") { break; }
-        if !e.file_type().is_dir(){continue;}
-        let is_empty=fs::read_dir(e.path()).map(|mut it|it.next().is_none()).unwrap_or(false);
-        if is_empty{out.push(rel(root,e.path()));}
+    for dir in directories {
+        if operation::is_cancelled("health") {
+            return Err(operation::CANCELLED_ERROR.to_string());
+        }
+        let is_empty=fs::read_dir(dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if is_empty { out.push(rel(root,dir)); }
     }
-    out.sort_by_key(|v|v.to_ascii_lowercase());out
+    out.sort_by_key(|v|v.to_ascii_lowercase());
+    Ok(out)
 }
 fn outside_packages(root:&Path)->Vec<String>{
     let Some(mods_root)=root
@@ -108,10 +116,17 @@ fn outside_packages(root:&Path)->Vec<String>{
     let mut visited=std::collections::HashSet::new();
     for branch in [mods_root.join("Packages"), mods_root.join("Overrides")] {
         if !branch.is_dir(){continue;}
-        for item in walkdir::WalkDir::new(&branch).follow_links(false).into_iter() {
+        // The selected tree was already examined. If an entire branch is
+        // inside it, skip that branch; otherwise prune the selected subtree
+        // before WalkDir descends, rather than traversing it all over again.
+        if branch.starts_with(root) { continue; }
+        for item in walkdir::WalkDir::new(&branch)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| !entry.path().starts_with(root)) {
             if operation::is_cancelled("health") { return out; }
             let Ok(entry)=item else { continue };
-            if !entry.file_type().is_file() || !is_package(entry.path()) || entry.path().starts_with(root){continue;}
+            if !entry.file_type().is_file() || !is_package(entry.path()){continue;}
             let Ok(path)=entry.path().canonicalize() else { continue };
             if visited.insert(path.clone()) {
                 out.push(path.to_string_lossy().to_string());
@@ -249,12 +264,15 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
     // without walking the same library twice (expensive on large/slow drives).
     operation::update("health", 0, None, "discovering");
     let mut file_entries = Vec::new();
+    let mut directories = Vec::new();
     for item in walkdir::WalkDir::new(&root).follow_links(false).into_iter() {
         if operation::is_cancelled("health") {
             return Err(operation::CANCELLED_ERROR.to_string());
         }
         match item {
             Ok(entry) if entry.file_type().is_file() => file_entries.push(entry),
+            Ok(entry) if entry.file_type().is_dir() && entry.path() != root.as_path() =>
+                directories.push(entry.into_path()),
             Ok(_) => {},
             Err(error) => {
                 stats.scan_errors += 1;
@@ -290,7 +308,7 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
         stats.packages+=1;
         package_paths.push(e.path().to_path_buf());
 
-        match get_or_build_analysis_with_metrics(e.path(),&mut cache) {
+        match get_or_build_health_with_metrics(e.path(),&mut cache) {
             Ok((cached,metrics))=>{
                 if metrics.cache_hit {stats.cache_hits+=1;} else {stats.cache_misses+=1;}
                 if let Some(error)=cached.parse_error {
@@ -325,6 +343,9 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
                 }
             }
             Err(error)=>{
+                if error == operation::CANCELLED_ERROR {
+                    return Err(error);
+                }
                 stats.scan_errors+=1;
                 findings.push(finding("scan_error","warning",&relative,error));
             }
@@ -363,7 +384,7 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
         return Err(operation::CANCELLED_ERROR.to_string());
     }
     coverage.sort_by_key(|e|e.relative_path.to_ascii_lowercase());
-    let empty=empty_dirs(&root);
+    let empty=empty_dirs(&root,&directories)?;
     if operation::is_cancelled("health") {
         return Err(operation::CANCELLED_ERROR.to_string());
     }
@@ -434,6 +455,64 @@ mod health_diagnostic_tests {
         let a=finding("repeated_tgi","warning","a.package","0x0001");
         let b=finding("repeated_tgi","warning","a.package","0x0002");
         assert_ne!(a.id,b.id);
+    }
+
+    #[test]
+    fn empty_directory_detection_reuses_first_pass_and_ignores_nonempty_or_unreadable() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "s3cc-health-empties-{}-{unique}", std::process::id()
+        ));
+        let empty = root.join("Empty");
+        let full = root.join("WithContent");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&full).unwrap();
+        std::fs::write(full.join("test.txt"), b"ok").unwrap();
+        let result=empty_dirs(&root,&[empty.clone(),full.clone(),root.join("Missing")]).unwrap();
+        assert_eq!(result,vec!["Empty".to_string()]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn outside_packages_skips_packages_inside_selected_mods_root() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let mods = std::env::temp_dir().join(format!(
+            "s3cc-health-root-{}-{unique}", std::process::id()
+        )).join("Mods");
+        let packages=mods.join("Packages");
+        let overrides=mods.join("Overrides");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(packages.join("a.package"), b"fixture").unwrap();
+        std::fs::write(overrides.join("b.package"), b"fixture").unwrap();
+        assert!(outside_packages(&mods).is_empty(),
+            "Both package branches are already included in the analyzed Mods root");
+        let result=outside_packages(&packages);
+        assert_eq!(result.len(),1,
+            "When analyzing Packages, only sibling Overrides should count as outside");
+        assert!(result[0].ends_with("b.package"));
+        std::fs::remove_dir_all(mods.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn outside_packages_skips_only_selected_subfolder_not_its_siblings() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let mods = std::env::temp_dir().join(format!(
+            "s3cc-health-subtree-{}-{unique}", std::process::id()
+        )).join("Mods");
+        let selected=mods.join("Packages").join("Selected");
+        let other=mods.join("Packages").join("Other");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(selected.join("selected.package"), b"fixture").unwrap();
+        std::fs::write(other.join("other.package"), b"fixture").unwrap();
+        let result=outside_packages(&selected);
+        assert_eq!(result.len(),1);
+        assert!(result[0].ends_with("other.package"));
+        std::fs::remove_dir_all(mods.parent().unwrap()).unwrap();
     }
 
     #[test]

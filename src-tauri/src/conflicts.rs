@@ -1198,6 +1198,46 @@ mod tests {
     }
 
     #[test]
+    fn conflict_precedence_matrix_never_invents_a_winner() {
+        let package = |name: &str, priority: Option<i32>| PackageInfo {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            relative_path: PathBuf::from(name),
+            file_sha256: format!("test-{name}"),
+            readable: true,
+            resource_count: 0,
+            resource_set_sha256: None,
+            load_priority: priority,
+            load_rule: priority.map(|_| "Packages/*.package".into()),
+        };
+        let left = package("left.package", Some(1000));
+        let right = package("right.package", Some(500));
+        let (status, winner, _) = load_order_info(&left, &right, true, true);
+        assert_eq!(status, "resolved_by_priority");
+        assert_eq!(winner.as_deref(), Some("left.package"));
+        let (status, winner, _) = load_order_info(&right, &left, true, true);
+        assert_eq!(status, "resolved_by_priority");
+        assert_eq!(winner.as_deref(), Some("left.package"));
+        let equal = package("equal.package", Some(1000));
+        let (status, winner, _) = load_order_info(&left, &equal, true, true);
+        assert_eq!(status, "same_priority");
+        assert_eq!(winner, None);
+        let no_rule = package("no-rule.package", None);
+        let (status, winner, _) = load_order_info(&left, &no_rule, true, true);
+        assert_eq!(status, "partially_matched");
+        assert!(winner.is_none());
+        let (status, winner, _) = load_order_info(&no_rule, &no_rule, true, true);
+        assert_eq!(status, "unmatched");
+        assert!(winner.is_none());
+        let (status, winner, _) = load_order_info(&no_rule, &no_rule, false, false);
+        assert_eq!(status, "resource_cfg_missing");
+        assert!(winner.is_none());
+        let (status, winner, _) = load_order_info(&left, &right, true, false);
+        assert_eq!(status, "advanced_cfg_unresolved");
+        assert!(winner.is_none());
+    }
+
+    #[test]
     fn advanced_resource_cfg_does_not_claim_a_winner() {
         let package = |name: &str, priority: i32| PackageInfo {
             name: name.to_string(),

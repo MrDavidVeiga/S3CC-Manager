@@ -1,0 +1,130 @@
+name: Beta 3 Elif Health and Explorer - Windows x64
+
+on:
+  push:
+    branches:
+      - fix/beta3-elif-health-read-and-explorer-20261024
+  pull_request:
+    branches:
+      - fix/beta3-elif-stability-20261024
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validations:
+    name: PR4 Rust and frontend regressions
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+      - name: Install JS dependencies
+        run: npm install
+      - name: Restore application icon
+        shell: pwsh
+        run: |
+          $raw = (Get-Content src-tauri/icons/manager-icon.b64 -Raw).Trim()
+          [IO.File]::WriteAllBytes('src-tauri/icons/manager-icon.png', [Convert]::FromBase64String($raw))
+      - name: Generate icons
+        run: npm run tauri icon src-tauri/icons/manager-icon.png
+      - name: Check syntax and Elif regressions
+        run: |
+          node --check src/app.js
+          npm run test:elif-health-explorer
+          npm run test:beta3-elif-stability
+          npm run test:expandable-analysis-ui
+          npm run test:health-diagnostics
+          npm run test:analysis-action-flow
+          npm run test:final-ui-selection
+          npm run test:loading-overlay-state
+          npm run test:performance-architecture
+      - name: Production frontend
+        run: npm run build
+      - name: Full Rust library tests
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib 2>&1 | Tee-Object -FilePath pr4-rust-test.log
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: PR4-Rust-test-diagnostics
+          path: pr4-rust-test.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  portable:
+    name: PR4 Windows x64 real executable
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+      - name: Install JS dependencies
+        run: npm install
+      - name: Restore application icon
+        shell: pwsh
+        run: |
+          $raw = (Get-Content src-tauri/icons/manager-icon.b64 -Raw).Trim()
+          [IO.File]::WriteAllBytes('src-tauri/icons/manager-icon.png', [Convert]::FromBase64String($raw))
+      - name: Generate icons
+        run: npm run tauri icon src-tauri/icons/manager-icon.png
+      - name: Compile portable Tauri app
+        shell: pwsh
+        run: |
+          npm run tauri build -- --target x86_64-pc-windows-msvc --no-bundle 2>&1 | Tee-Object -FilePath pr4-build.log
+          if ($LASTEXITCODE -ne 0) { throw 'Windows EXE build failed; see pr4-build.log' }
+      - name: Package EXE and instructions
+        shell: pwsh
+        run: |
+          $exe = 'src-tauri/target/x86_64-pc-windows-msvc/release/s3cc-organizer.exe'
+          if (!(Test-Path $exe)) { $exe = 'src-tauri/target/release/s3cc-organizer.exe' }
+          if (!(Test-Path $exe)) { throw 'Native EXE not found' }
+          New-Item -ItemType Directory -Force -Path pr4-portable | Out-Null
+          Copy-Item $exe "pr4-portable/Veiga's S3CC Manager - Elif Health Explorer Beta3.exe"
+          @"
+          Veiga's S3CC Manager - Beta 3 / PR #4 - Windows x64 TEST
+          Source commit: ${{ github.sha }}
+          Based on tested PR #2 plus Health streaming, QFS cancellation and
+          right-click Explorer reveal for Duplicates and Conflicts.
+          Not an official release. Use a COPY of your Mods folder.
+          Report freezes, scroll/reveal behavior, or crashes.
+          "@ | Set-Content pr4-portable/LEIA-ME-TESTE.txt -Encoding UTF8
+          Compress-Archive -Path pr4-portable/* -DestinationPath S3CC-Manager-Beta3-Elif-PR4-Windows-x64.zip -Force
+          $hash = (Get-FileHash S3CC-Manager-Beta3-Elif-PR4-Windows-x64.zip -Algorithm SHA256).Hash
+          "$hash  S3CC-Manager-Beta3-Elif-PR4-Windows-x64.zip" | Set-Content PR4-SHA256.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: S3CC-Manager-Beta3-Elif-PR4-Windows-x64
+          path: |
+            pr4-portable/*.exe
+            pr4-portable/*.txt
+            S3CC-Manager-Beta3-Elif-PR4-Windows-x64.zip
+            PR4-SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PR4-Windows-Build-Logs
+          path: pr4-build.log
+          if-no-files-found: ignore
+          retention-days: 14

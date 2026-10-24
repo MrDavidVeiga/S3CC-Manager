@@ -1,7 +1,7 @@
 use crate::compression;
 use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
@@ -437,6 +437,83 @@ impl Package {
         }
         Ok((data, digest))
     }
+
+    /// Health-only, read-only fingerprint. Uncompressed DBPF resources are
+    /// hashed in bounded 4 MiB positioned reads; compressed QFS resources
+    /// are decoded one at a time with cooperative cancellation. The bytes
+    /// and SHA-256 remain identical to data_with_digest(), but no resource
+    /// payload is retained in Package's scanner cache.
+    pub fn health_resource_digest(
+        &self,
+        entry: &ResourceEntry,
+    ) -> Result<([u8; 32], usize)> {
+        if entry.mem_size > MAX_RESOURCE_MEMORY {
+            bail!(
+                "resource {} declares unsupported decompressed size {} bytes",
+                entry.key_string(),
+                entry.mem_size
+            );
+        }
+        if crate::operation::is_cancelled("health") {
+            bail!("{}", crate::operation::CANCELLED_ERROR);
+        }
+        match entry.compressed {
+            0x0000 => {
+                if entry.file_size != entry.mem_size {
+                    bail!(
+                        "resource {} is marked uncompressed but disk size {} != memory size {}",
+                        entry.key_string(),
+                        entry.file_size,
+                        entry.mem_size
+                    );
+                }
+                const BLOCK: usize = 4 * 1024 * 1024;
+                let mut buffer = vec![0u8; BLOCK.min((entry.file_size as usize).max(1))];
+                let mut hasher = Sha256::new();
+                let mut remaining = entry.file_size as usize;
+                let mut offset = entry.chunk_offset as u64;
+                while remaining > 0 {
+                    if crate::operation::is_cancelled("health") {
+                        bail!("{}", crate::operation::CANCELLED_ERROR);
+                    }
+                    let count = remaining.min(buffer.len());
+                    read_exact_at(&self.data_file, offset, &mut buffer[..count])?;
+                    hasher.update(&buffer[..count]);
+                    offset += count as u64;
+                    remaining -= count;
+                }
+                Ok((hasher.finalize().into(), entry.mem_size as usize))
+            }
+            0xFFFF => {
+                // The compressed resource is still decoded from a single QFS
+                // buffer. A malformed DBPF may claim a tiny decoded resource
+                // and a multi-gigabyte compressed payload. Reject that before
+                // allocating the input; an ordinary Sims 3 resource should
+                // never need more than this single-resource safety bound.
+                const MAX_HEALTH_COMPRESSED_BYTES: u32 = 128 * 1024 * 1024;
+                if entry.file_size > MAX_HEALTH_COMPRESSED_BYTES {
+                    bail!(
+                        "resource {} declares unsupported compressed size {} bytes",
+                        entry.key_string(),
+                        entry.file_size
+                    );
+                }
+                let raw = self.raw_data(entry)?;
+                if crate::operation::is_cancelled("health") {
+                    bail!("{}", crate::operation::CANCELLED_ERROR);
+                }
+                let (decoded, digest) = compression::uncompress_stream_with_digest_cancellable(
+                    &raw, entry.file_size as usize, entry.mem_size as usize,
+                    || crate::operation::is_cancelled("health")
+                )?;
+                Ok((digest, decoded.len()))
+            }
+            other => bail!(
+                "resource {} uses unsupported compression flag 0x{other:04X}",
+                entry.key_string()
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -537,6 +614,58 @@ mod tests {
             .digest;
         assert_eq!(cached_after, Some(digest));
 
+        drop(package);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn health_rejects_absurd_qfs_resource_before_large_allocation() {
+        let path = std::env::temp_dir().join(format!(
+            "s3cc-oversized-qfs-{}.package", std::process::id()
+        ));
+        std::fs::write(&path, b"1234").unwrap();
+        let entry = ResourceEntry {
+            type_id: 0x0166_038C, group: 0, instance: 99,
+            chunk_offset: 0, file_size: 129 * 1024 * 1024,
+            mem_size: 4, compressed: 0xFFFF, unknown2: 0,
+            file_size_high_bit: false,
+        };
+        let package = Package {
+            path: path.clone(), major: 2, minor: 0, entries: vec![entry.clone()],
+            payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_file: Arc::new(File::open(&path).unwrap()),
+        };
+        let error = package.health_resource_digest(&entry).unwrap_err().to_string();
+        assert!(error.contains("unsupported compressed size"));
+        drop(package);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn health_streams_a_multi_block_payload_with_exact_sha256_and_no_payload_cache() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "s3cc-health-four-mib-{}-{unique}.package", std::process::id()
+        ));
+        let data = vec![0xACu8; 4 * 1024 * 1024 + 29];
+        std::fs::write(&path, &data).unwrap();
+        let entry = ResourceEntry {
+            type_id: 0x0166_038C, group: 0, instance: 53, chunk_offset: 0,
+            file_size: data.len() as u32, mem_size: data.len() as u32,
+            compressed: 0, unknown2: 0, file_size_high_bit: false,
+        };
+        let package = Package {
+            path: path.clone(), major: 2, minor: 0, entries: vec![entry.clone()],
+            payload_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_file: Arc::new(File::open(&path).unwrap()),
+        };
+        let (digest, size) = package.health_resource_digest(&entry).unwrap();
+        let expected: [u8; 32] = Sha256::digest(&data).into();
+        assert_eq!(digest, expected);
+        assert_eq!(size, data.len());
+        assert!(package.payload_cache.lock().unwrap().is_empty(),
+            "Health must not retain full resource bytes in scanner cache");
         drop(package);
         std::fs::remove_file(path).unwrap();
     }
