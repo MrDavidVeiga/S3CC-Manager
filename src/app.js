@@ -2697,7 +2697,11 @@ document.addEventListener("keydown", (event) => {
     closeAnalysisExplorerMenu();
   }
 });
-window.addEventListener("scroll", closeAnalysisExplorerMenu, true);
+window.addEventListener("scroll", (event) => {
+  if (activeAnalysisExplorerMenu && !activeAnalysisExplorerMenu.contains(event.target)) {
+    closeAnalysisExplorerMenu();
+  }
+}, true);
 
 async function revealSafe(path) {
   if (!path) return;
