@@ -245,35 +245,31 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
     let mut package_paths=Vec::new();
     let mut cache=load_cache(&root);
 
-    // Counting before parsing provides a bounded progress bar. Check for
-    // cancellation in both passes, including on very large Mods trees.
+    // Discover once and retain file entries. This gives a real denominator
+    // without walking the same library twice (expensive on large/slow drives).
     operation::update("health", 0, None, "discovering");
-    let mut total_files = 0usize;
+    let mut file_entries = Vec::new();
     for item in walkdir::WalkDir::new(&root).follow_links(false).into_iter() {
         if operation::is_cancelled("health") {
             return Err(operation::CANCELLED_ERROR.to_string());
         }
-        if let Ok(entry) = item {
-            if entry.file_type().is_file() { total_files += 1; }
+        match item {
+            Ok(entry) if entry.file_type().is_file() => file_entries.push(entry),
+            Ok(_) => {},
+            Err(error) => {
+                stats.scan_errors += 1;
+                let path = error.path().map(|p| rel(&root, p)).unwrap_or_default();
+                findings.push(finding("scan_error", "warning", &path, error.to_string()));
+            }
         }
     }
-    operation::set_total("health", total_files.saturating_add(4));
+    operation::set_total("health", file_entries.len().saturating_add(4));
     operation::update("health", 0, None, "analyzing");
     let mut processed_files = 0usize;
-    for item in walkdir::WalkDir::new(&root).follow_links(false).into_iter() {
+    for e in file_entries {
         if operation::is_cancelled("health") {
             return Err(operation::CANCELLED_ERROR.to_string());
         }
-        let e=match item {
-            Ok(entry)=>entry,
-            Err(error)=>{
-                stats.scan_errors+=1;
-                let path=error.path().map(|p|rel(&root,p)).unwrap_or_default();
-                findings.push(finding("scan_error","warning",&path,error.to_string()));
-                continue;
-            }
-        };
-        if !e.file_type().is_file(){continue;}
         processed_files += 1;
         operation::update("health", processed_files, Some(rel(&root, e.path())), "analyzing");
         let name=e.file_name().to_string_lossy();
