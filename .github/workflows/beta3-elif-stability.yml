@@ -1,0 +1,59 @@
+name: Beta 3 - Elif stability regressions
+
+on:
+  push:
+    branches:
+      - fix/beta3-elif-stability-20261024
+  pull_request:
+    branches:
+      - fix/canonical-category-folders-20261019
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Virtual lists and Health UI
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Install dependencies
+        run: npm install
+      - name: JavaScript syntax
+        run: node --check src/app.js
+      - name: Exercise expand-collapse and scroll logic
+        run: npm run test:beta3-elif-stability
+      - name: Existing expanded UI contracts
+        run: npm run test:expandable-analysis-ui
+      - name: Existing Health diagnostic contracts
+        run: npm run test:health-diagnostics
+      - name: Build frontend
+        run: npm run build
+
+  rust:
+    name: Backend diagnostic tests
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+      - name: Install frontend dependencies
+        run: npm install
+      - name: Restore icon
+        shell: pwsh
+        run: |
+          $raw = (Get-Content "src-tauri/icons/manager-icon.b64" -Raw).Trim()
+          [IO.File]::WriteAllBytes("src-tauri/icons/manager-icon.png", [Convert]::FromBase64String($raw))
+      - name: Generate icons
+        run: npm run tauri icon src-tauri/icons/manager-icon.png
+      - name: Rust regression tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib

@@ -4702,6 +4702,13 @@ button:disabled {
   contain: layout paint;
 }
 
+/* The browser owns scrollbar position while virtualized results are rebuilt.
+   Prevent scroll anchoring from competing with a dragged thumb. */
+.duplicates-list,
+.conflicts-list {
+  overflow-anchor: none;
+}
+
 .package-row,
 .duplicate-row,
 .conflict-row {
@@ -5209,6 +5216,7 @@ body:not(.utility-page) .right-panel {
 }
 .analysis-expandable-reason,
 .analysis-expandable-metrics { margin: 10px 0 0; color: var(--muted); font-size: .78rem; }
+.analysis-priority-winner { margin: 0; color: var(--text); font-size: .78rem; font-weight: 600; overflow-wrap: anywhere; }
 .analysis-comparison-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 9px; }
 .analysis-comparison-card {
   min-width: 0;

@@ -2186,7 +2186,10 @@ const state = {
 if (!LANGUAGE_ORDER.includes(state.language)) state.language = "en";
 
 const MANAGER_ROW_STRIDE = 66;
-const ANALYSIS_ROW_STRIDE = 62;
+// A collapsed result has a 53px header, 2px border and 9px row gap.
+const ANALYSIS_ROW_STRIDE = 64;
+const ANALYSIS_ROW_GAP = 9;
+const ANALYSIS_COLLAPSED_HEIGHT = 55;
 const VIRTUAL_OVERSCAN = 10;
 const SEARCH_DEBOUNCE_MS = 100;
 
@@ -4836,14 +4839,9 @@ function createDuplicateFindingRow(finding) {
 
 function replaceAnalysisListKeepingScroll(container, content) {
   if (!container) return;
-  const scrollTop = container.scrollTop;
+  // Do not replay a stale scrollTop on the next animation frame. That used to
+  // fight native thumb dragging and snap the list back while scrolling.
   container.replaceChildren(content);
-  container.scrollTop = scrollTop;
-  if (scrollTop > 0) {
-    window.requestAnimationFrame(() => {
-      if (container.isConnected) container.scrollTop = scrollTop;
-    });
-  }
 }
 
 function legacyRenderDuplicateVirtualRows(findings, force = false) {
@@ -4882,52 +4880,103 @@ function legacyRenderDuplicateVirtualRows(findings, force = false) {
   replaceAnalysisListKeepingScroll(el.duplicatesList, fragment);
 }
 
-function renderDuplicateVirtualRows(findings, force = false) {
-  el.duplicatesList.dataset.fluentCount = String(findings.length);
+// Keep a single expanded result in a virtualized list. Expanding must not
+// rebuild every finding, which previously froze large libraries and corrupted
+// the scrollbar geometry when the list switched between rendering modes.
+function analysisVirtualRange(container, itemCount, expandedIndex, extraHeight) {
+  const viewport = Math.max(container?.clientHeight || 0, 420);
+  const scrollTop = Math.max(0, container?.scrollTop || 0);
+  const indexForPosition = (y) => {
+    if (expandedIndex < 0) return Math.floor(y / ANALYSIS_ROW_STRIDE);
+    const expandedTop = expandedIndex * ANALYSIS_ROW_STRIDE;
+    if (y < expandedTop) return Math.floor(y / ANALYSIS_ROW_STRIDE);
+    if (y < expandedTop + ANALYSIS_ROW_STRIDE + extraHeight) return expandedIndex;
+    return Math.floor((y - extraHeight) / ANALYSIS_ROW_STRIDE);
+  };
+  const start = Math.max(0, Math.min(itemCount, indexForPosition(scrollTop) - VIRTUAL_OVERSCAN));
+  const end = Math.max(start, Math.min(itemCount, indexForPosition(scrollTop + viewport) + VIRTUAL_OVERSCAN + 1));
+  return { start, end };
+}
+
+function analysisVirtualSpacer(count, additionalHeight = 0) {
+  // Flex gap already accounts for the boundary between a spacer and its
+  // neighbouring row. Do not count this gap twice.
+  return virtualSpacer(Math.max(0, count * ANALYSIS_ROW_STRIDE - ANALYSIS_ROW_GAP + additionalHeight));
+}
+
+function renderExpandableAnalysisRows(container, view, findings, expandedId, createRow, idKey, force = false) {
+  if (!container) return;
+  container.dataset.fluentCount = String(findings.length);
   if (!findings.length) {
+    view.items = null;
+    view.expandedId = "";
+    view.extraHeight = 0;
+    view.resizeObserver?.disconnect();
+    view.resizeObserver = null;
     const empty = document.createElement("div");
     empty.className = "list-empty";
-    empty.textContent = t("noDuplicateFindings");
-    replaceAnalysisListKeepingScroll(el.duplicatesList, empty);
+    empty.textContent = idKey === "duplicateId" ? t("noDuplicateFindings") : t("noConflictFindings");
+    container.replaceChildren(empty);
     return;
   }
-  // One expanded row uses normal flow so its details can determine its own
-  // height. Collapsed rows retain virtualization for large analyses.
-  if (state.duplicateExpandedId) {
-    if (!findings.some((finding) => finding.id === state.duplicateExpandedId)) {
-      state.duplicateExpandedId = "";
-    }
-  }
-  if (state.duplicateExpandedId) {
-    const fragment = document.createDocumentFragment();
-    for (let index = 0; index < findings.length; index += 1) {
-      const row = createDuplicateFindingRow(findings[index]);
-      row.dataset.fluentIndex = String(index);
-      fragment.appendChild(row);
-    }
-    replaceAnalysisListKeepingScroll(el.duplicatesList, fragment);
-    return;
-  }
-  const view = virtualViews.duplicates;
-  const changed = view.items !== findings;
+
+  const expandedIndex = expandedId ? findings.findIndex((item) => item.id === expandedId) : -1;
+  const activeExpandedId = expandedIndex >= 0 ? expandedId : "";
+  const changed = view.items !== findings || view.expandedId !== activeExpandedId;
   if (changed) {
     view.items = findings;
+    view.expandedId = activeExpandedId;
+    view.extraHeight = 0;
     view.start = -1;
     view.end = -1;
   }
-  const { start, end } = virtualRange(el.duplicatesList, findings.length, ANALYSIS_ROW_STRIDE);
+  const extra = expandedIndex >= 0 ? (view.extraHeight || 0) : 0;
+  const { start, end } = analysisVirtualRange(container, findings.length, expandedIndex, extra);
   if (!force && !changed && start === view.start && end === view.end) return;
   view.start = start;
   view.end = end;
+  view.resizeObserver?.disconnect();
+  view.resizeObserver = null;
+
   const fragment = document.createDocumentFragment();
-  if (start > 0) fragment.appendChild(virtualSpacer(start * ANALYSIS_ROW_STRIDE));
+  if (start > 0) {
+    fragment.appendChild(analysisVirtualSpacer(start, expandedIndex >= 0 && expandedIndex < start ? extra : 0));
+  }
+  let expandedRow = null;
   for (let index = start; index < end; index += 1) {
-    const row = createDuplicateFindingRow(findings[index]);
+    const row = createRow(findings[index]);
     row.dataset.fluentIndex = String(index);
+    if (index === expandedIndex) expandedRow = row;
     fragment.appendChild(row);
   }
-  if (end < findings.length) fragment.appendChild(virtualSpacer((findings.length - end) * ANALYSIS_ROW_STRIDE));
-  replaceAnalysisListKeepingScroll(el.duplicatesList, fragment);
+  if (end < findings.length) {
+    fragment.appendChild(analysisVirtualSpacer(
+      findings.length - end, expandedIndex >= end ? extra : 0
+    ));
+  }
+  // Native scrolling owns scrollTop, even while the user drags the thumb.
+  container.replaceChildren(fragment);
+  if (expandedRow) {
+    const updateExpandedHeight = () => {
+      if (view.expandedId !== activeExpandedId) return;
+      view.extraHeight = Math.max(0, expandedRow.getBoundingClientRect().height - ANALYSIS_COLLAPSED_HEIGHT);
+    };
+    updateExpandedHeight();
+    if (typeof ResizeObserver !== "undefined") {
+      view.resizeObserver = new ResizeObserver(updateExpandedHeight);
+      view.resizeObserver.observe(expandedRow);
+    }
+  }
+}
+
+function renderDuplicateVirtualRows(findings, force = false) {
+  if (state.duplicateExpandedId && !findings.some((item) => item.id === state.duplicateExpandedId)) {
+    state.duplicateExpandedId = "";
+  }
+  renderExpandableAnalysisRows(
+    el.duplicatesList, virtualViews.duplicates, findings, state.duplicateExpandedId,
+    createDuplicateFindingRow, "duplicateId", force
+  );
 }
 
 function scheduleDuplicateVirtualRows() {
@@ -6024,6 +6073,15 @@ function appendConflictExpandableDetails(container, finding) {
   loadOrder.className = "analysis-expandable-metrics";
   loadOrder.textContent = `${conflictPriorityLabel(finding)} · ${loadOrderExplanation(finding)} · ${t("differentPayloadCount")}: ${finding.differentPayloadCount || 0} · ${t("conflictNewestHint")}`;
   container.appendChild(loadOrder);
+  // The detailed modal already shows the Resource.cfg winner. Surface the
+  // same evidence inline so a tester can tell which package wins without
+  // opening another dialog. Never infer a winner for tied/unmatched rules.
+  if (finding.loadOrderStatus === "resolved_by_priority" && finding.higherPriorityPath) {
+    const precedence = document.createElement("p");
+    precedence.className = "analysis-priority-winner";
+    precedence.textContent = `${t("likelyHigherPriority")}: ${finding.higherPriorityPath}`;
+    container.appendChild(precedence);
+  }
   const actions = document.createElement("div");
   actions.className = "analysis-inline-actions";
   for (const [label, mark] of [[t("markIntentional"), "intentional"], [t("ignoreSession"), "ignored"], [t("clearMark"), null]]) {
@@ -6145,48 +6203,13 @@ function legacyRenderConflictVirtualRows(findings, force = false) {
 }
 
 function renderConflictVirtualRows(findings, force = false) {
-  el.conflictsList.dataset.fluentCount = String(findings.length);
-  if (!findings.length) {
-    const empty = document.createElement("div");
-    empty.className = "list-empty";
-    empty.textContent = t("noConflictFindings");
-    el.conflictsList.replaceChildren(empty);
-    return;
-  }
-  if (state.conflictExpandedId && !findings.some((finding) => finding.id === state.conflictExpandedId)) {
+  if (state.conflictExpandedId && !findings.some((item) => item.id === state.conflictExpandedId)) {
     state.conflictExpandedId = "";
   }
-  if (state.conflictExpandedId) {
-    const fragment = document.createDocumentFragment();
-    for (let index = 0; index < findings.length; index += 1) {
-      const row = createConflictFindingRow(findings[index]);
-      row.dataset.fluentIndex = String(index);
-      fragment.appendChild(row);
-    }
-    el.conflictsList.replaceChildren(fragment);
-    return;
-  }
-  const view = virtualViews.conflicts;
-  const changed = view.items !== findings;
-  if (changed) {
-    view.items = findings;
-    view.start = -1;
-    view.end = -1;
-    el.conflictsList.scrollTop = 0;
-  }
-  const { start, end } = virtualRange(el.conflictsList, findings.length, ANALYSIS_ROW_STRIDE);
-  if (!force && !changed && start === view.start && end === view.end) return;
-  view.start = start;
-  view.end = end;
-  const fragment = document.createDocumentFragment();
-  if (start > 0) fragment.appendChild(virtualSpacer(start * ANALYSIS_ROW_STRIDE));
-  for (let index = start; index < end; index += 1) {
-    const row = createConflictFindingRow(findings[index]);
-    row.dataset.fluentIndex = String(index);
-    fragment.appendChild(row);
-  }
-  if (end < findings.length) fragment.appendChild(virtualSpacer((findings.length - end) * ANALYSIS_ROW_STRIDE));
-  el.conflictsList.replaceChildren(fragment);
+  renderExpandableAnalysisRows(
+    el.conflictsList, virtualViews.conflicts, findings, state.conflictExpandedId,
+    createConflictFindingRow, "conflictId", force
+  );
 }
 
 function scheduleConflictVirtualRows() {
@@ -8373,11 +8396,12 @@ async function addCustomRule() {
 
 async function analyzeHealth() {
   if (!state.folder || toolsOperationLocked()) return;
-  state.toolsBusy = true; state.toolsError = ""; beginToolsOperation("health");
+  state.toolsBusy = true; state.toolsError = ""; state.toolsNotice = ""; beginToolsOperation("health");
   renderTools();
   try {
     state.healthReport = await invoke("analyze_mods_health", { folder: state.folder });
     state.healthSelected.clear();
+    state.toolsNotice = t("executionComplete");
     showOperationResult({
       title: t("health"),
       summary: t("executionComplete"),
@@ -8387,8 +8411,13 @@ async function analyzeHealth() {
       ],
     });
   } catch (error) {
-    state.toolsError = String(error);
-    showOperationResult({ state: "error", summary: state.toolsError, warnings: [state.toolsError] });
+    if (String(error).includes("__S3CC_OPERATION_CANCELLED__")) {
+      state.toolsNotice = t("cancelled");
+      state.toolsError = "";
+    } else {
+      state.toolsError = String(error);
+      showOperationResult({ state: "error", summary: state.toolsError, warnings: [state.toolsError] });
+    }
   }
   finally { state.toolsBusy = false; state.toolsOperation = null; renderTools(); }
 }

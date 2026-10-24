@@ -104,7 +104,7 @@ assert.match(appSource,/el\.duplicatesList\.dataset\.fluentCount/);
 assert.match(appSource,/el\.conflictsList\.dataset\.fluentCount/);
 assert.equal((appSource.match(/row\.dataset\.fluentIndex = String\(index\)/g)||[]).length,3);
 assert.match(appSource,/MANAGER_ROW_STRIDE = 66/);
-assert.match(appSource,/ANALYSIS_ROW_STRIDE = 62/);
+assert.match(appSource,/ANALYSIS_ROW_STRIDE = 64/);
 const scroll=read("src/ui/fluent/scrollbars.css");
 assert.match(scroll,/::-webkit-scrollbar-thumb:hover/);
 assert.match(scroll,/scrollbar-width: auto/);

@@ -91,6 +91,7 @@ fn rel(root:&Path,path:&Path)->String{
 fn empty_dirs(root:&Path)->Vec<String>{
     let mut out=Vec::new();
     for e in walkdir::WalkDir::new(root).follow_links(false).min_depth(1).into_iter().filter_map(Result::ok){
+        if operation::is_cancelled("health") { break; }
         if !e.file_type().is_dir(){continue;}
         let is_empty=fs::read_dir(e.path()).map(|mut it|it.next().is_none()).unwrap_or(false);
         if is_empty{out.push(rel(root,e.path()));}
@@ -108,6 +109,7 @@ fn outside_packages(root:&Path)->Vec<String>{
     for branch in [mods_root.join("Packages"), mods_root.join("Overrides")] {
         if !branch.is_dir(){continue;}
         for item in walkdir::WalkDir::new(&branch).follow_links(false).into_iter() {
+            if operation::is_cancelled("health") { return out; }
             let Ok(entry)=item else { continue };
             if !entry.file_type().is_file() || !is_package(entry.path()) || entry.path().starts_with(root){continue;}
             let Ok(path)=entry.path().canonicalize() else { continue };
@@ -243,21 +245,31 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
     let mut package_paths=Vec::new();
     let mut cache=load_cache(&root);
 
-    let mut processed_files = 0usize;
+    // Discover once and retain file entries. This gives a real denominator
+    // without walking the same library twice (expensive on large/slow drives).
+    operation::update("health", 0, None, "discovering");
+    let mut file_entries = Vec::new();
     for item in walkdir::WalkDir::new(&root).follow_links(false).into_iter() {
         if operation::is_cancelled("health") {
             return Err(operation::CANCELLED_ERROR.to_string());
         }
-        let e=match item {
-            Ok(entry)=>entry,
-            Err(error)=>{
-                stats.scan_errors+=1;
-                let path=error.path().map(|p|rel(&root,p)).unwrap_or_default();
-                findings.push(finding("scan_error","warning",&path,error.to_string()));
-                continue;
+        match item {
+            Ok(entry) if entry.file_type().is_file() => file_entries.push(entry),
+            Ok(_) => {},
+            Err(error) => {
+                stats.scan_errors += 1;
+                let path = error.path().map(|p| rel(&root, p)).unwrap_or_default();
+                findings.push(finding("scan_error", "warning", &path, error.to_string()));
             }
-        };
-        if !e.file_type().is_file(){continue;}
+        }
+    }
+    operation::set_total("health", file_entries.len().saturating_add(4));
+    operation::update("health", 0, None, "analyzing");
+    let mut processed_files = 0usize;
+    for e in file_entries {
+        if operation::is_cancelled("health") {
+            return Err(operation::CANCELLED_ERROR.to_string());
+        }
         processed_files += 1;
         operation::update("health", processed_files, Some(rel(&root, e.path())), "analyzing");
         let name=e.file_name().to_string_lossy();
@@ -300,7 +312,10 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
                             "Valid DBPF package with zero indexed resources."));
                     }
                     let mut seen=HashSet::new();
-                    for resource in &cached.resources {
+                    for (index, resource) in cached.resources.iter().enumerate() {
+                        if index % 256 == 0 && operation::is_cancelled("health") {
+                            return Err(operation::CANCELLED_ERROR.to_string());
+                        }
                         if !seen.insert((resource.type_id,resource.group,resource.instance)) {
                             stats.repeated_tgis+=1;
                             findings.push(finding("repeated_tgi","warning",&relative,
@@ -336,18 +351,33 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
             rule:priority.map(|p|p.rule),
         });
     }
+    if operation::is_cancelled("health") {
+        return Err(operation::CANCELLED_ERROR.to_string());
+    }
     retain_existing(&mut cache,&package_paths);
     if let Err(error)=save_cache(&root,&cache){
         findings.push(finding("cache_warning","warning","Health cache",error));
     }
+    operation::update("health", processed_files.saturating_add(1), None, "finalizing");
+    if operation::is_cancelled("health") {
+        return Err(operation::CANCELLED_ERROR.to_string());
+    }
     coverage.sort_by_key(|e|e.relative_path.to_ascii_lowercase());
     let empty=empty_dirs(&root);
+    if operation::is_cancelled("health") {
+        return Err(operation::CANCELLED_ERROR.to_string());
+    }
+    operation::update("health", processed_files.saturating_add(2), None, "finalizing");
     stats.empty_folders=empty.len();
     for path in &empty {
         findings.push(finding("empty_folder","info",path,
             "Directory is empty; removal requires explicit confirmation."));
     }
     let outside=outside_packages(&root);
+    if operation::is_cancelled("health") {
+        return Err(operation::CANCELLED_ERROR.to_string());
+    }
+    operation::update("health", processed_files.saturating_add(3), None, "finalizing");
     stats.packages_outside_root=outside.len();
     for path in &outside {
         findings.push(finding("outside_packages","info",path,
@@ -357,6 +387,10 @@ fn analyze_mods_health_core(folder:String)->Result<ModsHealthReport,String>{
         .cmp(&b.relative_path.to_ascii_lowercase())
         .then_with(||a.category.cmp(&b.category))
         .then_with(||a.detail.cmp(&b.detail)));
+    if operation::is_cancelled("health") {
+        return Err(operation::CANCELLED_ERROR.to_string());
+    }
+    operation::update("health", processed_files.saturating_add(4), None, "finalizing");
     Ok(ModsHealthReport{
         root:root.to_string_lossy().to_string(),stats,empty_folders:empty,
         unreadable_packages:unreadable,outside_packages:outside,coverage,resource_cfg,
