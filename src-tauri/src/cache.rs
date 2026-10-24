@@ -1,4 +1,4 @@
-use crate::{dbpf::Package, manifest::sha256_file};
+use crate::{dbpf::Package, manifest::sha256_file, operation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,6 +19,35 @@ const IDENTITY_CACHE_VERSION: u32 = 1;
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
+
+fn ensure_analysis_not_cancelled(kind: Option<&str>) -> Result<(), String> {
+    if kind.is_some_and(operation::is_cancelled) {
+        return Err(operation::CANCELLED_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// Stream file identity on the cold Health path, checking cancellation after
+/// each 4 MiB block. Other users retain their original full-integrity path.
+fn sha256_file_health(path: &Path) -> Result<(String, u64), String> {
+    const BLOCK: usize = 4 * 1024 * 1024;
+    let mut file = File::open(path)
+        .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let size = file.metadata()
+        .map_err(|error| format!("Could not stat {}: {error}", path.display()))?.len();
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; BLOCK.min((size as usize).max(1))];
+    loop {
+        ensure_analysis_not_cancelled(Some("health"))?;
+        let count = file.read(&mut buffer)
+            .map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+        if count == 0 { break; }
+        hasher.update(&buffer[..count]);
+    }
+    ensure_analysis_not_cancelled(Some("health"))?;
+    Ok((format!("{:X}", hasher.finalize()), size))
 }
 
 fn cache_write_lock() -> &'static Mutex<()> {
@@ -681,7 +710,7 @@ pub fn get_or_build_with_metrics(
     path: &Path,
     cache: &mut FingerprintCache,
 ) -> Result<(CachedPackage, CacheBuildMetrics), String> {
-    get_or_build_with_validation(path, cache, true)
+    get_or_build_with_validation(path, cache, true, None)
 }
 
 /// Read-only UI/health consumers can use a bounded content probe. It avoids
@@ -692,7 +721,17 @@ pub fn get_or_build_analysis_with_metrics(
     path: &Path,
     cache: &mut FingerprintCache,
 ) -> Result<(CachedPackage, CacheBuildMetrics), String> {
-    get_or_build_with_validation(path, cache, false)
+    get_or_build_with_validation(path, cache, false, None)
+}
+
+/// Health preserves the full resource integrity analysis and its shared cache,
+/// but reads uncompressed resource payloads in bounded blocks and can cancel
+/// during file hashing and QFS decompression.
+pub fn get_or_build_health_with_metrics(
+    path: &Path,
+    cache: &mut FingerprintCache,
+) -> Result<(CachedPackage, CacheBuildMetrics), String> {
+    get_or_build_with_validation(path, cache, false, Some("health"))
 }
 
 /// Stores a complete package resource index while the caller already owns a
@@ -935,7 +974,9 @@ fn get_or_build_with_validation(
     path: &Path,
     cache: &mut FingerprintCache,
     require_integrity: bool,
+    cancellation_kind: Option<&str>,
 ) -> Result<(CachedPackage, CacheBuildMetrics), String> {
+    ensure_analysis_not_cancelled(cancellation_kind)?;
     let total_started = Instant::now();
     let key = canonical_key(path)?;
     let (size, modified_ns) = metadata_signature(path)?;
@@ -986,8 +1027,12 @@ fn get_or_build_with_validation(
     }
 
     let hash_started = Instant::now();
-    let (file_sha256, _) =
-        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?;
+    let (file_sha256, _) = if cancellation_kind == Some("health") {
+        sha256_file_health(path)?
+    } else {
+        sha256_file(path).map_err(|error| format!("Could not hash {}: {error}", path.display()))?
+    };
+    ensure_analysis_not_cancelled(cancellation_kind)?;
     let hash_ms = hash_started.elapsed().as_millis();
     let hash_us = hash_started.elapsed().as_micros();
     if let Some(existing) = cache.entries.get(&key) {
@@ -1036,6 +1081,7 @@ fn get_or_build_with_validation(
             let mut resources = Vec::with_capacity(package.entries.len());
             let mut parse_error = None;
             for (entry_index, entry) in package.entries.iter().enumerate() {
+                ensure_analysis_not_cancelled(cancellation_kind)?;
                 if entry_index % 1000 == 0 && package.entries.len() >= 1000 {
                     eprintln!(
                         "reference cache: {} resource {}/{}",
@@ -1044,24 +1090,36 @@ fn get_or_build_with_validation(
                         package.entries.len()
                     );
                 }
-                let result = package.data_with_digest(entry);
+                // Health needs the same decoded payload SHA-256, but does not
+                // need to retain whole IMG/GEOM/TONE resources in memory.
+                // Use the one-resource streaming path instead of scanner cache.
+                let result = if cancellation_kind == Some("health") {
+                    package.health_resource_digest(entry).map(|(digest, size)| (size, digest))
+                } else {
+                    package.data_with_digest(entry).map(|(data, digest)| (data.len(), digest))
+                };
                 match result {
-                    Ok((data, payload_digest)) => resources.push(CachedResource {
+                    Ok((payload_size, payload_digest)) => resources.push(CachedResource {
                         type_id: entry.type_id,
                         group: entry.group,
                         instance: entry.instance,
                         payload_sha256: digest_hex(&payload_digest),
-                        payload_size: data.len(),
+                        payload_size,
                         file_size: entry.file_size,
                         mem_size: entry.mem_size,
                         compressed: entry.compressed,
                     }),
                     Err(error) => {
+                        if cancellation_kind == Some("health")
+                            && error.to_string().contains(operation::CANCELLED_ERROR) {
+                            return Err(operation::CANCELLED_ERROR.to_string());
+                        }
                         parse_error = Some(format!("{}: {error}", entry.key_string()));
                         break;
                     }
                 }
             }
+            ensure_analysis_not_cancelled(cancellation_kind)?;
 
             CachedPackage {
                 path: key.clone(),
@@ -1090,6 +1148,7 @@ fn get_or_build_with_validation(
     let resource_decode_ms = decode_started.elapsed().as_millis();
     let resource_decode_us = decode_started.elapsed().as_micros();
 
+    ensure_analysis_not_cancelled(cancellation_kind)?;
     cache.entries.insert(key, built.clone());
     Ok((
         built,
