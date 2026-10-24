@@ -1,0 +1,43 @@
+name: Beta 3 Embedded Duplicates Safety
+
+on:
+  push:
+    branches:
+      - feature/beta3-embedded-duplicates-20261024
+  pull_request:
+    branches:
+      - fix/canonical-category-folders-20261019
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+      - name: Install UI dependencies
+        run: npm install
+      - name: Restore application icon
+        shell: pwsh
+        run: |
+          $raw = (Get-Content "src-tauri/icons/manager-icon.b64" -Raw).Trim()
+          [IO.File]::WriteAllBytes("src-tauri/icons/manager-icon.png", [Convert]::FromBase64String($raw))
+      - name: Generate application icons
+        run: npm run tauri icon src-tauri/icons/manager-icon.png
+      - name: Check JavaScript grammar
+        run: node --check src/app.js
+      - name: Embedded duplication safety contracts
+        run: npm run test:embedded-duplicates-beta3
+      - name: Build UI
+        run: npm run build
+      - name: Test Rust decoder and manifest ownership
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
